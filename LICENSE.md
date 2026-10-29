@@ -1,6 +1,6 @@
 # 许可证
 
-本项目按文件与来源采用不同许可证。原创部分的维护者为 **yanei**，维护者已授权其原创代码按 MIT 发布；第三方原有代码及派生部分继续遵守对应条款。
+本项目按文件与来源采用不同许可证。**yanei** 的原创部分采用 MIT 许可证；第三方原有代码及派生部分继续遵守对应条款。
 
 | 范围 | 许可与通知 |
 | --- | --- |
@@ -16,4 +16,4 @@
 
 完整清单见 [license-inventory.json](license-inventory.json)，来源与修改说明见 [第三方清单](THIRD_PARTY_NOTICES.md)。许可证全文、版权声明与必要的修改通知需要一并保留。
 
-**当前许可证核对尚未全部完成。** 已将问题缩小为 GPU 的 GPL 来源/组合分发范围及 APSL 文件级通知，具体证据与待办见 [核对记录](docs/LICENSE_REVIEW.md)。Experimental / Work in Progress 只说明开发阶段，不是许可豁免。
+部分 GPU 代码的 GPL 适用范围、组合分发条件及 APSL 文件级通知仍在核对中，详见 [许可证说明](docs/LICENSE_REVIEW.md)。`Experimental / Work in Progress` 表示项目处于开发阶段，各文件的许可证仍然适用。

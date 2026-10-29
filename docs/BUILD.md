@@ -37,7 +37,7 @@ test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
 
 ## 2. 获取本项目
 
-先取得仓库访问权限。仓库为私有时，GitHub 登录账号需要能够读取它。
+使用具有仓库读取权限的 GitHub 账号获取源码。
 
 ```sh
 git clone https://github.com/youzjuzi/dipper-xnu.git
@@ -159,7 +159,7 @@ bash tools/build-loader-uefi.sh
 
 相关修改已包含在 `hackios-userland.patch`：`eagl.c`、`inject.c`、`inject_sb.c`、`net_test.m`、`mkjobs.py`、Mesa DRM 适配及构建脚本；Wi-Fi launchd 配置也包含在仓库中。需要从修改后的源码重新编译这些程序和库。
 
-**这一部分的完整命令仍待整理和验证。** 开发环境的历史打包步骤依赖已有目录、旧载荷及 `.new` 程序，不能直接作为从空目录开始的教程。
+**这一部分的完整构建命令仍待补齐和验证。** 开发环境的历史打包步骤依赖已有目录、旧载荷及 `.new` 程序，不能直接作为从空目录开始的教程。
 
 公开加载器中的开发设备分区 GUID 已替换为零占位符，分区边界仍来自历史实验布局。不要直接套用到自己的设备，也不要删除匹配和边界检查来强行启动。
 
