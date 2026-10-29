@@ -4,7 +4,8 @@
 
 ## 许可证
 
-- [ ] 确认 GPU 初始化表及驱动集成的许可适用范围。
+- [x] 确认 GPU 表的 Linux 派生来源，保留 GPL 声明、版权和许可证全文。
+- [ ] 取得完整的兼容 GPU 初始化来源或额外授权，解决与 APSL 内核组合的分发条件。
 - [ ] 补齐 APSL 文件级通知和修改日期。
 
 逐文件清单见 [license-inventory.json](../license-inventory.json)，具体问题见 [许可证说明](LICENSE_REVIEW.md)。

@@ -16,7 +16,19 @@
  bsd/dev/redwood_ufshc.c	standard
 --- /dev/null
 +++ b/bsd/dev/mi8_a630_hw_init.inc
-@@ -0,0 +1,451 @@
+@@ -0,0 +1,463 @@
++/* SPDX-License-Identifier: GPL-2.0-only
++ * Linux-derived A630 initialization data and ordering.
++ * Sources: Linux v7.2.10 drivers/gpu/drm/msm/adreno/a6xx_gpu.c
++ *          and drivers/gpu/drm/msm/adreno/a6xx_catalog.c.
++ * Copyright (c) 2017-2019 The Linux Foundation. All rights reserved.
++ * Copyright (C) 2013-2014 Red Hat
++ * Copyright (c) 2014,2017 The Linux Foundation. All rights reserved.
++ * Adapted for dipper by yanei, 2026; source notices added 2026-10-30.
++ * See LICENSES/GPL-2.0-only.txt and docs/GPU_LICENSE.md in dipper-xnu.
++ * This notice does not resolve licensing of a combination with APSL code.
++ */
++
 +/*
 + * TASK-002, Linux 7.2.10 a630 (0x06030001), SDM845 UBWC profile.
 + * reg is a WORD offset from the GPU mapping; only the writer multiplies by 4.

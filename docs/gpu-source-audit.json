@@ -1,0 +1,62 @@
+{
+  "date": "2026-10-30",
+  "table_original_sha256": "782ea9c121d1455a61be43ce136ebbc1b6e27c4ab8ea149c63c8ac2c2894b8f7",
+  "table_notices_sha256": "2845f3252d007bb50d9a44144348f9d7d2880ace60be97e53876123dcd865b1e",
+  "checks": {
+    "main_write_count": 180,
+    "hwcg_count": 105,
+    "hwcg_linux_symbol_values_identical": true,
+    "protect_count": 32,
+    "protect_linux_encoded_values_identical": true,
+    "fuchsia_protect_slots": 26,
+    "fuchsia_clock_gating_complete": false,
+    "preprocessed_table_unchanged": true,
+    "xnu_patch_replayed_file_hashes": 34,
+    "development_copy_unchanged": true
+  },
+  "sources": [
+    {
+      "label": "Linux v7.2.10 a6xx_gpu.c",
+      "url": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/gpu/drm/msm/adreno/a6xx_gpu.c?h=v7.2.10",
+      "license": "GPL-2.0",
+      "sha256": "833ec17decd679d0ae7738fa71843e009cb33012e138071cb7bb2c1a42ffe6d1"
+    },
+    {
+      "label": "Linux v7.2.10 a6xx_catalog.c",
+      "url": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/gpu/drm/msm/adreno/a6xx_catalog.c?h=v7.2.10",
+      "license": "GPL-2.0-only",
+      "sha256": "971fa1bb62af1faff1617202c964911fa3735927e2a71adf679b6320768402e7"
+    },
+    {
+      "label": "Fuchsia historical device source",
+      "url": "https://fuchsia.googlesource.com/fuchsia/+/d05398df901609c870db41e1558eeafcbf4320b7/src/graphics/drivers/msd-qcom-adreno/src/msd_qcom_device.cc",
+      "license": "BSD-3-Clause",
+      "sha256": "05078d8c3a87800d4d767e3c20dd94c4cea4bccced4447ff43eec65ac0c7b573"
+    },
+    {
+      "label": "Fuchsia historical registers",
+      "url": "https://fuchsia.googlesource.com/fuchsia/+/d05398df901609c870db41e1558eeafcbf4320b7/src/graphics/drivers/msd-qcom-adreno/src/registers.h",
+      "license": "BSD-3-Clause",
+      "sha256": "df4312ed190fd09bea7180660c820c3ad4a77f46545793db3f564d69c00d9705"
+    },
+    {
+      "label": "Fuchsia license",
+      "url": "https://fuchsia.googlesource.com/fuchsia/+/d05398df901609c870db41e1558eeafcbf4320b7/LICENSE",
+      "license": "BSD-3-Clause",
+      "sha256": "03b114f53e6587a398931762ee11e2395bfdba252a329940e2c8c9e81813845b"
+    },
+    {
+      "label": "Mesa 25.0.7 register XML",
+      "url": "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-25.0.7/src/freedreno/registers/adreno/a6xx.xml",
+      "license": "MIT-style register definitions; imported copyright",
+      "sha256": "bc3b6f256f5e0b8876661be248bb7994bbc79888d4f3962ffda7e5977c0e72a4"
+    },
+    {
+      "label": "Mesa register copyright",
+      "url": "https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-25.0.7/src/freedreno/registers/freedreno_copyright.xml",
+      "license": "MIT-style",
+      "sha256": "16e6fda4963d01a6d2fa6c938a26082d6f0afd0988db7f953c9e4dea38739f2f"
+    }
+  ],
+  "replacement_status": "PARTIAL_PERMISSIVE_SOURCES_ONLY; combined APSL/GPL distribution unresolved"
+}

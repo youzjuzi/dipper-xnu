@@ -1,5 +1,5 @@
 {
-  "review_date": "2026-10-29",
+  "review_date": "2026-10-30",
   "original_code_authorization": "Maintainer confirmed original human/AI-authored portions may use MIT; excludes third-party derivatives.",
   "files": [
     {
@@ -14,16 +14,16 @@
       "component": "xnu-mi8",
       "path": "bsd/dev/mi8_a630_hw_init.inc",
       "upstream_file_exists": false,
-      "license": "UNRESOLVED",
-      "basis": "Linux GPU tables/control sequence provenance; GPL-2.0 sources referenced; do not mark MIT",
-      "sha256": "782ea9c121d1455a61be43ce136ebbc1b6e27c4ab8ea149c63c8ac2c2894b8f7"
+      "license": "GPL-2.0-only",
+      "basis": "Linux-derived HWCG/protect data verified against v7.2.10; source copyright/SPDX and GPL text supplied; compatibility with linked APSL code remains unresolved",
+      "sha256": "2845f3252d007bb50d9a44144348f9d7d2880ace60be97e53876123dcd865b1e"
     },
     {
       "component": "xnu-mi8",
       "path": "bsd/dev/mi8_adreno.c",
       "upstream_file_exists": false,
       "license": "UNRESOLVED",
-      "basis": "Linux GPU tables/control sequence provenance; GPL-2.0 sources referenced; do not mark MIT",
+      "basis": "Direct #include and execution of GPL-derived table established; no MIT relicense or combination compatibility claim",
       "sha256": "321218a6dbc0212c6364eaf4cc92d5bf996fd6716288a8160ffcde05a3aedade"
     },
     {

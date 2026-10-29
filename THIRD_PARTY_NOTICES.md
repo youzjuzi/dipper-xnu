@@ -1,6 +1,6 @@
 # 第三方来源与修改记录
 
-更新日期：2026-10-29。上游版本见 `upstream.lock.json`，适配文件及其内容摘要见 `source-manifest.json`。补丁包含 dipper 平台适配，原有第三方版权和许可声明继续适用。
+更新日期：2026-10-30。上游版本见 `upstream.lock.json`，适配文件及其内容摘要见 `source-manifest.json`。补丁包含 dipper 平台适配，原有第三方版权和许可声明继续适用。
 
 | 来源 | 使用范围 | 许可证与通知 |
 |---|---|---|
@@ -18,6 +18,6 @@
 
 ## GPU 代码的许可范围
 
-Linux GPU 初始化表不同于 ISC ath10k：其 a6xx_gpu.c/a6xx_catalog.c 来源标为 GPL-2.0/GPL-2.0-only，组合分发许可尚未解决。该部分不能标作 MIT。详细来源和待核对范围见 [许可证说明](docs/LICENSE_REVIEW.md)。
+Linux GPU 初始化表按 GPL-2.0-only 保留来源、版权及许可证全文，与 ISC ath10k 分开处理。该表由 APSL 内核驱动直接包含，组合分发条件尚未解决。Mesa/freedreno 与 Fuchsia 的宽松许可来源仅覆盖部分初始化；来源、差异和验证范围见 [GPU 许可说明](docs/GPU_LICENSE.md)。
 
 dipper 原创修改的作者为 yanei，其原创部分采用 MIT。第三方源文件声明及作者署名保留，不属于该 MIT 授权范围。

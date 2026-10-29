@@ -86,6 +86,6 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 
 ## 许可证
 
-各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围见 [许可说明](LICENSE.md) 和 [LICENSES](LICENSES/)。部分 GPU 代码的许可适用范围及 APSL 文件声明仍在核对中，详见 [许可证说明](docs/LICENSE_REVIEW.md)。
+各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围见 [许可说明](LICENSE.md) 和 [LICENSES](LICENSES/)。GPU 初始化表沿用其 GPL-2.0-only 来源许可，与 APSL 内核组合的分发条件尚未解决，详见 [GPU 许可说明](docs/GPU_LICENSE.md)。其他文件的许可范围见 [许可证说明](docs/LICENSE_REVIEW.md)。
 
 本项目为独立研究项目，与设备厂商、系统厂商及所参考项目不存在官方隶属关系。
