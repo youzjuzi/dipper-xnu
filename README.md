@@ -1,5 +1,7 @@
 # dipper-xnu
 
+**Experimental / Work in Progress**
+
 面向 `dipper`（SDM845）的 XNU 与移动用户空间实验性移植项目。
 
 基于 [HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) 的工作，为 `dipper` 适配启动、显示、触摸、A630 GPU 和 WCN3990 Wi-Fi。目前已有进入 SpringBoard 桌面、GPU 渲染、触摸操作及通过 Wi-Fi 使用 Safari 的实机记录。
@@ -84,6 +86,6 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 
 ## 许可证
 
-各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围与仍待核对的归属见 [许可说明](LICENSE.md) 和 [LICENSES](LICENSES/)。
+各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围见 [许可说明](LICENSE.md) 和 [LICENSES](LICENSES/)。本次发现的 GPU 来源许可及 APSL 通知问题见 [许可证核对记录](docs/LICENSE_REVIEW.md)，尚未完成公开发布前的许可核对。
 
 本项目为独立研究项目，与设备厂商、系统厂商及所参考项目不存在官方隶属关系。

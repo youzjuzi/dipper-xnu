@@ -1,3 +1,6 @@
+# Copyright (c) 2026, UniXNU contributors. All rights reserved.
+# SPDX-License-Identifier: BSD-2-Clause-Patent
+# Modified by yanei for dipper; distribution notices updated 2026-10-29.
 ## @file
 #  Registers a Boot#### option "XNU Loader" for the loader application stored in this firmware volume
 #  (file GUID below). Adapted from UniXNU's UniXNUDxe (BSD-2-Clause-Patent). The option goes to the END of

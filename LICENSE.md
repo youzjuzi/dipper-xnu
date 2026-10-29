@@ -1,13 +1,19 @@
-# 许可范围
+# 许可证
 
-本项目包含多种来源，**不存在覆盖所有文件的统一 MIT 授权**。
+本项目按文件与来源采用不同许可证。原创部分的维护者为 **yanei**，维护者已授权其原创代码按 MIT 发布；第三方原有代码及派生部分继续遵守对应条款。
 
-- 本次新增的发布文档及 `tools/prepare.py`、`tools/build-loader-uefi.sh`：MIT，见 `LICENSES/MI8-packaging-MIT.txt`。
-- 基于 HackiOS/XNU 的内核补丁：保留原文件适用的 APSL 2.0 及其他逐文件许可；见 `LICENSES/APSL-2.0.txt`。补丁不改变原文件许可。
-- HackiOS 用户空间上游根许可证为 MIT；独立第三方部分继续适用其自身条款，见 `LICENSES/HackiOS-userland-MIT.txt`。
-- edk2、SimpleInit、UniXNU 派生内容分别保留原许可；见 `LICENSES/` 与第三方清单。
-- 标有 ISC 的 WLFW 等代码继续适用 ISC；原版权头保留，许可证正文见 `LICENSES/ISC.txt`。
+| 范围 | 许可与通知 |
+| --- | --- |
+| 原创文档、发布脚本、独立配置/兼容头及清单中确认的原创模块 | [MIT](LICENSES/MI8-packaging-MIT.txt)，具体补丁内原创模块见 [核对记录](docs/LICENSE_REVIEW.md#原创-mit-范围) |
+| XNU/HackiOS 派生内核和加载器修改 | [APSL 2.0](LICENSES/APSL-2.0.txt)，原文件其他声明继续适用 |
+| WLFW 的 ISC 文件 | [ISC](LICENSES/ISC.txt) 及文件内 Linux Foundation/Qualcomm 版权 |
+| HackiOS 用户空间修改 | [上游 MIT](LICENSES/HackiOS-userland-MIT.txt) |
+| edk2-sdm845 平台修改 | [平台许可证](LICENSES/edk2-sdm845.txt) |
+| SimpleInit 中 malloc.c 的修改 | Intel 文件级 BSD 声明；见 [原通知](LICENSES/SimpleInit-malloc-notice.txt) 与 [历史许可](LICENSES/EDK2-License-History.txt)，不能仅按 SimpleInit 根 LGPL 判断 |
+| UniXNU 衍生 UEFI 注册器及库配置修改 | [BSD-2-Clause-Patent](LICENSES/UniXNU-package.txt) |
+| FreeBSD linux_80211.c 派生兼容函数 | [BSD-2-Clause 原通知](LICENSES/FreeBSD-linux_80211-BSD-2-Clause.txt) |
+| Linux 来源的 GPU 初始化表及集成 | **许可范围未解决，不授予 MIT 重许可**；详见核对记录 |
 
-导出补丁中包含新增文件和修改上下文。未明确标注许可的新文件，必须依据实际来源进一步核对，不能仅凭所在目录认定许可证。发布整理不会替第三方重新授权。
+完整清单见 [license-inventory.json](license-inventory.json)，来源与修改说明见 [第三方清单](THIRD_PARTY_NOTICES.md)。许可证全文、版权声明与必要的修改通知需要一并保留。
 
-在逐文件归属核对完成前，本目录应作为本地候选版审阅，不应标记为已完成许可证审计的正式开源版本。需要检查的项目见 `docs/RELEASE_CHECKLIST.md`。
+**当前许可证核对尚未全部完成。** 已将问题缩小为 GPU 的 GPL 来源/组合分发范围及 APSL 文件级通知，具体证据与待办见 [核对记录](docs/LICENSE_REVIEW.md)。Experimental / Work in Progress 只说明开发阶段，不是许可豁免。

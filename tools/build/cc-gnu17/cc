@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 # 为什么：新版 gcc 默认 C23，edk2 BaseTools 里的 Pccts(K&R 风格 C)在 C23 下编不过；
 # 把 PATH 指向本目录，让 cc/gcc 在调用方没指定 -std= 时按 gnu17 编译。不改第三方源码。（EXP-0010）
 for a in "$@"; do case "$a" in -std=*) exec /usr/bin/gcc "$@";; esac; done

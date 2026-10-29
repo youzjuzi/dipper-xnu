@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 yanei
+ */
 // 新版 edk2/Mu_Basecore 的 Library/FdtLib.h 导出驼峰命名的 Fdt* 封装；
 // 我们的 tianocore edk2 (2023-01) 只有 EmbeddedPkg/Include/libfdt.h（标准 fdt_* 函数）。这里把 UniXNU 实际用到的 13 个名字一一映射。
 // 由 EXP-0018 的脚本生成：对照 UniXNU 源码里出现的 Fdt* 名字与 libfdt.h 的声明。

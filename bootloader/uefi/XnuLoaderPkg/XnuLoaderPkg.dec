@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 ## @file
 #  XnuLoaderPkg: registers the HackiOS XNU loader (xnuloader/loader.efi) embedded in the firmware volume
 #  as a UEFI boot option, for the Mi 8 (dipper). EXP-0025.
