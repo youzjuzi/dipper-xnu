@@ -1,0 +1,41 @@
+## @file
+#  Registers a Boot#### option "XNU Loader" for the loader application stored in this firmware volume
+#  (file GUID below). Adapted from UniXNU's UniXNUDxe (BSD-2-Clause-Patent). The option goes to the END of
+#  BootOrder: it only appears in the boot menu, it is never started by itself.
+##
+
+[Defines]
+  INF_VERSION    = 0x00010019
+  BASE_NAME      = XnuLoaderDxe
+  FILE_GUID      = db99a07e-4e35-4491-957e-ef89c3dd57a0
+  MODULE_TYPE    = DXE_DRIVER
+  VERSION_STRING = 0.1
+  ENTRY_POINT    = XnuLoaderDxeEntry
+
+[Sources]
+  XnuLoaderDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DevicePathLib
+  MemoryAllocationLib
+  PrintLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+  UefiLib
+  UefiRuntimeServicesTableLib
+
+[Guids]
+  gEfiGlobalVariableGuid
+
+[Protocols]
+  gEfiFirmwareVolume2ProtocolGuid
+  gEfiLoadedImageProtocolGuid
+
+[Depex]
+  gEfiVariableArchProtocolGuid AND gEfiVariableWriteArchProtocolGuid

@@ -1,0 +1,393 @@
+[
+  {
+    "component": "xnu-mi8",
+    "base": "38a667e9a843441dbfa341ae80dedab79188df53",
+    "files": [
+      {
+        "path": "bsd/conf/files",
+        "sha256": "21ee8dc0f57ecebacc158585eecd21db4dd3bacff2557fe640532a92186f02fa",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_a630_hw_init.inc",
+        "sha256": "782ea9c121d1455a61be43ce136ebbc1b6e27c4ab8ea149c63c8ac2c2894b8f7",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_adreno.c",
+        "sha256": "321218a6dbc0212c6364eaf4cc92d5bf996fd6716288a8160ffcde05a3aedade",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_fts.c",
+        "sha256": "e0592a354c5c0113a0edb71f0215663a0584a98d643451c10d8607a9ab2f1875",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_glink.c",
+        "sha256": "5fbf242bd38cd60a603f84df9901017edf409cb4ac4f5c4efe805671527817ae",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_glink.h",
+        "sha256": "a84f7be7574c8bd26452108d463fb314f659cdde506c3c1fe221f3dd293017ab",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_hostsvc.c",
+        "sha256": "eafbc6d9864691d32ee47fd1a46bcb3ca1f60d4705ceac9cc70c7bf5803eab8a",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_hostsvc.h",
+        "sha256": "fcb7a609faca9af872311f7ada71ca19eb02562cbbe5a10c22af6a4189c451da",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_hostsvc_k.c",
+        "sha256": "f31e98b4a931b9b94e6a00e72cb46bcf501c2afaf997596d73005a0aaf5ee026",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_rproc.c",
+        "sha256": "4cdeab0eb3fd84e3df0ca2fe0bb2cf0c018539bcc24cf0d798bd93e58470d68d",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_wlfw.c",
+        "sha256": "d65be80c0080028114be0c2d3e8ce7ff115b89860b96915101b209215846e90f",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_wlfw.h",
+        "sha256": "b4abb0e88271c90dde6d1976d659a47d2e8a7fdc7d8260fa0216eb5f92c60b7b",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_wlfw_k.c",
+        "sha256": "1a5ab219cf21a3a6461d515b46438ae0e661c4718d5a47fd21e9e0f9248977db",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_wlfw_v01.c",
+        "sha256": "6e059c5a74c13fb53ba4cc764d9970bb3bf93c0867b5ab2efa02e3968f9c08ef",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_wlfw_v01.h",
+        "sha256": "ae24cfebc0868469a8001a7d6df8cfd02050e7dc3a404daadc06c8e414b04bb4",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/redwood_adreno.c",
+        "sha256": "298fc8c4cfc217bdd9b8da8ebce7d4c137a9fea918eabcc82cccc0e54597eaad",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/redwood_apple80211.c",
+        "sha256": "03a45956e6b65a543f9ad27c1492071625ebf9851fb97b9fe2bb9b5e35edcf04",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/redwood_buttons.c",
+        "sha256": "f2a5df3457740f141b29edee270cb70b7ec436de11263e54d2c6ce8d2b346733",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/redwood_cpufreq.c",
+        "sha256": "21d46c2cf751d49de89d1f4e0cc8198b97bb82b01d9af0d4b4a67c5b4fc5c8ec",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/redwood_haptic.c",
+        "sha256": "d2b84a349adf75cd934d9e350440d782c1d4ec9505a89aa05e7bee77479b7cd4",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/redwood_input.c",
+        "sha256": "41092996d6ec677b4e22cb0b20100bf21a7d60474af8da856ed3d8ea080d1559",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/redwood_lx.c",
+        "sha256": "1afeaa103a64af7a8261e7d7b018b1e8be8f59ba2070e8c9ae9855046c4a041f",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/redwood_net.c",
+        "sha256": "f2bdeb07f2ffb44e4f228227cdd7e4c5bdc71fa9d1e9d32ae511c225bb73c00f",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/redwood_torch.c",
+        "sha256": "7fea1f13c7aeb8c5da43e99a9e29eb3e215e7dbb5fd5890427e595fbd58490b0",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/redwood_ufs.c",
+        "sha256": "c8f20f22590312829312ebf9331a03e98fb5647d985223232520fba3213430c3",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/sys/mi8_lx.h",
+        "sha256": "a47ea5fcd10cefb4cc1ddd08409af6058914f8a93c349cc5720423a5b5b3bc33",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/sys/redwood_input.h",
+        "sha256": "5d3e7a8bd98718e0c5da95a34b25c99068d6b9c2bd8a973067d803fb023bb27c",
+        "mode": "0o664"
+      },
+      {
+        "path": "iokit/Kernel/MiniIOMobileFramebuffer.cpp",
+        "sha256": "946fca470628b7fcd1ad09ab576b6d8ee00b803daaa835b002d9186f20dcf566",
+        "mode": "0o664"
+      },
+      {
+        "path": "iokit/Kernel/MiniIOSurface.cpp",
+        "sha256": "87550be4076d18459f40396026bf84f95b8db86bb56cd261a0340d17c1170ce2",
+        "mode": "0o664"
+      },
+      {
+        "path": "iokit/Kernel/MiniIOSurface.h",
+        "sha256": "9f49bf2a1a80203ea7090396beb3d707a4b41e2b7df95fa850c8ceb5b8d1ee00",
+        "mode": "0o664"
+      },
+      {
+        "path": "iokit/Kernel/RedwoodGPU.cpp",
+        "sha256": "3bfca8e4dda50427a1d3367c53884fbfe995d4a1e2dc29198bdf1cd1af7db8a0",
+        "mode": "0o664"
+      },
+      {
+        "path": "osfmk/arm/io_map.c",
+        "sha256": "bc27f65a5d6357c7376923bcc51b89c5cbb160b85143571dd92eb897d859b9f3",
+        "mode": "0o664"
+      },
+      {
+        "path": "osfmk/arm64/gic_v3_irq.c",
+        "sha256": "c38493c6cd4707e161e37350881cc0daac2102c82aad7b189e99ed9f2ee825a7",
+        "mode": "0o664"
+      },
+      {
+        "path": "osfmk/arm64/loader_return.c",
+        "sha256": "267e2c8aeace17391daf38ca63c2544dae34713672b178de769b2faecb07f7d8",
+        "mode": "0o664"
+      }
+    ]
+  },
+  {
+    "component": "hackios-kernel",
+    "base": "8e61187098f2c26c5daee8f9f72b6416aa64b9ab",
+    "files": [
+      {
+        "path": "tools/mk-ath10k.sh",
+        "sha256": "0e9ab4c048343165336823680bfd27116e2b9caa842415d89e5e6aa6e30e3f50",
+        "mode": "0o775"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/acpi.h",
+        "sha256": "e030b2dcd802fddb1e6536789d7d7c43a1539a2393b42259fd0bfe8c9453017b",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/clk.h",
+        "sha256": "8029486cf80890344aa5ea8713e622a5416ecf45d94529c5cfb4f260a8429581",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/io.h",
+        "sha256": "4341eb653112f987b10bd3e71d50d8eb0789b5d81fba214e8549366aaf2b6d52",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/iommu.h",
+        "sha256": "c576d296df9f252885e3dcdd42ee1da53c14a43ef2df0d11998105225ef1a65d",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/nvmem-consumer.h",
+        "sha256": "f6eed518c84d266e9a8ab6823992bd05d498370fd9d1e749f7ba27acb9e56e07",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/of.h",
+        "sha256": "671739d8183f6c3513bb377cdce5989ea98ced4cf00d39b28cd647c7a6b69d47",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/of_device.h",
+        "sha256": "0697843d834fbbede85a8eaa6acad0af6524331df43d7c7e8f23c75e51eb9dd2",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/platform_device.h",
+        "sha256": "329b8dcaf2c02efd89c55fb0eea8e306a7ae794e2ab907546182331244d83fba",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/property.h",
+        "sha256": "90f3de9cbb92b4202fa8314efe7bbe29d6fc8447498e2d38ef564e6b6d2e8a6d",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/pwrseq/consumer.h",
+        "sha256": "126fb975dbe3b75dfca476df160526b4b488cddaecec37ccc1fc0edb2faf067f",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/qrtr.h",
+        "sha256": "e4e512a5c3a14992962f475bcea3c503a1d0171ce8a92e153f869d29d759b35a",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/regulator/consumer.h",
+        "sha256": "6f758d88d6d1a2dcd8926cd00415cc4401f07e26c52b40739c895c116f74cbbd",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/linux/remoteproc/qcom_rproc.h",
+        "sha256": "137e2bbf8c230157d01e83859ce4b04150194663414e43004de99e026c9113c9",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include-ath10k/lx_ath10k_prelude.h",
+        "sha256": "1d74ed2bc3dd8e570e553ffc357e1181c0ccc1a84dfa6b02e1c23a79c5b2ef0e",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include/lx_ath10k_cfg.h",
+        "sha256": "51c6a5465d8bb9568edacd56a4910e65eb319b455da653cb504ea26c179b6e0d",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/include/lx_wlfw.h",
+        "sha256": "d337afce019c6177541089c2ac23127906c22f9585d4dc966706b17719c5bd76",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/src-ath10k/lx_ath10k_bus.c",
+        "sha256": "5c41ba07216f41b345d24ae578aec20021231697c9994e30ec66a82a77358344",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/src-ath10k/lx_ath10k_gaps.c",
+        "sha256": "0d22f222124a4cf42a6358a73536fbde78ed3221c3dde509c9d3b9fa7c7cae49",
+        "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/src-ath10k/lx_ath10k_qmi.c",
+        "sha256": "d6c26f1a315022ba5cbc0ee055731b961f01db0ee8d53d4b148162338ffca990",
+        "mode": "0o664"
+      },
+      {
+        "path": "xnu-build.sh",
+        "sha256": "30a828aa10ca8bf3724c1dbadb120df1b34833851ba7ce59e2c6743640095874",
+        "mode": "0o775"
+      },
+      {
+        "path": "xnuloader/efi.h",
+        "sha256": "28446f4c395f716a535fe81dd16a1698427ab12898dea909df8424c21e99d3cd",
+        "mode": "0o664"
+      },
+      {
+        "path": "xnuloader/loader.c",
+        "sha256": "f108911bcd2378e2828fac4a9bc83a99de7488de1fa9b1ec15196f130827a5c2",
+        "mode": "0o664"
+      }
+    ]
+  },
+  {
+    "component": "hackios-userland",
+    "base": "906425b75e02b4f99eb5d7bb1ef7c9583472d772",
+    "files": [
+      {
+        "path": "tools/mesa/redwood-drm/redwood_drm.c",
+        "sha256": "f6bbb259b32b040e4cfd45a08f07c740abcb1c6247bd9e58e452299b6bde5ea4",
+        "mode": "0o664"
+      },
+      {
+        "path": "userland/build.sh",
+        "sha256": "d434907449bf49ee87978880c83fbd7906cd84af730194334093960a7eb73183",
+        "mode": "0o755"
+      },
+      {
+        "path": "userland/mkjobs.py",
+        "sha256": "19f5e9d85495a92f8faa597aea05703b13b32896690e9a52f4407daa0d6bb2bf",
+        "mode": "0o755"
+      },
+      {
+        "path": "userland/src/eagl.c",
+        "sha256": "a07fce664c957e3ed622c9e0e4db72885f86200ae6a86b7bbf1a036686eaaa58",
+        "mode": "0o644"
+      },
+      {
+        "path": "userland/src/inject.c",
+        "sha256": "2ccf00fa21017bacfc24868990cf6eaffd2ff6a23a3d65374f00be116d98b565",
+        "mode": "0o644"
+      },
+      {
+        "path": "userland/src/inject_sb.c",
+        "sha256": "ad66224d210942825cd6ff42440e4c3532f40a62e55f14e3092a48c3f22a1622",
+        "mode": "0o644"
+      },
+      {
+        "path": "userland/src/net_test.m",
+        "sha256": "4a7981cc03535968671b6d4978894ad87b5e017b1528caefa9680b93ed896778",
+        "mode": "0o644"
+      }
+    ]
+  },
+  {
+    "component": "edk2-sdm845",
+    "base": "e1952621f419f8db60ed28271264e1b5184c571d",
+    "files": [
+      {
+        "path": "Platform/Xiaomi/sdm845/dipper.dsc",
+        "sha256": "eeef79c5f8ae3e396fb78e1f83f862bef41dc228bcc81b2d8ff729261e89a55e",
+        "mode": "0o664"
+      },
+      {
+        "path": "Platform/Xiaomi/sdm845/dipper.fdf.inc",
+        "sha256": "734b676f9b871c2f78e9ad27e68de355d8dd6a247381aa7e253bc108223057b8",
+        "mode": "0o664"
+      },
+      {
+        "path": "Silicon/platform.sh.inc",
+        "sha256": "75f2628119d34688ce3b3ecb4ae1384230d06af911a1a77690bf8da258083114",
+        "mode": "0o664"
+      },
+      {
+        "path": "tools/BootShim/BootShim.S",
+        "sha256": "9c84609d436d2897e0cae841cb9f31c8eea340fc1178ad176974f0d08e6a7bee",
+        "mode": "0o664"
+      },
+      {
+        "path": "tools/BootShim/Makefile",
+        "sha256": "5d89b4dcd3f01b2dc833a0fabab5303ca03d1ea39d3dbc220ab4ce91ed723664",
+        "mode": "0o775"
+      }
+    ]
+  },
+  {
+    "component": "simpleinit",
+    "base": "29e062805776db5ab7a61d07ef040d43aed71161",
+    "files": [
+      {
+        "path": "libs/compatible/malloc.c",
+        "sha256": "9885be86703c93248f0e0d350839291b47de40aa0b6077cd2228f49d003366e3",
+        "mode": "0o664"
+      }
+    ]
+  },
+  {
+    "component": "unixnu",
+    "base": "97de9e715e06d77b8ebe7b80f6e556ee7ab9a7e9",
+    "files": [
+      {
+        "path": "package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf",
+        "sha256": "4bc82ea95b25e4303a702891e9334bb47f307dab606a38e43a4822d5b4c0ae41",
+        "mode": "0o664"
+      }
+    ]
+  }
+]

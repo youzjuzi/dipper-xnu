@@ -1,0 +1,27 @@
+[
+  {
+    "name": "hackios",
+    "url": "https://github.com/oosexgang/hackios-xnu-kernel.git",
+    "commit": "8e61187098f2c26c5daee8f9f72b6416aa64b9ab"
+  },
+  {
+    "name": "userland",
+    "url": "https://github.com/oosexgang/hackios-xnu-userland.git",
+    "commit": "906425b75e02b4f99eb5d7bb1ef7c9583472d772"
+  },
+  {
+    "name": "xnu",
+    "url": "https://github.com/apple-oss-distributions/xnu.git",
+    "commit": "c54f35ca767986246321eb901baf8f5ff7923f6a"
+  },
+  {
+    "name": "edk2",
+    "url": "https://github.com/edk2-porting/edk2-sdm845.git",
+    "commit": "e1952621f419f8db60ed28271264e1b5184c571d"
+  },
+  {
+    "name": "unixnu",
+    "url": "https://github.com/UniXNU/UniXNU.git",
+    "commit": "97de9e715e06d77b8ebe7b80f6e556ee7ab9a7e9"
+  }
+]

@@ -1,0 +1,110 @@
+--- a/Platform/Xiaomi/sdm845/dipper.dsc
++++ b/Platform/Xiaomi/sdm845/dipper.dsc
+@@ -14,7 +14,10 @@
+ !include Platform/Qualcomm/sdm845/sdm845.dsc
+ 
+ [BuildOptions.common]
+-  GCC:*_*_AARCH64_CC_FLAGS = -DENABLE_SIMPLE_INIT -DENABLE_LINUX_SIMPLE_MASS_STORAGE
++  GCC:*_*_AARCH64_CC_FLAGS = -DENABLE_SIMPLE_INIT -DENABLE_LINUX_SIMPLE_MASS_STORAGE -I$(MI8_ROOT)/bootloader/uefi-compat
++  # UniXNU/DarwinBoot 的 Entry.S 需要 Mu_Basecore 才有的 AsmMacroLib.h（转接头在 bootloader/uefi-compat）
++  GCC:*_*_AARCH64_ASM_FLAGS = -I$(MI8_ROOT)/bootloader/uefi-compat -I$(EDK2_ROOT)/ArmPkg/Include
++  GCC:*_*_AARCH64_PP_FLAGS = -I$(MI8_ROOT)/bootloader/uefi-compat -I$(EDK2_ROOT)/ArmPkg/Include
+ 
+ [PcdsFixedAtBuild.common]
+ 
+@@ -27,3 +30,14 @@
+   gRenegadePkgTokenSpaceGuid.PcdDeviceVendor|"Xiaomi"
+   gRenegadePkgTokenSpaceGuid.PcdDeviceProduct|"MI 8"
+   gRenegadePkgTokenSpaceGuid.PcdDeviceCodeName|"dipper"
++
++[LibraryClasses.common]
++  UniXNULib|UniXNUPkg/Library/UniXNULib/UniXNULib.inf
++
++[Components.common]
++  # UniXNU 启动管理器与 DarwinBoot（iBoot 角色），固件卷里的位置见 dipper.fdf.inc
++  # (removed, HackiOS route) UniXNUPkg/Application/UniXNU/UniXNU.inf
++  # (removed, HackiOS route) UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
++  # (removed, HackiOS route) DarwinBootPkg/Driver/DarwinBoot.inf
++  # HackiOS 加载器的 Boot#### 注册器（EXP-0025），加载器本体在 fdf 里以 FILE APPLICATION 嵌入
++  XnuLoaderPkg/Driver/XnuLoaderDxe/XnuLoaderDxe.inf
+--- a/Platform/Xiaomi/sdm845/dipper.fdf.inc
++++ b/Platform/Xiaomi/sdm845/dipper.fdf.inc
+@@ -20,4 +20,16 @@
+ // Mainline device tree blob
+ FILE FREEFORM = 25462CDA-221F-47DF-AC1D-259CFAA4E326 {
+   SECTION RAW = Platform/Xiaomi/sdm845/FdtBlob/sdm845-xiaomi-polaris.dtb
+-}
+\ No newline at end of file
++}
++
++// UniXNU boot manager, its Boot#### registrar and DarwinBoot (loader protocol provider)
++// (removed, HackiOS route) INF UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf
++// (removed, HackiOS route) INF DarwinBootPkg/Driver/DarwinBoot.inf
++// (removed, HackiOS route) INF UniXNUPkg/Application/UniXNU/UniXNU.inf
++
++// HackiOS xnuloader（EXP-0025）：预编译 PE，由 tools/build/build-xnuloader.sh 生成并复制到 XnuLoaderPkg/Binary；注册器见 XnuLoaderPkg
++INF XnuLoaderPkg/Driver/XnuLoaderDxe/XnuLoaderDxe.inf
++FILE APPLICATION = d82f808b-ecca-4bb8-8e9f-9b9bafc490f5 {
++  SECTION PE32 = XnuLoaderPkg/Binary/loader.efi
++  SECTION UI = "XnuLoader"
++}
+--- a/Silicon/platform.sh.inc
++++ b/Silicon/platform.sh.inc
+@@ -2,6 +2,7 @@
+ 	cat \
+ 		"${ROOTDIR}/tools/BootShim/BootShim.bin" \
+ 		"${WORKSPACE}/Build/${DEVICE}/${_MODE}_${TOOLCHAIN}/FV/${SOC_PLATFORM}_UEFI.fd" \
++		${XNU_PAYLOAD:+"${XNU_PAYLOAD}"} \
+ 		> "${WORKSPACE}/Build/${DEVICE}/${_MODE}_${TOOLCHAIN}/FV/${SOC_PLATFORM}_UEFI.fd-bootshim" \
+ 		||return "$?"
+ 	gzip -c \
+--- a/tools/BootShim/BootShim.S
++++ b/tools/BootShim/BootShim.S
+@@ -55,6 +55,27 @@
+ 	stp	x2, x3, [x5], #16
+ 	subs	x6, x6, #16
+ 	b.ne	_CopyLoop
++
++#ifdef PAYLOAD_BASE
++	/* x4 now points just past the FD: an optional "XNUP" payload (HackiOS kernel container) may follow */
++	ldr	w2, [x4]
++	movz	w3, #0x4E58
++	movk	w3, #0x5055, lsl #16
++	cmp	w2, w3
++	b.ne	_NoPayload
++	ldr	w6, [x4, #4]	/* Payload Size */
++	add	x6, x6, #23	/* Header + round up to 16 */
++	and	x6, x6, #~15
++	movz	x5, #(PAYLOAD_BASE >> 16), lsl #16
++
++_PayloadLoop:
++	ldp	x2, x3, [x4], #16
++	stp	x2, x3, [x5], #16
++	subs	x6, x6, #16
++	b.ne	_PayloadLoop
++
++_NoPayload:
++#endif
+ 	ldr	x5, _StackBase
+ 
+ _Entry:
+--- a/tools/BootShim/Makefile
++++ b/tools/BootShim/Makefile
+@@ -3,6 +3,8 @@
+ CROSS_COMPILE     = $(TARGET)-
+ CC                = $(CROSS_COMPILE)gcc
+ OBJCOPY           = $(CROSS_COMPILE)objcopy
++# where the shim leaves an "XNUP" payload that follows the FD (ignored when none is appended)
++PAYLOAD_BASE     ?= 0xF0000000
+ 
+ all: BootShim.elf BootShim.bin BootShim.Dualboot.elf BootShim.Dualboot.bin
+ 
+@@ -10,7 +12,7 @@
+ 	$(OBJCOPY) -O binary $< $@
+ 
+ BootShim.elf: BootShim.S
+-	$(CC) -c $< -o $@ -DUEFI_BASE=$(UEFI_BASE) -DUEFI_SIZE=$(UEFI_SIZE)
++	$(CC) -c $< -o $@ -DUEFI_BASE=$(UEFI_BASE) -DUEFI_SIZE=$(UEFI_SIZE) -DPAYLOAD_BASE=$(PAYLOAD_BASE)
+ 
+ BootShim.Dualboot.bin: BootShim.Dualboot.elf
+ 	$(OBJCOPY) -O binary $< $@

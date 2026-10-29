@@ -1,0 +1,1586 @@
+--- /dev/null
++++ b/tools/mk-ath10k.sh
+@@ -0,0 +1,188 @@
++#!/bin/bash
++# Linux 7.0.14 ath10k/snoc on the existing lx layer; qmi.c is replaced by the WLFW bridge.
++# ATH10K_ROOT may name an isolated staging tree containing the existing lx and XNU headers.
++set -euo pipefail
++shopt -s nullglob
++VERSION=7.0.14
++SHA256=de9999b784d2293f00d39c62d8f92a08ab8a54bc4e80ffd250a0c09cb07a0f98
++SCRIPT=$(readlink -f "$0")
++GLUE=$(cd "$(dirname "$SCRIPT")/../wifi/lx" && pwd)
++ROOT=${ATH10K_ROOT:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
++B=$ROOT/xnu-deps/build/ath10k
++ATH=drivers/net/wireless/ath
++COMMON="ath.h regd.h regd_common.h regd.c dfs_pattern_detector.h"
++mkdir -p "$B"
++cd "$B"
++
++if [ "$(cat src/.release 2>/dev/null)" != "$VERSION $SHA256 common-v2" ]; then
++	[ -f linux-$VERSION.tar.xz ] || {
++		curl -sSL --fail -o linux-$VERSION.tar.xz.part \
++			https://cdn.kernel.org/pub/linux/kernel/v${VERSION%%.*}.x/linux-$VERSION.tar.xz
++		mv linux-$VERSION.tar.xz.part linux-$VERSION.tar.xz
++	}
++	echo "$SHA256  linux-$VERSION.tar.xz" | sha256sum -c --quiet
++	rm -rf src unpacked
++	mkdir unpacked
++	tar xJf linux-$VERSION.tar.xz -C unpacked --strip-components=1 linux-$VERSION/$ATH/ath10k \
++		linux-$VERSION/$ATH/spectral_common.h $(for h in $COMMON; do echo linux-$VERSION/$ATH/$h; done)
++	# every file must say itself that it may be used so: the licence is checked, not assumed
++	for f in unpacked/$ATH/ath10k/*.[ch] unpacked/$ATH/spectral_common.h $(for h in $COMMON; do echo unpacked/$ATH/$h; done); do
++		case "$(head -6 "$f")" in
++		*"SPDX-License-Identifier: ISC"*) ;;
++		*"Permission to use, copy, modify, and/or distribute this software"*) ;;      # (ISC, spelt out)
++		*) echo "mk-ath10k.sh: $f does not carry the licence expected" >&2; exit 1 ;;
++		esac
++	done
++	mkdir src
++	mv unpacked/$ATH/ath10k src/ath10k
++	mv unpacked/$ATH/spectral_common.h src/
++	for h in $COMMON; do mv unpacked/$ATH/$h src/; done
++	rm -rf unpacked
++	echo "$VERSION $SHA256 common-v2" > src/.release
++fi
++[ "${1:-}" = fetch ] && { echo "mk-ath10k.sh: ath10k of Linux $VERSION: $B/src/ath10k"; exit 0; }
++W=$ROOT/wifi/lx
++
++# --- FreeBSD's LinuxKPI and the kernel headers under it, with our patches on top. When the patches
++# change, the tree is taken from the archive again (as tools/mk-mesa.sh does with Mesa's).
++FREEBSD=15.1
++FREEBSD_SHA256=cf5762da53fd52e1eaf0f9ceee9bf58cbe314c821031d0d9ffa76823185a89e1
++FSYS="compat/linuxkpi sys arm64/include net net80211 netinet netinet6 vm kern tools libkern ddb
++	security fs/pseudofs crypto opencrypto geom bsm isa cam rpc xdr x86/include ofed/include
++	dev/pci dev/ofw dev/fdt dev/acpica dev/usb dev/iicbus dev/backlight
++	contrib/ck/include contrib/dev/acpica/include contrib/libnv"
++PATCHES=$(cat "$W"/patches/*.patch 2>/dev/null | sha256sum | cut -d' ' -f1)
++if [ "$(cat freebsd/.release 2>/dev/null)" != "$FREEBSD $FREEBSD_SHA256 $PATCHES" ]; then
++	[ -f freebsd-$FREEBSD-src.txz ] || {
++		curl -sSL --fail -o freebsd-$FREEBSD-src.txz.part \
++			https://download.freebsd.org/releases/amd64/$FREEBSD-RELEASE/src.txz
++		mv freebsd-$FREEBSD-src.txz.part freebsd-$FREEBSD-src.txz
++	}
++	echo "$FREEBSD_SHA256  freebsd-$FREEBSD-src.txz" | sha256sum -c --quiet
++	rm -rf freebsd gen obj
++	mkdir freebsd
++	tar xJf freebsd-$FREEBSD-src.txz -C freebsd --strip-components=2 usr/src/COPYRIGHT \
++		$(for d in $FSYS; do echo usr/src/sys/$d; done)
++	for p in "$W"/patches/*.patch; do
++		[ -f "$p" ] && patch -s --no-backup-if-mismatch -d freebsd -p1 < "$p"
++	done
++	echo "$FREEBSD $FREEBSD_SHA256 $PATCHES" > freebsd/.release
++fi
++S=$B/freebsd/sys
++
++# --- what FreeBSD's build would have generated: the interfaces of its device framework, and the
++# option headers, which here say only that there is an Internet
++if [ ! -f gen/.complete ]; then
++	rm -rf gen
++	mkdir gen
++	(
++		cd gen
++		ln -s $S/arm64/include machine
++		for m in kern/device_if.m kern/bus_if.m dev/pci/pci_if.m dev/pci/pci_iov_if.m dev/pci/pcib_if.m \
++			dev/iicbus/iicbus_if.m dev/iicbus/iicbb_if.m dev/backlight/backlight_if.m dev/usb/usb_if.m \
++			dev/ofw/ofw_bus_if.m; do
++			awk -f $S/tools/makeobjops.awk $S/$m -h
++		done
++		for o in h p q; do awk -f $S/tools/vnode_if.awk $S/kern/vnode_if.src -$o; done
++		for o in $(grep -rhoE "opt_[a-z0-9_]+\.h" $S | sort -u) lkpi_iic_if.h; do : > $o; done
++		printf '#define INET 1\n#define INET6 1\n' > opt_inet.h
++		printf '#define INET6 1\n' > opt_inet6.h
++		printf '#define SMP 1\n' > opt_global.h
++		touch .complete
++	)
++fi
++
++# --- compile: the driver's files that are built so far, and ours
++DRIVER="core ce htc htt htt_rx htt_tx hw mac txrx wmi wmi-tlv snoc p2p"
++CC="clang -target arm64-apple-ios16.5"
++LD=$ROOT/xnu-deps/host/bin/ld64
++CFLAGS="-mkernel -mgeneral-regs-only -fno-builtin -fno-common -ffreestanding -fno-strict-aliasing
++	-funsigned-char -nostdinc -std=gnu17 -O2 -g -w
++	-D__FreeBSD__=15 -D_KERNEL -DKLD_MODULE -DHAVE_KERNEL_OPTION_HEADERS -include opt_global.h
++	-I$GLUE/include-ath10k -I$GLUE/include -isystem $W/include -isystem gen -isystem $S -isystem $S/contrib/ck/include
++	-isystem $S/compat/linuxkpi/common/include -isystem $S/compat/linuxkpi/dummy/include
++	-include $S/compat/linuxkpi/common/include/linux/kconfig.h -DLINUXKPI_VERSION=70000"
++DFLAGS="-isystem src/ath10k -isystem src -include $GLUE/include-ath10k/lx_ath10k_prelude.h -DCONFIG_ATH10K_SNOC -DCONFIG_ATH10K_DEBUG
++	-DKBUILD_MODNAME=\"ath10k\""
++# two headers are the kernel's: what it offers this object (wifi/lx/include/lx_os.h), and its QMI
++# helpers (wifi/lx/include/linux/soc/qcom/qmi.h)
++set +u
++source "$ROOT/xnu-env.sh"
++set -u
++for h in lx qmi; do
++	[ -f "$XNU_SRC/bsd/sys/redwood_$h.h" ] || { echo "mk-ath10k.sh: the kernel tree has no bsd/sys/redwood_$h.h" >&2; exit 1; }
++done
++DFLAGS="$DFLAGS -DLX_REDWOOD_LX_H=\"$XNU_SRC/bsd/sys/redwood_lx.h\" -DLX_REDWOOD_QMI_H=\"$XNU_SRC/bsd/sys/redwood_qmi.h\""
++mkdir -p obj out
++rm -f out/ath10k.o
++compile() {		# compile SOURCE OBJECT [FLAGS]: only when the object is older than anything it was made of
++	local src=$1 obj=$2
++	shift 2
++	if [ -f "$obj" ] && [ -f "$obj.d" ] && [ -z "$(find $(sed -e 's/^[^:]*://' -e 's/\\$//' "$obj.d") "$SCRIPT" -newer "$obj" 2>/dev/null | head -1 || true)" ]; then
++		return
++	fi
++	$CC $CFLAGS "$@" -MMD -MF "$obj.d" -c "$src" -o "$obj" 2> "$obj.err" || rm -f "$obj"
++}
++compile src/regd.c obj/ath_regd.o $DFLAGS &
++for f in $DRIVER; do compile src/ath10k/$f.c obj/ath10k_$f.o $DFLAGS & done
++LXSOURCES="$W/src/lx_base.c $W/src/lx_80211.c $W/src/lx_wpa.c $(echo "$GLUE"/src-ath10k/*.c)"
++for f in $LXSOURCES; do
++	case "$f" in
++	"$GLUE"/src-ath10k/*) CFLAGS="${CFLAGS// -w/}" compile "$f" obj/lx_$(basename "$f" .c).o $DFLAGS -I$W/src -Werror -Wall -Wextra -Wno-unused-parameter & ;;
++	*) compile "$f" obj/lx_$(basename "$f" .c).o $DFLAGS -I$W/src & ;;
++	esac
++done
++wait
++bad=
++for f in obj/*.err; do
++	if [ ! -f "${f%.err}" ]; then
++		echo "--- $(basename "$f" .o.err)"
++		cat "$f"
++		bad=1
++	fi
++done
++[ -z "$bad" ] || exit 1
++OBJECTS=$(echo obj/ath_regd.o; for f in $DRIVER; do echo obj/ath10k_$f.o; done; for f in $LXSOURCES; do echo obj/lx_$(basename "$f" .c).o; done)
++
++# --- tie it all into one object. What it then still wants is one of three things: a call of the
++# kernel's (redwood_lx.h; the QMI helpers; the handful of C library functions XNU has under the same
++# names with the same meaning), a function of a part of the driver that is not built yet, or a
++# mistake. The second kind gets a stub each that says its name and answers 0; anything else
++# missing ends the build.
++KERNEL="memcmp memcpy memmove memset strcmp strncmp strlen strchr strrchr strlcpy strlcat bzero
++	snprintf vsnprintf __stack_chk_fail __stack_chk_guard"
++$LD -r -arch arm64 $OBJECTS -o out/all.o 2> out/ld.err || { cat out/ld.err; exit 1; }
++llvm-nm -u --format=just-symbols out/all.o | sed 's/^_//' | sort > out/undefined.txt
++# These mac80211/packet helpers are deliberately not implemented in TASK-006.
++LX_GAPS="linuxkpi_cfg80211_calculate_bitrate linuxkpi_ieee80211_get_tid
++ linuxkpi_ieee80211_next_txq linuxkpi_ieee80211_schedule_txq linuxkpi_ieee80211_stop_queue
++ linuxkpi_ieee80211_tx_dequeue linuxkpi_ieee80211_txq_schedule_start linuxkpi_ieee80211_wake_queue
++ linuxkpi_skb_copy lkpi_get_linuxkpi_ieee80211_regdomain"
++: > out/lx-gaps.txt
++: > out/stubs.txt
++: > out/stubs.s
++missing=
++for s in $(cat out/undefined.txt); do
++	case " $(echo $KERNEL) " in *" $s "*) continue ;; esac
++	case $s in
++	lx_os_*|section\$*) continue ;;
++	ath10k_*|__ath10k_*) ;;
++	*) case " $(echo $LX_GAPS) " in
++	   *" $s "*) echo "$s" >> out/lx-gaps.txt ;;
++	   *) echo "mk-ath10k.sh: nothing defines $s" >&2; missing=1; continue ;;
++	   esac ;;
++	esac
++	echo $s >> out/stubs.txt
++	printf '\t.globl _%s\n_%s:\n\tadrp x0, 1f@PAGE\n\tadd x0, x0, 1f@PAGEOFF\n\tb _lx_stub\n\t.cstring\n1:\t.asciz "%s"\n\t.text\n\t.p2align 2\n' \
++		$s $s $s >> out/stubs.s
++done
++[ -z "$missing" ] || exit 1
++$CC -c out/stubs.s -o out/stubs.o
++# four names are shown: where the kernel enters (lx_prepare(), lx_start(), lx_stop() and lx_transmit() of redwood_lx.h)
++printf '_lx_prepare\n_lx_start\n_lx_stop\n_lx_transmit\n' > out/exported.txt
++$LD -r -arch arm64 -exported_symbols_list out/exported.txt out/all.o out/stubs.o -o out/ath10k.o 2> out/ld.err ||
++	{ cat out/ld.err; exit 1; }
++rm -f out/all.o
++echo "mk-ath10k.sh: out/ath10k.o: $(llvm-size out/ath10k.o | awk 'NR == 2 { print $1 + $2 }') bytes of code and data from" \
++	"$(echo $DRIVER | wc -w) of the driver's files; $(wc -l < out/stubs.txt) functions of the others are stubs (out/stubs.txt);" \
++	"asks the kernel for $(llvm-nm -u --format=just-symbols out/ath10k.o | grep -vc 'section\$') names"
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/acpi.h
+@@ -0,0 +1,18 @@
++#pragma once
++/* No ACPI namespace is exposed by the platform. */
++#define ACPI_HANDLE(d) NULL
++#define ACPI_TYPE_PACKAGE 4
++#define ACPI_TYPE_INTEGER 1
++#define ACPI_ALLOCATE_BUFFER ((size_t)-1)
++#define ACPI_FAILURE(s) ((s) != 0)
++typedef void *acpi_handle;
++typedef char *acpi_string;
++typedef int acpi_status;
++union acpi_object {
++ unsigned type;
++ struct { unsigned type; unsigned count; union acpi_object *elements; } package;
++ struct { unsigned type; u64 value; } integer;
++};
++struct acpi_buffer { size_t length; void *pointer; };
++static inline int acpi_get_handle(acpi_handle p, acpi_string n, acpi_handle *out) { return -ENOENT; }
++static inline int acpi_evaluate_object(acpi_handle h, const char *n, void *args, struct acpi_buffer *out) { return -ENOENT; }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/clk.h
+@@ -0,0 +1,7 @@
++#pragma once
++#include <linux/device.h>
++struct clk { int unused; };
++struct clk_bulk_data { const char *id; struct clk *clk; };
++int devm_clk_bulk_get_optional(struct device *, int, struct clk_bulk_data *);
++static inline int clk_bulk_prepare_enable(int n, struct clk_bulk_data *c) { return 0; }
++static inline void clk_bulk_disable_unprepare(int n, struct clk_bulk_data *c) { }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/io.h
+@@ -0,0 +1,4 @@
++#pragma once
++#include_next <linux/io.h>
++#include <linux/err.h>
++static inline void *devm_memremap(struct device *d, resource_size_t p, size_t n, unsigned long f) { return ERR_PTR(-ENODEV); }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/iommu.h
+@@ -0,0 +1,13 @@
++#pragma once
++#include <linux/device.h>
++#include <linux/err.h>
++struct iommu_domain { int unused; };
++#define IOMMU_READ 1
++#define IOMMU_WRITE 2
++/* There is no wifi-firmware child; fail closed if that contract changes. */
++static inline struct iommu_domain *iommu_paging_domain_alloc(struct device *d) { return ERR_PTR(-ENODEV); }
++static inline int iommu_attach_device(struct iommu_domain *d, struct device *v) { return -ENODEV; }
++static inline void iommu_detach_device(struct iommu_domain *d, struct device *v) { }
++static inline void iommu_domain_free(struct iommu_domain *d) { }
++static inline int iommu_map(struct iommu_domain *d, unsigned long i, phys_addr_t p, size_t s, int prot, gfp_t g) { return -ENODEV; }
++static inline size_t iommu_unmap(struct iommu_domain *d, unsigned long i, size_t s) { return 0; }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/nvmem-consumer.h
+@@ -0,0 +1,5 @@
++#pragma once
++#include <linux/err.h>
++struct nvmem_cell;
++static inline struct nvmem_cell *devm_nvmem_cell_get(struct device *d, const char *n) { return ERR_PTR(-ENOENT); }
++static inline void *nvmem_cell_read(struct nvmem_cell *c, size_t *n) { return ERR_PTR(-ENOENT); }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/of.h
+@@ -0,0 +1,5 @@
++#pragma once
++#include_next <linux/of.h>
++static inline int of_property_read_u8_array(const struct device_node *n, const char *s, u8 *out, size_t count) { return -EINVAL; }
++static inline int of_property_read_u8(const struct device_node *n, const char *s, u8 *out) { return -EINVAL; }
++static inline int of_property_read_string_index(const struct device_node *n, const char *s, int i, const char **out) { return -EINVAL; }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/of_device.h
+@@ -0,0 +1,5 @@
++#pragma once
++#include <linux/of.h>
++#include <linux/device.h>
++const void *device_get_match_data(const struct device *);
++static inline int of_dma_configure(struct device *d, struct device_node *n, bool force) { return -ENODEV; }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/platform_device.h
+@@ -0,0 +1,42 @@
++#ifndef _LX_ATH10K_PLATFORM_DEVICE_H_
++#define _LX_ATH10K_PLATFORM_DEVICE_H_
++#include <linux/device.h>
++#include <linux/ioport.h>
++#include <linux/module.h>
++
++struct platform_device {
++	const char *name;
++	int id;
++	struct device dev;
++};
++struct platform_driver {
++	int (*probe)(struct platform_device *);
++	void (*remove)(struct platform_device *);
++	void (*shutdown)(struct platform_device *);
++	struct device_driver driver;
++};
++#define to_platform_device(d) container_of(d, struct platform_device, dev)
++static inline void platform_set_drvdata(struct platform_device *p, void *v) { dev_set_drvdata(&p->dev, v); }
++static inline void *platform_get_drvdata(struct platform_device *p) { return dev_get_drvdata(&p->dev); }
++struct resource *platform_get_resource_byname(struct platform_device *, unsigned int, const char *);
++int platform_get_irq(struct platform_device *, unsigned int);
++int platform_get_irq_byname(struct platform_device *, const char *);
++int platform_driver_register(struct platform_driver *);
++void platform_driver_unregister(struct platform_driver *);
++
++struct platform_device_info {
++ struct fwnode_handle *fwnode;
++ struct device *parent;
++ const char *name;
++ u64 dma_mask;
++};
++static inline struct platform_device *platform_device_register_full(const struct platform_device_info *i) { return ERR_PTR(-ENODEV); }
++static inline void platform_device_unregister(struct platform_device *p) { }
++/* The normal Linux initcall section is not executed by XNU. */
++#undef module_platform_driver
++#define module_platform_driver(drv) \
++	int lx_ath10k_platform_start(void) { return platform_driver_register(&(drv)); } \
++	void lx_ath10k_platform_stop(void) { platform_driver_unregister(&(drv)); }
++int lx_ath10k_platform_start(void);
++void lx_ath10k_platform_stop(void);
++#endif
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/property.h
+@@ -0,0 +1,3 @@
++#pragma once
++#include_next <linux/property.h>
++static inline int device_property_read_u32(struct device *d, const char *p, u32 *out) { return -EINVAL; }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/pwrseq/consumer.h
+@@ -0,0 +1,6 @@
++#pragma once
++#include <linux/err.h>
++struct pwrseq_desc { int unused; };
++static inline struct pwrseq_desc *devm_pwrseq_get(struct device *dev, const char *name) { return ERR_PTR(-EPROBE_DEFER); }
++static inline int pwrseq_power_on(struct pwrseq_desc *p) { return 0; }
++static inline int pwrseq_power_off(struct pwrseq_desc *p) { return 0; }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/qrtr.h
+@@ -0,0 +1,2 @@
++#pragma once
++#include <linux/soc/qcom/qmi.h>
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/regulator/consumer.h
+@@ -0,0 +1,7 @@
++#pragma once
++#include <linux/device.h>
++struct regulator { int unused; };
++struct regulator_bulk_data { const char *supply; struct regulator *consumer; };
++int devm_regulator_bulk_get(struct device *, int, struct regulator_bulk_data *);
++static inline int regulator_bulk_enable(int n, struct regulator_bulk_data *r) { return 0; }
++static inline int regulator_bulk_disable(int n, struct regulator_bulk_data *r) { return 0; }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/linux/remoteproc/qcom_rproc.h
+@@ -0,0 +1,7 @@
++#pragma once
++#include <linux/notifier.h>
++struct qcom_ssr_notify_data { bool crashed; };
++enum { QCOM_SSR_BEFORE_POWERUP, QCOM_SSR_AFTER_POWERUP, QCOM_SSR_BEFORE_SHUTDOWN, QCOM_SSR_AFTER_SHUTDOWN };
++/* The kernel owns the modem; this layer never subscribes to or controls it. */
++static inline void *qcom_register_ssr_notifier(const char *name, struct notifier_block *nb) { return nb; }
++static inline int qcom_unregister_ssr_notifier(void *cookie, struct notifier_block *nb) { return 0; }
+--- /dev/null
++++ b/wifi/lx/include-ath10k/lx_ath10k_prelude.h
+@@ -0,0 +1,6 @@
++#include <lx_prelude.h>
++#include <linux/delay.h>
++DEFINE_LOCK_GUARD_1(spinlock_bh, spinlock_t,
++    spin_lock_bh(_T->lock), spin_unlock_bh(_T->lock))
++#define IRQF_NO_AUTOEN 0x80000
++static inline void netif_threaded_enable(struct net_device *d) { }
+--- /dev/null
++++ b/wifi/lx/include/lx_ath10k_cfg.h
+@@ -0,0 +1,13 @@
++#ifndef _LX_ATH10K_CFG_H_
++#define _LX_ATH10K_CFG_H_
++#include <lx_wlfw.h>
++struct ath10k_qmi_wlan_enable_cfg;
++/* WLFW v01 limits, also enforced by mi8_wlfw_enable(). */
++struct lx_ath10k_cfg {
++	struct lx_wlfw_cfg cfg;
++	struct lx_wlfw_ce_tgt tgt[12];
++	struct lx_wlfw_ce_svc svc[24];
++	struct lx_wlfw_shadow shadow[24];
++};
++int lx_ath10k_translate(const struct ath10k_qmi_wlan_enable_cfg *, struct lx_ath10k_cfg *);
++#endif
+--- /dev/null
++++ b/wifi/lx/include/lx_wlfw.h
+@@ -0,0 +1,27 @@
++#ifndef _LX_WLFW_H_
++#define _LX_WLFW_H_
++
++#ifdef LX_WLFW_HOST_TEST
++#include <stdint.h>
++typedef uint32_t u32;
++typedef uint16_t u16;
++#else
++#include <linux/types.h>
++#endif
++
++struct lx_wlfw_ce_tgt { u32 pipe_num, pipe_dir, nentries, nbytes_max, flags; };
++struct lx_wlfw_ce_svc { u32 service_id, pipe_dir, pipe_num; };
++struct lx_wlfw_shadow { u16 ce_id, reg_offset; };
++struct lx_wlfw_cfg {
++	u32 n_tgt, n_svc, n_shadow;
++	const struct lx_wlfw_ce_tgt *tgt;
++	const struct lx_wlfw_ce_svc *svc;
++	const struct lx_wlfw_shadow *shadow;
++};
++
++/* The kernel consumes the configuration before returning; it must not retain its pointers. */
++int lx_os_wlfw_enable(const struct lx_wlfw_cfg *cfg, int mode);
++/* Success calls ready(arg) once, inline or later. Failure neither calls it nor retains arg. */
++int lx_os_wlfw_wait_ready(void (*ready)(void *), void *arg);
++
++#endif
+--- /dev/null
++++ b/wifi/lx/src-ath10k/lx_ath10k_bus.c
+@@ -0,0 +1,404 @@
++#include <linux/platform_device.h>
++#include <linux/of.h>
++#include <linux/of_reserved_mem.h>
++#include <linux/clk.h>
++#include <linux/regulator/consumer.h>
++#include "core.h"
++#include "snoc.h"
++#include "debug.h"
++#include <lx_os.h>
++#include "lx.h"
++
++void lx_ath10k_qmi_arm(struct ath10k *);
++void lx_ath10k_qmi_cancel(struct ath10k *);
++
++static struct {
++	struct platform_device pdev;
++	struct platform_driver *drv;
++	struct mutex service;
++	bool initialized, up, mission, fallback, worker, run;
++	struct napi_struct *napi;
++	bool napi_enabled, pending;
++	struct {
++		irq_handler_t fn;
++		void *arg;
++		unsigned vector;
++		bool attached, enabled;
++	} irq[12];
++} bus;
++
++/* sdm845.dtsi wifi@18800000; vector n is wired to SPI 414+n by the kernel. */
++static struct resource membase = { .start = 0x18800000, .end = 0x18ffffff, .flags = IORESOURCE_MEM };
++static const char compatible[] = "qcom,wcn3990-wifi";
++static const struct property properties[] = {
++	{ "compatible", sizeof(compatible), compatible },
++	{ "qcom,snoc-host-cap-8bit-quirk", 0, "" },
++};
++static struct device_node node = {
++	.name = "wifi", .full_name = "wifi@18800000", .properties = properties,
++	.nproperties = ARRAY_SIZE(properties),
++};
++
++const struct property *
++of_find_property(const struct device_node *n, const char *name, int *len)
++{
++	if (n)
++		for (int i = 0; i < n->nproperties; i++)
++			if (!strcmp(n->properties[i].name, name)) {
++				if (len) *len = n->properties[i].length;
++				return &n->properties[i];
++			}
++	return NULL;
++}
++const void *of_get_property(const struct device_node *n, const char *s, int *len)
++{
++	const struct property *p = of_find_property(n, s, len);
++	return p ? p->value : NULL;
++}
++int of_property_read_string(const struct device_node *n, const char *s, const char **out)
++{
++	const struct property *p = of_find_property(n, s, NULL);
++	if (!p || !p->length) return -EINVAL;
++	*out = p->value;
++	return 0;
++}
++int of_property_read_u32_index(const struct device_node *n, const char *s, u32 i, u32 *out) { return -EINVAL; }
++bool of_device_is_compatible(const struct device_node *n, const char *s) { return n == &node && !strcmp(s, compatible); }
++bool of_machine_is_compatible(const char *s) { return false; }
++struct device_node *of_get_child_by_name(const struct device_node *n, const char *s) { return NULL; }
++struct device_node *of_parse_phandle(const struct device_node *n, const char *s, int i) { return NULL; }
++struct device_node *of_find_node_by_phandle(phandle h) { return NULL; }
++int of_reserved_mem_region_to_resource(const struct device_node *n, unsigned int i, struct resource *r) { return -ENODEV; }
++const struct of_device_id *of_match_node(const struct of_device_id *m, const struct device_node *n)
++{
++	for (; m && m->compatible[0]; m++)
++		if (of_device_is_compatible(n, m->compatible)) return m;
++	return NULL;
++}
++const void *device_get_match_data(const struct device *d)
++{
++	const struct of_device_id *m = of_match_node(d->driver->of_match_table, d->of_node);
++	return m ? m->data : NULL;
++}
++struct resource *platform_get_resource_byname(struct platform_device *p, unsigned type, const char *name)
++{
++	return p == &bus.pdev && type == IORESOURCE_MEM && !strcmp(name, "membase") ? &membase : NULL;
++}
++int platform_get_irq(struct platform_device *p, unsigned i) { return p == &bus.pdev && i < 12 ? (int)i : -EINVAL; }
++int linuxkpi_device_get_mac_address(struct device *d, char *out) { return lx_os_radio_address((unsigned char *)out) ? 0 : -ENOENT; }
++
++int devm_regulator_bulk_get(struct device *d, int n, struct regulator_bulk_data *r)
++{
++	static struct regulator rails[5];
++	static const char *names[] = { "vdd-0.8-cx-mx", "vdd-1.8-xo", "vdd-1.3-rfa", "vdd-3.3-ch0", "vdd-3.3-ch1" };
++	for (int i = 0; i < n; i++) {
++		unsigned j;
++		for (j = 0; j < ARRAY_SIZE(names); j++)
++			if (!strcmp(r[i].supply, names[j])) break;
++		if (j == ARRAY_SIZE(names)) return -ENODEV;
++		r[i].consumer = &rails[j];
++	}
++	return 0;
++}
++int devm_clk_bulk_get_optional(struct device *d, int n, struct clk_bulk_data *c)
++{
++	static struct clk xo;
++	for (int i = 0; i < n; i++) {
++		if (!strcmp(c[i].id, "cxo_ref_clk_pin")) c[i].clk = &xo;
++		else if (!strcmp(c[i].id, "qdss")) c[i].clk = NULL;
++		else return -ENODEV;
++	}
++	return 0;
++}
++
++static void irq_dispatch(void *arg)
++{
++	unsigned v = *(unsigned *)arg;
++	mutex_lock(&bus.service);
++	if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE) && __atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].fn)
++		bus.irq[v].fn(v, bus.irq[v].arg);
++	if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE) && __atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].attached)
++		lx_os_irq_enable(v);
++	mutex_unlock(&bus.service);
++}
++int lkpi_request_irq(struct device *d, unsigned v, irq_handler_t fn, irq_handler_t thread,
++    unsigned long flags, const char *name, void *arg)
++{
++	if (v >= 12 || !fn || thread || !(flags & IRQF_NO_AUTOEN)) return -EINVAL;
++	bus.irq[v].fn = fn;
++	bus.irq[v].arg = arg;
++	bus.irq[v].vector = v;
++	if (!bus.fallback) {
++		int ret = lx_os_irq_attach(v, irq_dispatch, &bus.irq[v].vector);
++		if (ret) {
++			lx_os_irq_detach_all();
++			for (unsigned i = 0; i < 12; i++) bus.irq[i].attached = false;
++			bus.fallback = true;
++			lx_tell("lx-ath10k: IRQ unavailable (%d); poll CE every 1 ms\n", ret);
++		} else bus.irq[v].attached = true;
++	}
++	return 0;
++}
++int lkpi_enable_irq(unsigned v)
++{
++	if (v >= 12) return -EINVAL;
++	lx_os_lock();
++	__atomic_store_n(&bus.irq[v].enabled, true, __ATOMIC_RELEASE);
++	bool enable = __atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE) && bus.irq[v].attached;
++	lx_os_unlock();
++	if (enable) lx_os_irq_enable(v);
++	return 0;
++}
++void lkpi_disable_irq(unsigned v)
++{
++	if (v >= 12) return;
++	lx_os_lock();
++	__atomic_store_n(&bus.irq[v].enabled, false, __ATOMIC_RELEASE);
++	lx_os_unlock();
++	if (bus.irq[v].attached) lx_os_irq_disable(v);
++	mutex_lock(&bus.service);
++	mutex_unlock(&bus.service);
++}
++void lkpi_free_irq(unsigned v, void *arg)
++{
++	if (v >= 12) return;
++	lkpi_disable_irq(v);
++	mutex_lock(&bus.service);
++	bus.irq[v].fn = NULL;
++	bus.irq[v].arg = NULL;
++	mutex_unlock(&bus.service);
++}
++int enable_irq_wake(unsigned v) { return 0; }
++int disable_irq_wake(unsigned v) { return 0; }
++
++/* No work may touch a CE after the kernel takes the firmware out of mission mode. */
++void lx_ath10k_bus_mission(bool on)
++{
++	mutex_lock(&bus.service);
++	__atomic_store_n(&bus.mission, on, __ATOMIC_RELEASE);
++	mutex_unlock(&bus.service);
++	for (unsigned v = 0; v < 12; v++)
++		if (bus.irq[v].attached) {
++			if (!on) lx_os_irq_disable(v);
++			else if (__atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE)) lx_os_irq_enable(v);
++		}
++}
++
++static void rings(void *unused)
++{
++	for (;;) {
++		lx_os_lock();
++		bool run = bus.run;
++		lx_os_unlock();
++		if (!run) break;
++		mutex_lock(&bus.service);
++		if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE)) {
++			if (bus.fallback)
++				for (unsigned v = 0; v < 12; v++)
++					if (__atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].fn)
++						bus.irq[v].fn(v, bus.irq[v].arg);
++			lx_os_lock();
++			bool poll = bus.napi_enabled && bus.pending;
++			bus.pending = false;
++			lx_os_unlock();
++			if (poll && bus.napi && bus.napi->poll(bus.napi, 64) >= 64) {
++				lx_os_lock();
++				bus.pending = true;
++				lx_os_unlock();
++			}
++		}
++		mutex_unlock(&bus.service);
++		lx_pause_ms(1);
++	}
++	lx_os_lock();
++	bus.worker = false;
++	lx_os_unlock();
++}
++
++/* NAPI work runs on rings(), never on a FreeBSD taskqueue. */
++struct net_device *linuxkpi_alloc_netdev(size_t extra, const char *name, uint32_t type, void (*setup)(struct net_device *))
++{
++	struct net_device *d = kzalloc(sizeof(*d) + extra, GFP_KERNEL);
++	if (d && setup) setup(d);
++	return d;
++}
++void linuxkpi_free_netdev(struct net_device *d) { kfree(d); }
++void linuxkpi_netif_napi_add(struct net_device *d, struct napi_struct *n, int (*poll)(struct napi_struct *, int))
++{
++	n->dev = d; n->poll = poll; n->budget = 64;
++	bus.napi = n;
++}
++void linuxkpi_napi_synchronize(struct napi_struct *n) { mutex_lock(&bus.service); mutex_unlock(&bus.service); }
++void linuxkpi_napi_disable(struct napi_struct *n)
++{
++	lx_os_lock(); bus.napi_enabled = false; bus.pending = false; lx_os_unlock();
++	linuxkpi_napi_synchronize(n);
++}
++void linuxkpi_napi_enable(struct napi_struct *n) { lx_os_lock(); bus.napi_enabled = true; lx_os_unlock(); }
++void linuxkpi_netif_napi_del(struct napi_struct *n) { linuxkpi_napi_disable(n); bus.napi = NULL; }
++bool linuxkpi_napi_schedule(struct napi_struct *n)
++{
++	lx_os_lock(); bool enabled = bus.napi_enabled; bus.pending |= enabled; lx_os_unlock(); return enabled;
++}
++bool linuxkpi_napi_complete(struct napi_struct *n) { return true; }
++
++/* Only managed allocations made by this single platform device are retained here. */
++struct managed { struct managed *next; void (*release)(struct device *, void *); };
++static struct managed *managed;
++void *lkpi_devres_alloc(void (*release)(struct device *, void *), size_t size, gfp_t gfp)
++{
++	struct managed *m = kzalloc(sizeof(*m) + size, gfp);
++	if (m) m->release = release;
++	return m ? m + 1 : NULL;
++}
++void lkpi_devres_add(struct device *d, void *p) { struct managed *m = (struct managed *)p - 1; m->next = managed; managed = m; }
++void lkpi_devres_free(void *p) { if (p) kfree((struct managed *)p - 1); }
++void lkpi_devm_kmalloc_release(struct device *d, void *p) { }
++static void release_managed(void)
++{
++	while (managed) {
++		struct managed *m = managed;
++		managed = m->next;
++		if (m->release) m->release(&bus.pdev.dev, m + 1);
++		kfree(m);
++	}
++}
++
++static void says(const char *level, const char *fmt, va_list ap)
++{
++	char line[384];
++	vsnprintf(line, sizeof(line), fmt, ap);
++	lx_tell("ath10k%s: %s%s", level, line, line[0] && line[strlen(line)-1] == '\n' ? "" : "\n");
++}
++#define LOGFN(name, level) void name(struct ath10k *ar, const char *fmt, ...) { va_list ap; va_start(ap, fmt); says(level, fmt, ap); va_end(ap); }
++LOGFN(ath10k_info, "")
++LOGFN(ath10k_warn, " WARN")
++LOGFN(ath10k_err, " ERROR")
++void __ath10k_dbg(struct ath10k *ar, enum ath10k_debug_mask mask, const char *fmt, ...)
++{
++	va_list ap; va_start(ap, fmt); says(" debug", fmt, ap); va_end(ap);
++}
++void ath10k_dbg_dump(struct ath10k *ar, enum ath10k_debug_mask mask, const char *msg, const char *prefix, const void *buf, size_t len) { }
++
++int platform_driver_register(struct platform_driver *drv)
++{
++	bus.drv = drv;
++	bus.pdev.name = "ath10k_snoc";
++	bus.pdev.dev.kobj.name = "wifi";
++	bus.pdev.dev.of_node = &node;
++	bus.pdev.dev.driver = &drv->driver;
++	bus.pdev.dev.dma_priv = &bus;
++	int ret = drv->probe(&bus.pdev);
++	if (ret) { release_managed(); bus.drv = NULL; dev_set_drvdata(&bus.pdev.dev, NULL); return ret; }
++	bus.up = true;
++	lx_tell("lx-ath10k: bus up membase 0x18800000 size 0x800000\n");
++	lx_ath10k_qmi_arm(platform_get_drvdata(&bus.pdev));
++	return 0;
++}
++void platform_driver_unregister(struct platform_driver *drv)
++{
++	if (!bus.up) return;
++	lx_ath10k_qmi_cancel(platform_get_drvdata(&bus.pdev));
++	drv->remove(&bus.pdev);
++	bus.up = false;
++	bus.drv = NULL;
++	dev_set_drvdata(&bus.pdev.dev, NULL);
++	lx_os_irq_detach_all();
++	release_managed();
++}
++int lx_prepare(void) { return lx_base_init() || lx_pool_init() ? ENOMEM : 0; }
++void lx_stop(void)
++{
++	if (!bus.initialized) return;
++	lx_os_lock();
++	bool active = bus.up || bus.worker;
++	lx_os_unlock();
++	if (!active) return;
++	if (bus.up) {
++		lx_station_withdraw();
++		lx_station_leave();
++		lx_ath10k_platform_stop();
++	}
++	lx_os_lock(); bus.run = false; lx_os_unlock();
++	for (;;) {
++		lx_os_lock(); bool running = bus.worker; lx_os_unlock();
++		if (!running) break;
++		lx_pause_ms(1);
++	}
++	lx_os_irq_detach_all();
++}
++int lx_start(void)
++{
++	int ret;
++	if (bus.up) return EBUSY;
++	if ((ret = lx_prepare())) return ret;
++	if (lx_os_option("wifi_lx") < 2) {
++		lx_tell("lx-ath10k: FAIL snoc requires wifi_lx=2\n");
++		return EINVAL;
++	}
++	if (!bus.initialized) { mutex_init(&bus.service); bus.initialized = true; }
++	memset(bus.irq, 0, sizeof(bus.irq));
++	bus.fallback = false; bus.mission = false; bus.pending = false;
++	bus.run = bus.worker = true;
++	ret = lx_os_thread("ath10k-rings", rings, NULL);
++	if (ret) { bus.worker = bus.run = false; return ret; }
++	ath10k_debug_mask = lx_os_option("wifi_quiet") ? 0 : ATH10K_DBG_BOOT | ATH10K_DBG_QMI | ATH10K_DBG_SNOC;
++	ret = lx_ath10k_platform_start();
++	if (ret) { lx_tell("lx-ath10k: FAIL probe %d\n", ret); lx_stop(); return -ret; }
++	struct ath10k *ar = platform_get_drvdata(&bus.pdev);
++	unsigned long long began = lx_os_nanoseconds();
++	while (!test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags) && lx_os_nanoseconds() - began < 60000000000ull)
++		lx_pause_ms(10);
++	if (!test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags)) { ret = ETIMEDOUT; goto fail; }
++	if (lx_os_option("wifi_station")) ret = lx_station_offer();
++	else if (lx_os_option("wifi_join")) ret = lx_station_join();
++	else {
++		ret = lx_os_option("wifi_scan") ? lx_station_scan() : 0;
++		lx_stop();
++		return ret;
++	}
++	if (!ret) return 0;
++fail:
++	lx_tell("lx-ath10k: FAIL start %d\n", ret);
++	lx_stop();
++	return ret;
++}
++int lx_transmit(const unsigned char *frame, unsigned long size) { return bus.up ? lx_station_send(frame, size) : ENETDOWN; }
++
++void DELAY(int usec)
++{
++	unsigned long long start = lx_os_nanoseconds();
++	while (usec > 0 && lx_os_nanoseconds() - start < (unsigned long long)usec * 1000)
++		__asm __volatile("yield");
++}
++void nanouptime(struct timespec *t)
++{
++	unsigned long long ns = lx_os_nanoseconds();
++	t->tv_sec = ns / 1000000000;
++	t->tv_nsec = ns % 1000000000;
++}
++int device_printf(device_t dev, const char *fmt, ...)
++{
++	va_list ap;
++	va_start(ap, fmt); says(" device", fmt, ap); va_end(ap);
++	return 0;
++}
++/* This bus uses the lx DMA pool, not FreeBSD busdma tags. */
++int linux_dma_tag_init(struct device *d, u64 mask) { return mask == DMA_BIT_MASK(35) ? 0 : -EINVAL; }
++int linux_dma_tag_init_coherent(struct device *d, u64 mask) { return linux_dma_tag_init(d, mask); }
++void *linuxkpi_dmam_alloc_coherent(struct device *d, size_t size, dma_addr_t *addr, gfp_t flags)
++{
++	void *p = linux_dma_alloc_coherent(d, size, addr, flags);
++	if (p && (*addr > DMA_BIT_MASK(35) || size - 1 > DMA_BIT_MASK(35) - *addr)) return NULL;
++	return p;
++}
++/* IEEE 802.2 LLC/SNAP encapsulation, also used by Linux net/wireless/util.c. */
++const unsigned char rfc1042_header[] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
++
++/* An unresolved queue-depth call must not leave the driver's output variables uninitialized. */
++void linuxkpi_ieee80211_txq_get_depth(struct ieee80211_txq *txq, unsigned long *frames, unsigned long *bytes)
++{
++	lx_stub("linuxkpi_ieee80211_txq_get_depth");
++	if (frames) *frames = 0;
++	if (bytes) *bytes = 0;
++}
+--- /dev/null
++++ b/wifi/lx/src-ath10k/lx_ath10k_gaps.c
+@@ -0,0 +1,16 @@
++/*
++ * LinuxKPI functions that ath10k reaches and lx did not have (TASK-006 NOTES, out/lx-gaps.txt), filled in one at a
++ * time as the phone shows them to matter.
++ *
++ * lkpi_get_linuxkpi_ieee80211_regdomain: FreeBSD's linux_80211.c has it as a zeroed allocation of the domain and its
++ * rules; the stub's NULL made regulatory_hint() fail and ath10k_mac_register() give up with -ENOMEM (EXP-0210).
++ */
++#include <linux/kernel.h>
++#include <linux/slab.h>
++#include <net/cfg80211.h>
++
++struct linuxkpi_ieee80211_regdomain *
++lkpi_get_linuxkpi_ieee80211_regdomain(size_t n)
++{
++	return kzalloc(sizeof(struct linuxkpi_ieee80211_regdomain) + n * sizeof(struct ieee80211_reg_rule), GFP_KERNEL);
++}
+--- /dev/null
++++ b/wifi/lx/src-ath10k/lx_ath10k_qmi.c
+@@ -0,0 +1,205 @@
++#ifdef LX_WLFW_HOST_TEST
++#include <errno.h>
++#include <string.h>
++#include "ath10k_test_types.h"
++#else
++#include "core.h"
++#include "snoc.h"
++#include <lx_os.h>
++#include "lx.h"
++#endif
++#include <lx_ath10k_cfg.h>
++
++int
++lx_ath10k_translate(const struct ath10k_qmi_wlan_enable_cfg *in, struct lx_ath10k_cfg *out)
++{
++	if (!out)
++		return -EINVAL;
++	memset(out, 0, sizeof(*out));
++	if (!in || in->num_ce_tgt_cfg > 12 || in->num_ce_svc_pipe_cfg > 24 ||
++	    in->num_shadow_reg_cfg > 24 || (in->num_ce_tgt_cfg && !in->ce_tgt_cfg) ||
++	    (in->num_ce_svc_pipe_cfg && !in->ce_svc_cfg) || (in->num_shadow_reg_cfg && !in->shadow_reg_cfg))
++		return -EINVAL;
++	for (u32 i = 0; i < in->num_ce_tgt_cfg; i++) {
++		const struct ath10k_tgt_pipe_cfg *p = &in->ce_tgt_cfg[i];
++		out->tgt[i] = (struct lx_wlfw_ce_tgt) {
++			le32_to_cpu(p->pipe_num), le32_to_cpu(p->pipe_dir), le32_to_cpu(p->nentries),
++			le32_to_cpu(p->nbytes_max), le32_to_cpu(p->flags)
++		};
++	}
++	for (u32 i = 0; i < in->num_ce_svc_pipe_cfg; i++) {
++		const struct ath10k_svc_pipe_cfg *p = &in->ce_svc_cfg[i];
++		out->svc[i] = (struct lx_wlfw_ce_svc) {
++			le32_to_cpu(p->service_id), le32_to_cpu(p->pipe_dir), le32_to_cpu(p->pipe_num)
++		};
++	}
++	for (u32 i = 0; i < in->num_shadow_reg_cfg; i++) {
++		const struct ath10k_shadow_reg_cfg *p = &in->shadow_reg_cfg[i];
++		out->shadow[i] = (struct lx_wlfw_shadow) { le16_to_cpu(p->ce_id), le16_to_cpu(p->reg_offset) };
++	}
++	out->cfg = (struct lx_wlfw_cfg) { in->num_ce_tgt_cfg, in->num_ce_svc_pipe_cfg,
++		in->num_shadow_reg_cfg, out->tgt, out->svc, out->shadow };
++	return 0;
++}
++
++#ifndef LX_WLFW_HOST_TEST
++void lx_ath10k_bus_mission(bool);
++
++/* A token outlives deinit if the kernel still owes it a callback. */
++struct ready_token {
++	struct ath10k_qmi qmi;
++	bool ready, armed, cancelled, running;
++	unsigned refs;
++};
++
++static void
++token_put(struct ready_token *t)
++{
++	bool last;
++	lx_os_lock();
++	last = --t->refs == 0;
++	lx_os_unlock();
++	if (last)
++		kfree(t);
++}
++
++static void
++fw_ready(void *arg)
++{
++	struct ready_token *t = arg;
++	lx_os_lock();
++	t->ready = true;
++	lx_os_unlock();
++	token_put(t);
++}
++
++/* The kernel may call inline; dispatch only after the complete platform probe succeeded. */
++void
++lx_ath10k_qmi_arm(struct ath10k *ar)
++{
++	struct ready_token *t = container_of(ath10k_snoc_priv(ar)->qmi, struct ready_token, qmi);
++	lx_os_lock();
++	t->armed = true;
++	lx_os_unlock();
++}
++
++static void
++ready_worker(void *arg)
++{
++	struct ready_token *t = arg;
++	for (;;) {
++		lx_os_lock();
++		if (t->cancelled || (t->armed && t->ready)) {
++			bool cancelled = t->cancelled;
++			t->running = !cancelled;
++			lx_os_unlock();
++			if (!cancelled) {
++				t->qmi.fw_ready = true;
++				lx_tell("lx-ath10k: fw ready -> snoc\n");
++				int ret = ath10k_snoc_fw_indication(t->qmi.ar, ATH10K_QMI_EVENT_FW_READY_IND);
++				if (ret)
++					lx_tell("lx-ath10k: FAIL fw indication %d\n", ret);
++			}
++			lx_os_lock();
++			t->running = false;
++			lx_os_unlock();
++			break;
++		}
++		lx_os_unlock();
++		lx_pause_ms(1);
++	}
++	token_put(t);
++}
++
++void
++lx_ath10k_qmi_cancel(struct ath10k *ar)
++{
++	struct ath10k_qmi *qmi = ath10k_snoc_priv(ar)->qmi;
++	if (!qmi)
++		return;
++	struct ready_token *t = container_of(qmi, struct ready_token, qmi);
++	for (;;) {
++		lx_os_lock();
++		t->cancelled = true;
++		bool running = t->running;
++		lx_os_unlock();
++		if (!running)
++			return;
++		lx_pause_ms(1);
++	}
++}
++
++int
++ath10k_qmi_init(struct ath10k *ar, u32 msa_size)
++{
++	struct ready_token *t = kzalloc(sizeof(*t), GFP_KERNEL);
++	int ret;
++	if (!t)
++		return -ENOMEM;
++	t->qmi.ar = ar;
++	t->qmi.state = ATH10K_QMI_STATE_INIT_DONE;
++	t->refs = 2; /* owner and kernel callback */
++	ath10k_snoc_priv(ar)->qmi = &t->qmi;
++	ret = lx_os_wlfw_wait_ready(fw_ready, t);
++	if (ret) {
++		ath10k_snoc_priv(ar)->qmi = NULL;
++		token_put(t);
++		token_put(t);
++		return ret;
++	}
++	lx_os_lock();
++	t->refs++;
++	lx_os_unlock();
++	ret = lx_os_thread("ath10k-ready", ready_worker, t);
++	if (ret) {
++		token_put(t);
++		ath10k_qmi_deinit(ar);
++		return -ret;
++	}
++	return 0;
++}
++
++int
++ath10k_qmi_deinit(struct ath10k *ar)
++{
++	struct ath10k_qmi *qmi = ath10k_snoc_priv(ar)->qmi;
++	if (qmi) {
++		lx_ath10k_qmi_cancel(ar);
++		ath10k_snoc_priv(ar)->qmi = NULL;
++		token_put(container_of(qmi, struct ready_token, qmi));
++	}
++	return 0;
++}
++
++int
++ath10k_qmi_wlan_enable(struct ath10k *ar, struct ath10k_qmi_wlan_enable_cfg *config,
++    enum wlfw_driver_mode_enum_v01 mode, const char *version)
++{
++	struct lx_ath10k_cfg cfg;
++	int ret = lx_ath10k_translate(config, &cfg);
++	lx_tell("lx-ath10k: wlan_enable mode=%d\n", mode);
++	if (!ret) {
++		if (mode != QMI_WLFW_MISSION_V01)
++			lx_ath10k_bus_mission(false);
++		ret = lx_os_wlfw_enable(&cfg.cfg, mode);
++	}
++	if (!ret)
++		lx_ath10k_bus_mission(mode == QMI_WLFW_MISSION_V01);
++	if (ret)
++		lx_tell("lx-ath10k: FAIL wlan_enable %d\n", ret);
++	return ret;
++}
++
++int
++ath10k_qmi_wlan_disable(struct ath10k *ar)
++{
++	lx_ath10k_bus_mission(false);
++	return lx_os_wlfw_enable(NULL, QMI_WLFW_OFF_V01);
++}
++
++int
++ath10k_qmi_set_fw_log_mode(struct ath10k *ar, u8 mode)
++{
++	return 0;
++}
++#endif
+--- a/xnu-build.sh
++++ b/xnu-build.sh
+@@ -5,6 +5,8 @@
+ # The Wi-Fi driver's object (tools/mk-ath11k.sh) is linked into the kernel when it is there; make
+ # does not see it change, so the linked kernel is thrown away when it has.
+ LX=$XNUDEPS/build/ath11k/out/ath11k.o
++# Mi 8 (WCN3990): ath10k on the same layer (tools/mk-ath10k.sh, TASK-006) when it is there; WIFI_DRIVER=ath11k for the other
++[ "${WIFI_DRIVER:-ath10k}" = ath10k ] && [ -f $XNUDEPS/build/ath10k/out/ath10k.o ] && LX=$XNUDEPS/build/ath10k/out/ath10k.o
+ STAMP=BUILD/obj/redwood-objects
+ if [ -f "$LX" ]; then now="$LX $(stat -c %Y "$LX")"; else LX= now=; fi
+ if [ -d BUILD/obj ] && [ "$(cat $STAMP 2>/dev/null)" != "$now" ]; then
+--- a/xnuloader/efi.h
++++ b/xnuloader/efi.h
+@@ -30,6 +30,8 @@
+ typedef struct efi_text_output {
+ 	void *reset;
+ 	efi_status (EFIAPI *output_string)(struct efi_text_output *self, const char16 *str);
++	void *test_string, *query_mode, *set_mode, *set_attribute;
++	efi_status (EFIAPI *clear_screen)(struct efi_text_output *self);
+ } efi_text_output;
+ 
+ enum { EfiLoaderData = 2, EfiConventionalMemory = 7 };
+--- a/xnuloader/loader.c
++++ b/xnuloader/loader.c
+@@ -254,6 +254,9 @@
+ /* ------------------------------------------------------------------------ */
+ /* Log persistence: raw write to a GPT partition (phone only)               */
+ 
++/* set from the platform once it is known; the log then stays in memory and on the screen */
++static int log_write_disabled;
++
+ static efi_block_io *
+ find_log_partition(void)
+ {
+@@ -263,6 +266,9 @@
+ 	efi_handle *handles;
+ 	uint64_t count;
+ 
++	if (log_write_disabled) {
++		return NULL;
++	}
+ 	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) {
+ 		return NULL;
+ 	}
+@@ -336,9 +342,54 @@
+ 	if (bio == NULL) {
+ 		/* No log partition (QEMU): echo the returned kernel log on the console instead. */
+ 		if (klog != NULL) {
++			/*
++			 * A phone that cannot keep the log (log_write_disabled): the screen is all there is. The
++			 * kernel's own panic screen is still on the framebuffer in another geometry and the log
++			 * would be printed over it (EXP-0029), so start from a clean console.
++			 */
++			if (log_write_disabled && ST->con_out != NULL && ST->con_out->clear_screen != NULL) {
++				ST->con_out->clear_screen(ST->con_out);
++				print("kernel returned; its log follows, the end of it (the panic) is at the bottom\n");
++			}
+ 			print("\n== KERNEL LOG ==\n");
+-			for (uint64_t i = 0; i < klog_len; i++) {
+-				put_char(klog[i]);
++			if (log_write_disabled) {
++				/*
++				 * The panic log ends with the stackshot, which is binary: drawn as text it filled the
++				 * screen and pushed the panic message off it (EXP-0030). A line that is mostly not
++				 * printable is left out, with one note for each run of them.
++				 */
++				uint64_t i = 0, left_out = 0;
++
++				while (i < klog_len) {
++					uint64_t j = i, bad = 0;
++
++					while (j < klog_len && klog[j] != '\n') {
++						unsigned char c = (unsigned char)klog[j];
++						bad += ((c < 0x20 && c != '\t' && c != '\r') || c > 0x7e);
++						j++;
++					}
++					if (j > i && bad * 8 > j - i) {
++						left_out += j - i + 1;
++					} else {
++						if (left_out != 0) {
++							print("[%d bytes of binary data left out]\n", left_out);
++							left_out = 0;
++						}
++						for (uint64_t k = i; k < j; k++) {
++							unsigned char c = (unsigned char)klog[k];
++							put_char((c < 0x20 && c != '\t' && c != '\r') || c > 0x7e ? '?' : (char)c);
++						}
++						put_char('\n');
++					}
++					i = j + 1;
++				}
++				if (left_out != 0) {
++					print("[%d bytes of binary data left out]\n", left_out);
++				}
++			} else {
++				for (uint64_t i = 0; i < klog_len; i++) {
++					put_char(klog[i]);
++				}
+ 			}
+ 			print("\n== END OF LOG ==\n");
+ 		}
+@@ -525,6 +576,9 @@
+ 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
+ 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
+ 	uint64_t fb_base;                /* the framebuffer the firmware reports (GOP): it tells this device apart */
++	int no_log_write;                /* never write the log to a partition (the stock one called logdump holds Android's) */
++	uint32_t midr_part[2];           /* Qualcomm (0x51) core part numbers: a second way to tell this device apart, 0: unused */
++	uint32_t vtimer_intid;           /* the PPI of the EL1 virtual timer if it is not the kernel's default 27 (boot-arg vtimer_intid=) */
+ };
+ 
+ static const struct platform platform_qemu_virt = {
+@@ -553,6 +607,25 @@
+ 	.fb_base = 0xE1000000,
+ };
+ 
++static const struct platform platform_dipper = {
++	/* Xiaomi Mi 8 (SDM845). GIC, MPIDR and SMC-PSCI from the stock device tree (F-007, EXP-0001). */
++	.name = "dipper", .io_base = 0x00400000, .io_size = 0x3FC00000,
++	/* no log partition here, and "N s: the kernel has logged 0 bytes" lines every 2 s only cover the kernel's screen */
++	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 0,
++	.cores = 8, .core_shift = 8,
++	/* Kryo 385: cores 0-3 Silver (part 0x803, A55 class), 4-7 Gold (part 0x802, A75 class). */
++	.small_cores = 0x0f,
++	/*
++	 * sdm845.dsc PcdMipiFrameBufferAddress; not yet seen in the loader's "display ... at" line [unverified].
++	 * Without a match the loader would poke QEMU's fw_cfg at 0x09020000, which is not safe on a phone, so the
++	 * Kryo MIDR (0x51 / part 0x802 or 0x803) matches this platform as well.
++	 */
++	.fb_base = 0x9D400000,
++	.midr_part = { 0x802, 0x803 },
++	.vtimer_intid = 19,      /* measured on core 0, EXP-0028 / F-017; the kernel's default is 27 */
++	.no_log_write = 1,       /* Mi 8 has a stock partition named logdump: the log would overwrite its first blocks */
++};
++
+ /*
+  * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
+  * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
+@@ -560,6 +633,7 @@
+  */
+ static const struct platform *const platforms[] = {
+ 	&platform_redwood,
++	&platform_dipper,
+ };
+ 
+ /* ------------------------------------------------------------------------ */
+@@ -1489,10 +1563,11 @@
+  * same partition, named the same, of the same size, in the same place, on logical unit 0.
+  */
+ #define BLOCK_WRITE_FIRST  2042368ULL                  /* darwin's blocks of 4096: past both cryptexes */
+-#define BLOCK_DARWIN_FIRST 25374720ULL                 /* its first and last LBA of unit 0, as the GPT has them */
+-#define BLOCK_DARWIN_LAST  30617594ULL
++/* Mi 8 (dipper): darwin is #22 of LUN 0, 24 GiB, made in EXP-0037 (upstream's phone: 25374720..30617594, uniq FD6854AD-...) */
++#define BLOCK_DARWIN_FIRST 23746560ULL                 /* its first and last LBA of unit 0, as the GPT has them */
++#define BLOCK_DARWIN_LAST  30038013ULL
+ #define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
+-#define BLOCK_DARWIN_UNIQ  { 0xfd6854ad, 0x24aa, 0x4fc3, { 0x94, 0xfe, 0x29, 0x01, 0x16, 0x85, 0x8d, 0x68 } }
++#define BLOCK_DARWIN_UNIQ  { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } } /* public export: device GUID removed */
+ 
+ /*
+  * The partitions first, then the logical units they are on (BLOCK_PART_UNIT, named unit0, unit1,
+@@ -2503,6 +2578,8 @@
+ 	uint64_t forced_base;
+ 	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
+ 	int usb_mode;
++	int timer_probe;                /* "timerprobe" entry: only report which PPI the virtual timer raises, run no kernel */
++	int id_probe;                   /* "idprobe" entry: start each core in turn, read its ID registers, switch it off again (EXP-0043) */
+ };
+ 
+ static uint64_t
+@@ -2555,6 +2632,10 @@
+ 			pi->checkpoint = parse_number(text, 10);  /* where the kernel should stop and come back */
+ 		} else if (str_eq(e->name, "usb")) {
+ 			pi->usb_mode = 1;                         /* stay in the loader and take commands over USB */
++		} else if (str_eq(e->name, "timerprobe")) {
++			pi->timer_probe = 1;
++		} else if (str_eq(e->name, "idprobe")) {
++			pi->id_probe = 1;
+ 		}
+ 		p += sizeof(*e) + ((e->size + 15) & ~15u);
+ 	}
+@@ -2985,6 +3066,19 @@
+ 	}
+ 	if (rd_size != 0 && !own_root) {
+ 		for (const char *c = "rd=md0 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
++			ba->commandLine[n++] = *c;
++		}
++	}
++	/* a SoC whose virtual timer is not on the kernel's default PPI says so (the payload's own vtimer_intid= wins) */
++	int own_vtimer = 0;
++	for (const char *c = pi.cmdline; *c; c++) {
++		own_vtimer |= starts_with(c, "vtimer_intid=") && (c == pi.cmdline || c[-1] == ' ');
++	}
++	if (PLAT->vtimer_intid != 0 && !own_vtimer) {
++		char tail[] = "vtimer_intid=00 ";
++		tail[13] = (char)('0' + PLAT->vtimer_intid / 10);
++		tail[14] = (char)('0' + PLAT->vtimer_intid % 10);
++		for (const char *c = tail; *c && n < BOOT_LINE_LENGTH - 1; c++) {
+ 			ba->commandLine[n++] = *c;
+ 		}
+ 	}
+@@ -3344,6 +3438,12 @@
+ 		print("ufs: the kernel put its own list in %d times and took it out %d times\n",
+ 		    (uint64_t)block_shared.kernel_native.switched_in, (uint64_t)block_shared.kernel_native.switched_out);
+ 	}
++	if (block_enabled) {
++		/* what the kernel asked of the storage this run, and how long this core spent in ReadBlocks/WriteBlocks for it (EXP-0048, F-021) */
++		print("ufs: the kernel's requests: %d served, %d failed, %d bytes; %d ms in the firmware's block calls\n",
++		    block_shared.answer.served, block_shared.answer.failed, block_shared.answer.bytes,
++		    block_shared.answer.ticks * 1000 / READ_SYSREG(CNTFRQ_EL0));
++	}
+ 	if (block_write_requested) {
+ 		print("ufs: %d writes into darwin, %d bytes, read back the same; %d refused\n", block_writes,
+ 		    block_write_bytes, block_writes_refused);
+@@ -3788,8 +3888,17 @@
+ 	if (USB == NULL) {
+ 		return;         /* this run was not started over USB */
+ 	}
+-	if (!usb_rx_queued && usb_connected && !EFI_ERROR(USB->send(USB_EP_OUT, 511, usb_rx_buf))) {
+-		usb_rx_queued = 1;
++	if (!usb_rx_queued && usb_connected) {
++		if (!EFI_ERROR(USB->send(USB_EP_OUT, 511, usb_rx_buf))) {
++			usb_rx_queued = 1;
++		} else {
++			/*
++			 * The cable was pulled and no state-change event has come (yet): the controller's own driver prints
++			 * "usbDevicesSend: failed to submit data transfer" on the screen for every attempt, and this loop
++			 * makes one on every pass. Treat the host as gone until the controller says it is back.
++			 */
++			usb_connected = 0;
++		}
+ 	}
+ 	USB->handle_event(&msg, &size, &data);
+ 	if (msg == UsbDeviceEventDeviceStateChange) {
+@@ -3917,6 +4026,241 @@
+ 	SCREEN.stride = PHONE_WIDTH * 4;
+ }
+ 
++/* ------------------------------------------------------------------------ */
++/* Timer probe (EXP-0028): which interrupt does the EL1 virtual timer raise?   */
++/*                                                                          */
++/* The kernel hard-codes PPI 27 (INTID); Qualcomm parts up to SDM845 wire the  */
++/* timers to INTID 16-19 (stock DT of the Mi 8: virtual 19). This starts the   */
++/* virtual timer for 1 ms with interrupts masked on this core, and reads which */
++/* PPI of this core's redistributor goes pending. It writes no GIC register.   */
++
++static uint32_t
++mmio_r32(uint64_t a)
++{
++	return *(volatile uint32_t *)a;
++}
++
++/*
++ * "idprobe" (EXP-0043, U-032): which of the 8 cores can run what the kernel needs? Each core is started
++ * by the firmware (PSCI CPU_ON, as for "bootcpu=N") at id_probe_entry, which reads the core's ID registers
++ * into its own line of id_probe_out[], marks it done and switches itself off. No kernel runs, nothing is
++ * written anywhere but into these lines. Registers (ARM ARM): MIDR_EL1, MPIDR_EL1, ID_AA64PFR0_EL1,
++ * ID_AA64MMFR0_EL1 (TGran16 [23:20]: 0 no 16 KB pages, 1 yes), ID_AA64MMFR1_EL1, ID_AA64ISAR0_EL1,
++ * ID_AA64ISAR1_EL1 (APA [7:4], API [11:8]: address authentication; GPA [27:24], GPI [31:28]: generic).
++ */
++struct id_probe_line {
++	volatile uint64_t done;         /* written last */
++	uint64_t el, midr, mpidr, pfr0, mmfr0, mmfr1, isar0, isar1;
++	uint64_t cycles, ticks;     /* PMCCNTR_EL0 and CNTVCT_EL0 over the same ~20 ms: the core's actual clock (EXP-0049) */
++} __attribute__((aligned(128)));
++static struct id_probe_line id_probe_out[8];
++void id_probe_entry(void);
++
++__asm__ (
++        ".text\n"
++        ".balign 64\n"
++        ".globl id_probe_entry\n"
++        "id_probe_entry:\n"                     /* x0 = this core's line; MMU and caches are off */
++        "  msr daifset, #0xf\n"
++        /* a register this core may not touch must not send it nowhere: other_cpu_fault switches the core off */
++        "  adrp x9, other_cpu_vectors\n"
++        "  add  x9, x9, :lo12:other_cpu_vectors\n"
++        "  msr vbar_el1, x9\n"
++        "  isb\n"
++        "  mrs x9, CurrentEL\n"
++        "  lsr x9, x9, #2\n"
++        "  str x9, [x0, #8]\n"
++        "  mrs x9, midr_el1\n"
++        "  str x9, [x0, #16]\n"
++        "  mrs x9, mpidr_el1\n"
++        "  str x9, [x0, #24]\n"
++        "  mrs x9, id_aa64pfr0_el1\n"
++        "  str x9, [x0, #32]\n"
++        "  mrs x9, id_aa64mmfr0_el1\n"
++        "  str x9, [x0, #40]\n"
++        "  mrs x9, id_aa64mmfr1_el1\n"
++        "  str x9, [x0, #48]\n"
++        "  mrs x9, id_aa64isar0_el1\n"
++        "  str x9, [x0, #56]\n"
++        "  mrs x9, id_aa64isar1_el1\n"
++        "  str x9, [x0, #64]\n"
++        /* the clock: count cycles (PMCCNTR_EL0: PMCR_EL0.E and .C, PMCNTENSET_EL0 bit 31) for 1/50 s of CNTVCT */
++        "  mov x9, #5\n"
++        "  msr pmcr_el0, x9\n"
++        "  mov x9, #1\n"
++        "  lsl x9, x9, #31\n"
++        "  msr pmcntenset_el0, x9\n"
++        "  isb\n"
++        "  mrs x12, cntfrq_el0\n"
++        "  mov x13, #50\n"
++        "  udiv x12, x12, x13\n"
++        "  mrs x10, cntvct_el0\n"
++        "  mrs x11, pmccntr_el0\n"
++        "  add x12, x12, x10\n"
++        "3: mrs x14, cntvct_el0\n"
++        "  cmp x14, x12\n"
++        "  b.lo 3b\n"
++        "  mrs x15, pmccntr_el0\n"
++        "  mrs x16, cntvct_el0\n"
++        "  sub x15, x15, x11\n"
++        "  sub x16, x16, x10\n"
++        "  str x15, [x0, #72]\n"
++        "  str x16, [x0, #80]\n"
++        "  dsb sy\n"
++        "  mov x9, #1\n"
++        "  str x9, [x0]\n"
++        "  dsb sy\n"
++        "  sev\n"
++        "  adrp x10, psci_by_hvc\n"
++        "  add  x10, x10, :lo12:psci_by_hvc\n"
++        "  ldr x9, [x10]\n"
++        "  mov x0, #0x0002\n"                   /* PSCI CPU_OFF: does not return */
++        "  movk x0, #0x8400, lsl #16\n"
++        "  cbnz x9, 2f\n"
++        "  smc #0\n"
++        "1: wfi\n"
++        "  b 1b\n"
++        "2: hvc #0\n"
++        "  b 1b\n"
++        );
++
++static void
++id_probe(void)
++{
++	uint64_t self = READ_SYSREG(MPIDR_EL1) & 0xFFFFFF;
++
++	psci_by_hvc = PLAT->psci_hvc;
++	clean_dcache((uint64_t)(uintptr_t)&psci_by_hvc, (uint64_t)(uintptr_t)&psci_by_hvc + 8);
++	clean_dcache((uint64_t)(uintptr_t)&id_probe_entry, (uint64_t)(uintptr_t)&id_probe_entry + 0x200);
++	print("idprobe: core 0 is %x; the others are started one at a time\n", self);
++	/* this core last: its PMU access is the one that could go wrong on this core's own stack of handlers */
++	for (int k = 0; k < PLAT->cores && k < 8; k++) {
++		int core = (k + 1) % PLAT->cores;
++		uint64_t mpidr = (uint64_t)core << PLAT->core_shift;
++		struct id_probe_line *l = &id_probe_out[core];
++		int64_t status = 0;
++		uint64_t t;
++
++		if (mpidr == self) {
++			uint64_t m = READ_SYSREG(MPIDR_EL1);
++			__asm__ volatile ("mrs %0, id_aa64pfr0_el1" : "=r" (l->pfr0));
++			__asm__ volatile ("mrs %0, id_aa64mmfr0_el1" : "=r" (l->mmfr0));
++			__asm__ volatile ("mrs %0, id_aa64mmfr1_el1" : "=r" (l->mmfr1));
++			__asm__ volatile ("mrs %0, id_aa64isar0_el1" : "=r" (l->isar0));
++			__asm__ volatile ("mrs %0, id_aa64isar1_el1" : "=r" (l->isar1));
++			l->midr = READ_SYSREG(MIDR_EL1);
++			l->mpidr = m;
++			l->el = 1;
++			{
++				uint64_t c0, c1, t0, t1, want = READ_SYSREG(CNTFRQ_EL0) / 50;
++
++				__asm__ volatile ("msr pmcr_el0, %0\n msr pmcntenset_el0, %1\n isb" : : "r" (5ULL), "r" (1ULL << 31));
++				t0 = READ_SYSREG(CNTVCT_EL0);
++				__asm__ volatile ("mrs %0, pmccntr_el0" : "=r" (c0));
++				while (READ_SYSREG(CNTVCT_EL0) - t0 < want) {
++				}
++				__asm__ volatile ("mrs %0, pmccntr_el0" : "=r" (c1));
++				t1 = READ_SYSREG(CNTVCT_EL0);
++				l->cycles = c1 - c0;
++				l->ticks = t1 - t0;
++			}
++			l->done = 1;
++		} else {
++			memset(l, 0, sizeof(*l));
++			clean_dcache((uint64_t)(uintptr_t)l, (uint64_t)(uintptr_t)l + sizeof(*l));
++			status = psci_call(PSCI_CPU_ON, mpidr, (uint64_t)(uintptr_t)&id_probe_entry, (uint64_t)(uintptr_t)l);
++			t = READ_SYSREG(CNTVCT_EL0);
++			while (status == 0 && seconds_since(t) < 3) {
++				flush_dcache((uint64_t)(uintptr_t)l, (uint64_t)(uintptr_t)l + sizeof(*l));
++				if (l->done) {
++					break;
++				}
++			}
++			flush_dcache((uint64_t)(uintptr_t)l, (uint64_t)(uintptr_t)l + sizeof(*l));
++		}
++		if (!l->done) {
++			print("idprobe: core %d (mpidr %x): firmware says %d, no answer\n", (uint64_t)core, mpidr, (uint64_t)status);
++			continue;
++		}
++		print("idprobe: core %d mpidr %x EL%d MIDR %x part %x\n", (uint64_t)core, l->mpidr & 0xFFFFFF, l->el, l->midr,
++		    (l->midr >> 4) & 0xFFF);
++		print("  clock: %d cycles in %d ticks of %d Hz = %d MHz\n", l->cycles, l->ticks, READ_SYSREG(CNTFRQ_EL0),
++		    l->ticks ? l->cycles * (READ_SYSREG(CNTFRQ_EL0) / 1000) / l->ticks / 1000 : 0);
++		print("  MMFR0 %x TGran16 %d TGran4 %d TGran64 %d | ISAR0 %x ISAR1 %x APA %d API %d GPA %d GPI %d | PFR0 %x\n",
++		    l->mmfr0, (l->mmfr0 >> 20) & 0xF, (l->mmfr0 >> 28) & 0xF, (l->mmfr0 >> 24) & 0xF, l->isar0, l->isar1,
++		    (l->isar1 >> 4) & 0xF, (l->isar1 >> 8) & 0xF, (l->isar1 >> 24) & 0xF, (l->isar1 >> 28) & 0xF, l->pfr0);
++	}
++	print("idprobe: done\n");
++}
++
++static uint64_t
++mmio_r64(uint64_t a)
++{
++	return *(volatile uint64_t *)a;
++}
++
++static void
++timer_probe(void)
++{
++	uint64_t mpidr = READ_SYSREG(MPIDR_EL1), freq = READ_SYSREG(CNTFRQ_EL0);
++	uint64_t aff = (mpidr & 0xFFFFFF) | (((mpidr >> 32) & 0xFF) << 24);
++	uint64_t rd = 0;
++
++	print("tprobe: mpidr %x cntfrq %d\n", mpidr, freq);
++	for (unsigned i = 0; i < 16; i++) {
++		uint64_t frame = PLAT->gic_redist + (uint64_t)i * 0x20000;
++		uint64_t typer = mmio_r64(frame + 0x08);
++
++		print("tprobe: gicr[%d] at %x typer %x\n", (uint64_t)i, frame, typer);
++		if ((typer >> 32) == aff) {
++			rd = frame;
++			break;
++		}
++		if (typer & 0x10) {
++			break;
++		}
++	}
++	if (rd == 0) {
++		print("tprobe: no redistributor frame for this core\n");
++		return;
++	}
++
++	uint64_t sgi = rd + 0x10000;
++	uint64_t daif, ctl0, ctl1, pend0, pend1, pend2, enabled, t;
++
++	print("tprobe: rd %x waker %x\n", rd, (uint64_t)mmio_r32(rd + 0x14));
++	print("tprobe: igroupr0 %x grpmodr0 %x isenabler0 %x icfgr1 %x\n", (uint64_t)mmio_r32(sgi + 0x80),
++	    (uint64_t)mmio_r32(sgi + 0xD00), (uint64_t)mmio_r32(sgi + 0x100), (uint64_t)mmio_r32(sgi + 0xC04));
++
++	__asm__ volatile ("mrs %0, daif" : "=r" (daif));
++	__asm__ volatile ("msr daifset, #3" ::: "memory");
++	__asm__ volatile ("msr cntv_ctl_el0, %0; isb" :: "r" (0ULL) : "memory");
++	ctl0 = READ_SYSREG(CNTV_CTL_EL0);
++	pend0 = mmio_r32(sgi + 0x200);
++	__asm__ volatile ("msr cntv_tval_el0, %0" :: "r" (freq / 1000) : "memory");
++	__asm__ volatile ("msr cntv_ctl_el0, %0; isb" :: "r" (1ULL) : "memory");
++	t = READ_SYSREG(CNTVCT_EL0);
++	while (READ_SYSREG(CNTVCT_EL0) - t < freq / 200) {
++	}
++	ctl1 = READ_SYSREG(CNTV_CTL_EL0);
++	pend1 = mmio_r32(sgi + 0x200);
++	enabled = mmio_r32(sgi + 0x100);
++	__asm__ volatile ("msr cntv_ctl_el0, %0; isb" :: "r" (0ULL) : "memory");
++	pend2 = mmio_r32(sgi + 0x200);
++	__asm__ volatile ("msr daif, %0" :: "r" (daif) : "memory");
++
++	print("tprobe: CNTV_CTL before %x, after 5 ms %x (bit 2 = ISTATUS: the timer fired)\n", ctl0, ctl1);
++	print("tprobe: ISPENDR0 before %x, with timer %x, timer off %x; ISENABLER0 %x\n", pend0, pend1, pend2, enabled);
++	for (unsigned n = 16; n < 32; n++) {
++		if (((pend1 & ~pend0) >> n) & 1) {
++			print("tprobe: INTID %d went pending because of the virtual timer\n", (uint64_t)n);
++		}
++	}
++	if ((pend1 & ~pend0) == 0) {
++		print("tprobe: no PPI went pending (ISTATUS says %d)\n", (ctl1 >> 2) & 1);
++	}
++}
++
+ efi_status EFIAPI
+ efi_main(efi_handle image, efi_system_table *st)
+ {
+@@ -3944,24 +4288,67 @@
+ 		for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
+ 			if (platforms[i]->fb_base == SCREEN.base)
+ 				PLAT = platforms[i];
++		if (PLAT == &platform_qemu_virt) {
++			uint64_t midr = READ_SYSREG(MIDR_EL1);
++			for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
++				for (int j = 0; j < 2; j++)
++					if (platforms[i]->midr_part[j] && (midr >> 24 & 0xFF) == 0x51 &&
++					    (midr >> 4 & 0xFFF) == platforms[i]->midr_part[j])
++						PLAT = platforms[i];
++		}
+ 		if (PLAT == &platform_qemu_virt)
+ 			ramfb_phone_screen();
+ 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
+ 	}
++	log_write_disabled = PLAT->no_log_write;
+ 	print("platform %s\n", PLAT->name);
+ 
+ 	install_exception_hook();
+ 	wdt_arm();
+ 
+ 	int have_payload = parse_payload(&pi, 0);
++	if (have_payload && pi.timer_probe) {
++		timer_probe();
++		for (uint64_t n = 0;; n++) {
++			uint64_t t = READ_SYSREG(CNTVCT_EL0);
++			print("tprobe done, alive %d s\n", n * 5);
++			while (seconds_since(t) < 5) {
++			}
++		}
++	}
++	if (have_payload && pi.id_probe) {
++		id_probe();
++	}
+ 	if (have_payload && pi.usb_mode && usb_start()) {
+ 		flush_log();
+ 		usb_command_loop();
+ 	}
+ 
++	if (!have_payload && PLAT->no_log_write) {
++		/*
++		 * Display bring-up on a phone with nothing to run: stay here so the text above can be read,
++		 * and show that the loader is alive. A long press of the power key resets the phone.
++		 */
++		for (uint64_t n = 0;; n++) {
++			uint64_t t = READ_SYSREG(CNTVCT_EL0);
++			print("alive %d s\n", n * 5);
++			while (seconds_since(t) < 5) {
++			}
++		}
++	}
++
+ 	/* One-shot mode: run the kernel that came with the image, then reset. */
+ 	if (have_payload) {
+ 		run_kernel(0, 0);
++		if (PLAT->no_log_write) {
++			/*
++			 * Nothing persists the log here, and a reset now would take the screen with it (EXP-0029:
++			 * the phone restarted a moment after a panic). Stay so that it can be read.
++			 */
++			print("\n-- held: long-press the power key to reset the phone --\n");
++			for (;;) {
++			}
++		}
+ 	}
+ 	reboot();
+ 	return 0;

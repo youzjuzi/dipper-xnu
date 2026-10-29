@@ -1,0 +1,10 @@
+--- a/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf
++++ b/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf
+@@ -30,6 +30,7 @@
+ 
+ [Packages]
+   MdePkg/MdePkg.dec
++  EmbeddedPkg/EmbeddedPkg.dec
+   UniXNUPkg/UniXNUPkg.dec
+ 
+ [LibraryClasses]

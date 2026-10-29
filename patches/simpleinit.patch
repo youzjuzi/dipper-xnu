@@ -1,0 +1,20 @@
+--- a/libs/compatible/malloc.c
++++ b/libs/compatible/malloc.c
+@@ -167,11 +167,16 @@
+ {
+ 	CPOOL_HEAD   *Head;
+ 
++	// free(NULL) must be a no-op. Compute Head only after the check: BASE_CR(NULL) is
++	// pointer arithmetic on NULL, which lets newer clang assume Ptr != NULL and drop the check.
++	if(Ptr == NULL) {
++		return;
++	}
+ 	Head = BASE_CR(Ptr, CPOOL_HEAD, Data);
+ 	assert(Head != NULL);
+ 	DEBUG((DEBUG_POOL, "free(%p): Head: %p\n", Ptr, Head));
+ 
+-	if(Ptr != NULL) {
++	{
+ 		if (Head->Signature == CPOOL_HEAD_SIGNATURE) {
+ 			(void) RemoveEntryList((LIST_ENTRY *)Head);   // Remove this node from the malloc pool
+ 			(void) gBS->FreePool (Head);                  // Now free the associated memory

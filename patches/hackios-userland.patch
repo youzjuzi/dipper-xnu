@@ -1,0 +1,1931 @@
+--- a/tools/mesa/redwood-drm/redwood_drm.c
++++ b/tools/mesa/redwood-drm/redwood_drm.c
+@@ -13,6 +13,7 @@
+ #include <unistd.h>
+ 
+ #include <IOKit/IOKitLib.h>
++#include <mach/mach_time.h>
+ 
+ #include "xf86drm.h"
+ 
+@@ -23,6 +24,16 @@
+ static io_connect_t connection;
+ static int connection_fd = -1;
+ 
++/*
++ * How often each request was made and how long the kernel took (mach ticks), by selector: the OpenGL ES
++ * library (src/eagl.c, userland) reads them to say which GL calls caused GPU submissions (selector 0x46 =
++ * DRM_COMMAND_BASE + DRM_MSM_GEM_SUBMIT, EXP-0174). Visible outside this library on purpose.
++ */
++__attribute__((visibility("default"))) unsigned long redwood_drm_calls[256];
++__attribute__((visibility("default"))) unsigned long redwood_drm_ticks[256];
++/* ... and all requests together: [0] how many, [1] ticks (EXP-0175: which GL calls spend time in the kernel, whatever the request) */
++__attribute__((visibility("default"))) unsigned long redwood_drm_total[2];
++
+ int
+ drmOpenWithType(const char *name, const char *busid, int type)
+ {
+@@ -53,7 +64,13 @@
+ call(unsigned number, void *data, size_t size)
+ {
+ 	size_t returned = size;
++	uint64_t began = mach_absolute_time();
+ 	kern_return_t result = IOConnectCallStructMethod(connection, number, data, size, data, &returned);
++
++	redwood_drm_calls[number & 0xff]++;
++	redwood_drm_ticks[number & 0xff] += mach_absolute_time() - began;
++	redwood_drm_total[0]++;
++	redwood_drm_total[1] += mach_absolute_time() - began;
+ 
+ 	switch (result) {
+ 	case 0:
+@@ -99,6 +116,16 @@
+ drmCommandWriteRead(int fd, unsigned long index, void *data, unsigned long size)
+ {
+ 	(void)fd;
++	/*
++	 * DRM_MSM_GEM_MADVISE (freedreno's buffer cache asks about every buffer it reuses): the kernel's answer
++	 * is always "retained" and it does nothing else (RedwoodGPU.cpp, kMsmGemMadvise), and a request costs
++	 * a round trip of ~13 us, ~37 a frame (EXP-0175). Answered here; the count is kept.
++	 */
++	if (index == 0x08 && size >= 12) {
++		((uint32_t *)data)[2] = 1;
++		redwood_drm_calls[DRM_COMMAND_BASE + index]++;
++		return 0;
++	}
+ 	return -call((unsigned)(DRM_COMMAND_BASE + index), data, size);
+ }
+ 
+--- a/userland/build.sh
++++ b/userland/build.sh
+@@ -362,7 +362,8 @@
+ 		fi
+ 	fi
+ 	# (drawable_test is built in the same block as surf_test, so it is copied with it)
+-	cp obj/hello_dyn obj/svc_test obj/surf_test obj/drawable_test obj/rwtouch obj/mg_test root/bin/
++	cp obj/hello_dyn obj/svc_test obj/surf_test obj/rwtouch obj/mg_test root/bin/
++	[ -f obj/drawable_test ] && cp obj/drawable_test root/bin/     # (prebuilt/userland is from before this program)
+ 	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
+ 	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
+ 	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
+--- a/userland/mkjobs.py
++++ b/userland/mkjobs.py
+@@ -222,8 +222,15 @@
+         # these start, crash and are asked for again, over and over. (aggregated, which was among them, is where
+         # iOS 16 keeps its power log -- com.apple.powerlog.plxpclogger.xpc and the rest -- that Settings > Battery
+         # waits for; it now runs through a session.)
+-        'homed', 'routined', 'duetexpertd', 'com.apple.dmd', 'syncdefaultsd', 'photoanalysisd', 'avconferenced')
+-
++        'homed', 'routined', 'duetexpertd', 'com.apple.dmd', 'syncdefaultsd', 'photoanalysisd', 'avconferenced',
++        # Mi 8 (MI8-IOS EXP-0235): here mobileactivationd dies with SIGTRAP every time it starts, and apsd's main thread
++        # waits for ever in -[MadGate copyLegacyDeviceIdentity:] for its answer; every client of apsd (identityservicesd,
++        # the account stack, Safari's history queue) then waits on apsd and Safari hangs on its first page. Not being
++        # there, the lookup fails at once and apsd goes on.
++        'mobileactivationd')
++
++# DENY_MORE="word ..." stops more of them, for trying one out (Mi 8, EXP-0147: fairplayd, which exits as it starts and is asked for again every ten seconds)
++DENY = DENY + tuple(os.environ.get('DENY_MORE', '').split())
+ # ALLOW="word ..." in the environment lets jobs through that DENY would stop: for trying one out
+ DENY = tuple(word for word in DENY if word not in os.environ.get('ALLOW', '').split())
+ 
+@@ -322,9 +329,10 @@
+         # it. The boot of 22 October showed what declining costs: SpringBoard's icons stopped being
+         # drawn, because its layers ask for one of those formats and a refused texture is a layer
+         # that never appears.
+-        for name in ('RWA_PACKED16',):
+-            if os.environ.get(name):
+-                job.setdefault('EnvironmentVariables', {})[name] = os.environ[name]
++        # (not `name': that is the plist's file name, written below -- reusing it sent all 387 jobs into one file)
++        for variable in ('RWA_PACKED16',):
++            if os.environ.get(variable):
++                job.setdefault('EnvironmentVariables', {})[variable] = os.environ[variable]
+         if label in oslog:
+             job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
+         with open(f'{dest}/{name}', 'wb') as f:
+--- a/userland/src/eagl.c
++++ b/userland/src/eagl.c
+@@ -59,6 +59,7 @@
+  * every frame (see frame_end()).
+  */
+ #include <CoreFoundation/CoreFoundation.h>
++#include <dlfcn.h>
+ #include <IOKit/IOKitLib.h>
+ #include <IOSurface/IOSurfaceRef.h>
+ #include <mach/mach_time.h>
+@@ -237,6 +238,8 @@
+ 	GLenum to, internal, format, type;
+ 	uint32_t plane, seed;
+ 	GLsizei width, height;
++	GLint dmg[4];                   /* what was drawn into it since it was last sent out: x0, y0, x1, y1 (damage_added()) */
++	bool dmg_any, dmg_full;
+ };
+ 
+ struct eagl {
+@@ -334,6 +337,28 @@
+ static __thread struct eagl *current;
+ static struct eagl *contexts[8];
+ static uint32_t slot_calls[SLOTS];
++static uint64_t slot_us[SLOTS];         /* microseconds inside each entry (EXP-0125) */
++static uint64_t gl_in_calls_us;         /* ... and inside all of them, this frame */
++/*
++ * GPU submissions (selector 0x46 of the DRM shim's counters, tools/mesa/redwood-drm) made inside each
++ * entry, and the microseconds the kernel took for them (EXP-0174): which GL calls cause them.
++ */
++#define DRM_SUBMIT      0x46
++static const unsigned long *drm_calls, *drm_ticks, *drm_total;
++static uint32_t slot_kcalls[SLOTS];             /* kernel requests of any kind made inside each entry, and the microseconds they took (EXP-0175) */
++static uint64_t slot_kus[SLOTS];
++static unsigned long kcalls_began, kticks_began;
++/* the requests that matter, by the entry they were made in: [slot][which] (EXP-0175) */
++static const uint8_t req_numbers[] = { 0x09, 0x42, 0x43, 0x44, 0x46, 0x47, 0x7e };
++#define REQS    (sizeof(req_numbers) / sizeof(req_numbers[0]))
++static uint32_t slot_req_calls[SLOTS][REQS];
++static uint64_t slot_req_ticks[SLOTS][REQS];
++static unsigned long req_calls_began[REQS], req_ticks_began[REQS];
++static uint32_t slot_submits[SLOTS];
++static uint64_t slot_submit_us[SLOTS];
++static unsigned long submits_began, submit_ticks_began;
++static uint32_t submits_flush, submits_image, submits_fence;    /* ... and those of my_glFlush's own glFlush, frame_end's per-picture one and its fence */
++#define SUBMITS_NOW()   (drm_calls != NULL ? drm_calls[DRM_SUBMIT] : 0)
+ static int check_errors = 1;            /* ask the library for an error after every call (the first frames) */
+ static int share_surfaces = 1;          /* boot-arg glcopy=1: 0 */
+ /*
+@@ -371,6 +396,9 @@
+  */
+ static int fetch_offered = 1;
+ 
++#ifndef GL_LINEAR
++#define GL_LINEAR                       0x2601
++#endif
+ #define GL_SCISSOR_TEST                 0x0c11
+ #define GL_SCISSOR_BOX                  0x0c10
+ #define GL_COLOR_CLEAR_VALUE            0x0c22
+@@ -390,9 +418,17 @@
+ 	}
+ 	slot_calls[offset / 8]++;
+ 	e->calls++;
+-	if (slow_calls_us != 0) {
+-		call_began_us = now_us();
+-	}
++	if (drm_calls != NULL) {
++		submits_began = drm_calls[DRM_SUBMIT];
++		submit_ticks_began = drm_ticks[DRM_SUBMIT];
++		kcalls_began = drm_total[0];
++		kticks_began = drm_total[1];
++		for (unsigned i = 0; i < REQS; i++) {
++			req_calls_began[i] = drm_calls[req_numbers[i]];
++			req_ticks_began[i] = drm_ticks[req_numbers[i]];
++		}
++	}
++	call_began_us = now_us();
+ }
+ 
+ static void
+@@ -405,11 +441,35 @@
+ 			say("redwood-gl: %s: error %#x\n", eagl_slot_name(offset), error);
+ 		}
+ 	}
+-	if (slow_calls_us != 0) {
++	{
+ 		uint64_t now = now_us();
+ 
++		slot_us[offset / 8] += now - call_began_us;
++		gl_in_calls_us += now - call_began_us;
++		if (drm_calls != NULL && drm_total[0] != kcalls_began) {
++			static mach_timebase_info_data_t kbase;
++
++			if (kbase.denom == 0) {
++				mach_timebase_info(&kbase);
++			}
++			for (unsigned i = 0; i < REQS; i++) {
++				slot_req_calls[offset / 8][i] += (uint32_t)(drm_calls[req_numbers[i]] - req_calls_began[i]);
++				slot_req_ticks[offset / 8][i] += drm_ticks[req_numbers[i]] - req_ticks_began[i];
++			}
++			slot_kcalls[offset / 8] += (uint32_t)(drm_total[0] - kcalls_began);
++			slot_kus[offset / 8] += (drm_total[1] - kticks_began) * kbase.numer / kbase.denom / 1000;
++		}
++		if (drm_calls != NULL && drm_calls[DRM_SUBMIT] != submits_began) {
++			static mach_timebase_info_data_t base;
++
++			if (base.denom == 0) {
++				mach_timebase_info(&base);
++			}
++			slot_submits[offset / 8] += (uint32_t)(drm_calls[DRM_SUBMIT] - submits_began);
++			slot_submit_us[offset / 8] += (drm_ticks[DRM_SUBMIT] - submit_ticks_began) * base.numer / base.denom / 1000;
++		}
+ 		/* "tl: slow NAME US at US, frame N": a call that took long, and when it ended (tools/frames.py) */
+-		if (now - call_began_us >= slow_calls_us) {
++		if (slow_calls_us != 0 && now - call_began_us >= slow_calls_us) {
+ 			say("tl: slow %s %llu at %llu, frame %u%s\n", eagl_slot_name(offset), now - call_began_us, now, e->frames + 1,
+ 			    e->in_frame ? "" : " (before its first draw)");
+ 		}
+@@ -507,6 +567,91 @@
+ 		if (slot_calls[offset / 8]) {
+ 			say("redwood-gl:   %-28s %u\n", eagl_slot_name(offset), slot_calls[offset / 8]);
+ 		}
++	}
++	/* the entries by the time spent in them (EXP-0125) */
++	for (unsigned rank = 0; rank < 12; rank++) {
++		unsigned best = 0;
++
++		for (unsigned i = 1; i < SLOTS; i++) {
++			if (slot_us[i] > slot_us[best]) {
++				best = i;
++			}
++		}
++		if (slot_us[best] == 0) {
++			break;
++		}
++		say("redwood-gl: time %2u: %-28s %llu us in %u calls (%llu us a call)\n", rank + 1, eagl_slot_name(best * 8), slot_us[best],
++		    slot_calls[best], slot_us[best] / (slot_calls[best] ? slot_calls[best] : 1));
++		slot_us[best] = 0;      /* (so that the next is the next: the totals restart after each summary) */
++	}
++	/* time in the kernel (any request) by the call it was made in, and by request (EXP-0175) */
++	static mach_timebase_info_data_t kbase2;
++
++	if (kbase2.denom == 0) {
++		mach_timebase_info(&kbase2);
++	}
++	for (unsigned rank = 0; drm_calls != NULL && rank < 8; rank++) {
++		unsigned best = 0;
++
++		for (unsigned i = 1; i < SLOTS; i++) {
++			if (slot_kus[i] > slot_kus[best]) {
++				best = i;
++			}
++		}
++		if (slot_kus[best] == 0) {
++			break;
++		}
++		say("redwood-gl: kernel %u: %-28s %llu us in %u kernel requests (%llu us a request)\n", rank + 1,
++		    eagl_slot_name(best * 8), slot_kus[best], slot_kcalls[best], slot_kus[best] / slot_kcalls[best]);
++		if (rank < 4) {
++			say("redwood-gl:   %s by request:", eagl_slot_name(best * 8));
++			for (unsigned i = 0; i < REQS; i++) {
++				if (slot_req_calls[best][i] != 0) {
++					say(" %#x %u/%llu us", req_numbers[i], slot_req_calls[best][i], (unsigned long long)(slot_req_ticks[best][i] * kbase2.numer / kbase2.denom / 1000));
++				}
++			}
++			say("\n");
++		}
++		memset(slot_req_calls[best], 0, sizeof(slot_req_calls[best]));
++		memset(slot_req_ticks[best], 0, sizeof(slot_req_ticks[best]));
++		slot_kus[best] = 0;
++		slot_kcalls[best] = 0;
++	}
++	if (drm_calls != NULL) {
++		static mach_timebase_info_data_t sbase;
++
++		if (sbase.denom == 0) {
++			mach_timebase_info(&sbase);
++		}
++		for (unsigned i = 0; i < 256; i++) {
++			if (drm_calls[i] != 0 && drm_ticks[i] * sbase.numer / sbase.denom / 1000 >= 20000) {
++				say("redwood-gl: request %#x: %lu calls, %llu us in the kernel (%llu us each)\n", i, drm_calls[i],
++				    (unsigned long long)(drm_ticks[i] * sbase.numer / sbase.denom / 1000),
++				    (unsigned long long)(drm_ticks[i] * sbase.numer / sbase.denom / 1000 / drm_calls[i]));
++			}
++		}
++	}
++	/* GPU submissions by the call they were made in (EXP-0174) */
++	if (drm_calls != NULL) {
++		say("redwood-gl: submits: %lu in all; in glFlush's own glFlush %u, in frame_end after a picture %u, in its fence %u; "
++		    "selectors: wait %lu, cpu_prep %lu, new %lu\n", drm_calls[DRM_SUBMIT], submits_flush, submits_image, submits_fence,
++		    drm_calls[0x47], drm_calls[0x44], drm_calls[0x42]);
++	}
++	for (unsigned rank = 0; drm_calls != NULL && rank < 8; rank++) {
++		unsigned best = 0;
++
++		for (unsigned i = 1; i < SLOTS; i++) {
++			if (slot_submits[i] > slot_submits[best]) {
++				best = i;
++			}
++		}
++		if (slot_submits[best] == 0) {
++			break;
++		}
++		say("redwood-gl: submits %u: %-28s %u in %u calls, %llu us in the kernel (%llu us each)\n", rank + 1, eagl_slot_name(best * 8),
++		    slot_submits[best], slot_calls[best], slot_submit_us[best], slot_submit_us[best] / slot_submits[best]);
++		slot_submits[best] = 0;
++		slot_submit_us[best] = 0;
+ 	}
+ }
+ 
+@@ -751,6 +896,189 @@
+ 	e->upload_bytes += row * (size_t)image->height;
+ }
+ 
++/*
++ * What a frame changed of the display's picture, for the display driver to put only that on the panel
++ * (kRedwoodDamage = 0x7c of the GPU service; boot-arg gldamage=0: the whole picture, always). The box is the
++ * scissor box CoreAnimation draws inside, or all of it where there is none.
++ */
++static int damage_on = 1;
++static io_connect_t damage_connection;
++static int damage_asked;
++
++static void
++damage_added(struct image *image)
++{
++	GLint box[4];
++
++	if (!damage_on || !image->target || image->width < 1000 || image->height < 2000) {
++		return;
++	}
++	if (!glIsEnabled(GL_SCISSOR_TEST)) {
++		image->dmg_full = true;
++		return;
++	}
++	glGetIntegerv(GL_SCISSOR_BOX, box);
++	if (box[2] <= 0 || box[3] <= 0) {
++		return;
++	}
++	if (!image->dmg_any) {
++		image->dmg[0] = box[0];
++		image->dmg[1] = box[1];
++		image->dmg[2] = box[0] + box[2];
++		image->dmg[3] = box[1] + box[3];
++		image->dmg_any = true;
++	} else {
++		image->dmg[0] = box[0] < image->dmg[0] ? box[0] : image->dmg[0];
++		image->dmg[1] = box[1] < image->dmg[1] ? box[1] : image->dmg[1];
++		image->dmg[2] = box[0] + box[2] > image->dmg[2] ? box[0] + box[2] : image->dmg[2];
++		image->dmg[3] = box[1] + box[3] > image->dmg[3] ? box[1] + box[3] : image->dmg[3];
++	}
++}
++
++/* The connection to the kernel's GPU service, for the requests that are not the library's (damage, the scaled frame). */
++static io_connect_t
++gpu_connection(void)
++{
++	if (damage_connection == 0 && !damage_asked) {
++		io_service_t service = IOServiceGetMatchingService(0, IOServiceMatching("RedwoodGPU"));
++
++		damage_asked = 1;
++		if (service != 0) {
++			if (IOServiceOpen(service, mach_task_self(), 0, &damage_connection) != 0) {
++				damage_connection = 0;
++			}
++			IOObjectRelease(service);
++		}
++	}
++	return damage_connection;
++}
++
++static void
++damage_send(struct image *image)
++{
++	struct { int32_t box[4]; uint32_t full; } call = { { 0, 0, 0, 0 }, 1 };
++
++	if (!damage_on || !image->target || image->width < 1000 || image->height < 2000) {
++		return;
++	}
++	gpu_connection();
++	if (damage_connection == 0) {
++		return;
++	}
++	if (image->dmg_any && !image->dmg_full) {
++		/* (a texture's rows count from the bottom; the surface's memory from the top where the frame is copied upside down) */
++		GLint y0 = image->dmg[1] < 0 ? 0 : image->dmg[1], y1 = image->dmg[3] > image->height ? image->height : image->dmg[3];
++		GLint x0 = image->dmg[0] < 0 ? 0 : image->dmg[0], x1 = image->dmg[2] > image->width ? image->width : image->dmg[2];
++
++		call.box[0] = x0;
++		call.box[1] = image->invert ? image->height - y1 : y0;
++		call.box[2] = x1 - x0;
++		call.box[3] = y1 - y0;
++		call.full = call.box[2] <= 0 || call.box[3] <= 0;
++	}
++	image->dmg_any = image->dmg_full = false;
++	IOConnectCallStructMethod(damage_connection, 0x7c, &call, sizeof(call), NULL, NULL);
++}
++
++/*
++ * The frame, scaled to the panel by the GPU (boot-arg glscan=0: not). The frame is a texture of the library's own, of
++ * the iPhone's size; the panel is smaller, and the display driver used to scale it with the processor: 19 ms a frame,
++ * more than a refresh, so that frames came 30 a second (EXP-0125). Now the GPU scales it into a surface of the
++ * panel's size (the kernel says what that is), once a frame, and the display driver only copies it into the panel.
++ */
++static int scan_on = 1;
++static IOSurfaceRef scan_surface;
++static GLuint scan_texture;
++static GLsizei scan_width, scan_height;
++static int scan_tried;
++static bool scan_pending;
++
++static bool
++scan_call(uint32_t op, uint32_t surface, uint32_t *width, uint32_t *height)
++{
++	struct { uint32_t op, surface, width, height; } call = { op, surface, 0, 0 };
++	size_t size = sizeof(call);
++	io_connect_t connection = gpu_connection();
++
++	if (connection == 0 || IOConnectCallStructMethod(connection, 0x7b, &call, sizeof(call), &call, &size) != 0) {
++		return false;
++	}
++	if (width != NULL) {
++		*width = call.width;
++		*height = call.height;
++	}
++	return true;
++}
++
++static bool
++scan_ready(struct eagl *e)
++{
++	uint32_t width = 0, height = 0;
++	GLint bound = 0;
++	CFMutableDictionaryRef properties;
++	int32_t values[6];
++	static const CFStringRef *keys[6];
++	(void)keys;
++
++	if (!scan_on) {
++		return false;
++	}
++	if (scan_texture != 0) {
++		return true;
++	}
++	if (scan_tried) {
++		return false;
++	}
++	scan_tried = 1;
++	if (!scan_call(0, 0, &width, &height) || width == 0 || height == 0) {
++		scan_on = 0;
++		return false;
++	}
++	values[0] = (int32_t)width;
++	values[1] = (int32_t)height;
++	values[2] = 4;
++	values[3] = (int32_t)((width * 4 + 255) & ~255u);       /* (the GPU's rows are multiples of 256 bytes) */
++	values[4] = 0x42475241;                                 /* 'BGRA' */
++	values[5] = values[3] * (int32_t)height;
++	properties = CFDictionaryCreateMutable(NULL, 6, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++	{
++		const CFStringRef names[6] = { kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement, kIOSurfaceBytesPerRow,
++		    kIOSurfacePixelFormat, kIOSurfaceAllocSize };
++
++		for (int i = 0; i < 6; i++) {
++			CFNumberRef number = CFNumberCreate(NULL, kCFNumberSInt32Type, &values[i]);
++
++			CFDictionarySetValue(properties, names[i], number);
++			CFRelease(number);
++		}
++	}
++	scan_surface = IOSurfaceCreate(properties);
++	CFRelease(properties);
++	if (scan_surface == NULL) {
++		say("redwood-gl: glscan: no IOSurface of %u x %u\n", width, height);
++		scan_on = 0;
++		return false;
++	}
++	glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
++	glGenTextures(1, &scan_texture);
++	glBindTexture(GL_TEXTURE_2D, scan_texture);
++	if (!redwood_gl_surface_texture(e->gl, IOSurfaceGetID(scan_surface)) || !scan_call(1, IOSurfaceGetID(scan_surface), NULL, NULL)) {
++		glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
++		glDeleteTextures(1, &scan_texture);
++		scan_texture = 0;
++		CFRelease(scan_surface);
++		scan_surface = NULL;
++		scan_on = 0;
++		say("redwood-gl: glscan: the GPU cannot take the surface (%u x %u, %d bytes a row)\n", width, height, values[3]);
++		return false;
++	}
++	glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
++	scan_width = (GLsizei)width;
++	scan_height = (GLsizei)height;
++	say("redwood-gl: glscan: the frame is scaled by the GPU to %u x %u (%d bytes a row)\n", width, height, values[3]);
++	return true;
++}
++
+ /* What has been drawn into a texture, into its IOSurface, unless it is there (frame_end() waits for it). */
+ static void
+ target_to_surface(struct eagl *e, struct image *image)
+@@ -760,6 +1088,7 @@
+ 	uint8_t *base;
+ 
+ 	image->drawn = false;
++	damage_send(image);
+ 	if (image->mirror != 0) {
+ 		GLint read = 0, draw = 0;
+ 
+@@ -778,6 +1107,13 @@
+ 		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->mirror, 0);
+ 		glBlitFramebuffer(0, 0, image->width, image->height, 0, image->invert ? image->height : 0, image->width,
+ 		    image->invert ? 0 : image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
++		if (image->width >= 1000 && image->height >= 2000 && scan_ready(e)) {
++			/* ... and scaled to the panel's size, for the display driver to copy */
++			glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scan_texture, 0);
++			glBlitFramebuffer(0, 0, image->width, image->height, 0, image->invert ? scan_height : 0, scan_width,
++			    image->invert ? 0 : scan_height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
++			scan_pending = true;
++		}
+ 		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+ 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+ 		if (IOSurfaceLock(surface, 0, NULL) == 0) {
+@@ -1027,6 +1363,7 @@
+ frame_end(struct eagl *e, bool finished)
+ {
+ 	static unsigned unfollowed;
++	static uint64_t last_end;
+ 	uint64_t before, waited, after;
+ 	unsigned copied = 0, in_place = 0;
+ 
+@@ -1034,9 +1371,12 @@
+ 	before = now_us();
+ 	for (unsigned i = 0; i < e->image_count; i++) {
+ 		if (e->images[i].target && e->images[i].drawn && e->images[i].mirror != 0) {
++			unsigned long submits = SUBMITS_NOW();
++
+ 			target_to_surface(e, &e->images[i]);    /* (the GPU's copy: before what follows sends it out) */
+ 			in_place++;
+ 			glFlush();                              /* (also after a glFinish: the copy is new since) */
++			submits_image += (uint32_t)(SUBMITS_NOW() - submits);
+ 		}
+ 		if (e->images[i].target && e->images[i].drawn && e->images[i].shared) {
+ 			in_place++;
+@@ -1053,12 +1393,18 @@
+ 		 * the cause of frames with parts missing; that was drawing into the surface itself, see
+ 		 * blit_targets.)
+ 		 */
++		unsigned long submits = SUBMITS_NOW();
+ 		GLsync sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+ 
+ 		if (sync != NULL) {
+ 			(void)glClientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
+ 			glDeleteSync(sync);
+ 		}
++		submits_fence += (uint32_t)(SUBMITS_NOW() - submits);
++	}
++	if (scan_pending) {
++		scan_pending = false;
++		scan_call(2, IOSurfaceGetID(scan_surface), NULL, NULL);        /* (the batch with the scaling is with the kernel by now) */
+ 	}
+ 	waited = now_us();
+ 	for (unsigned i = 0; i < e->image_count; i++) {
+@@ -1119,9 +1465,10 @@
+ 	if (e->frames <= 40 || e->frames % 20 == 0) {
+ 		say("redwood-gl: frame %u: %u GL calls, %u draws, %u triangles, %u clears; %u textures refilled from IOSurfaces "
+ 		    "(%llu KB); %u picture%s copied out, %u drawn in place; %llu us (%llu handing on, %llu waiting, %llu copying "
+-		    "out), %llu before it for the IOSurfaces\n", e->frames, e->calls, e->draws, e->triangles, e->clears, e->uploads,
++		    "out), %llu before it for the IOSurfaces, %llu us inside GL calls\n", e->frames, e->calls, e->draws, e->triangles, e->clears, e->uploads,
+ 		    e->upload_bytes >> 10, copied, copied == 1 ? "" : "s", in_place, after - e->began, e->flushing, waited - before,
+-		    after - waited, e->attaching);
++		    after - waited, e->attaching, gl_in_calls_us);
++		say("redwood-gl: frame %u came %llu us after the one before; %llu us of that inside GL calls\n", e->frames, last_end ? after - last_end : 0, gl_in_calls_us);
+ 	}
+ 	if (e->frames == 30 || e->frames % 200 == 0) {
+ 		summary(e);
+@@ -1130,6 +1477,8 @@
+ 	if (e->frames == 600 && e->errors == 0) {
+ 		check_errors = 0;
+ 	}
++	last_end = after;
++	gl_in_calls_us = 0;
+ 	e->last_draws = e->draws;
+ 	e->calls = e->draws = e->triangles = e->uploads = e->clears = 0;
+ 	e->upload_bytes = e->attaching = e->flushing = 0;
+@@ -1171,6 +1520,7 @@
+ 	frame_begin(e);
+ 	if (e->framebuffer != 0 && e->colour != 0 && (image = image_of(e, e->colour)) != NULL && image->target) {
+ 		image->drawn = image->painted = true;
++		damage_added(image);
+ 		if (frame_lines && image->width >= 1000 && image->height >= 2000) {
+ 			/* the display's picture (a surface of its size): where this frame first draws into it */
+ 			e->line.into_display++;
+@@ -3194,6 +3544,7 @@
+ {
+ 	struct eagl *e = context;
+ 	uint64_t began;
++	unsigned long submits;
+ 
+ 	EAGL_ENTER(e, 0x2d8);
+ 	if (eagl_tracing) {
+@@ -3201,7 +3552,9 @@
+ 	}
+ 	clear_now(e);
+ 	began = now_us();
++	submits = SUBMITS_NOW();
+ 	glFlush();
++	submits_flush += (uint32_t)(SUBMITS_NOW() - submits);
+ 	e->flushing += now_us() - began;
+ 	frame_end(e, false);
+ 	EAGL_LEAVE(e, 0x2d8);
+@@ -4116,6 +4469,12 @@
+ 		all_shaders = strstr(arguments, "glshaders=1") != NULL;
+ 		census_on = strstr(arguments, "glcensus=1") != NULL;
+ 		frame_lines = strstr(arguments, "glframes=1") != NULL;
++		drm_calls = dlsym(RTLD_DEFAULT, "redwood_drm_calls");
++		drm_ticks = dlsym(RTLD_DEFAULT, "redwood_drm_ticks");
++		drm_total = dlsym(RTLD_DEFAULT, "redwood_drm_total");
++		if (drm_calls == NULL || drm_ticks == NULL || drm_total == NULL) {
++			drm_calls = drm_ticks = drm_total = NULL;   /* (a library from before: no counts) */
++		}
+ 		latency_lines = strstr(arguments, "touch_lat=1") != NULL;
+ 		if ((argument = strstr(arguments, "glslow=")) != NULL) {
+ 			slow_calls_us = strtoull(argument + 7, NULL, 10);
+@@ -4156,6 +4515,8 @@
+ 		}
+ 		share_surfaces = strstr(arguments, "glcopy=1") == NULL;
+ 		blit_targets = strstr(arguments, "glblit=0") == NULL;
++		damage_on = strstr(arguments, "gldamage=0") == NULL;
++		scan_on = strstr(arguments, "glscan=0") == NULL;
+ 		sync_frames = strstr(arguments, "glsync=0") == NULL;
+ 		if (strstr(arguments, "glwait=0") != NULL || (strstr(arguments, "glwait=1") == NULL && display_waits())) {
+ 			wait_for_frames = 0;
+--- a/userland/src/inject.c
++++ b/userland/src/inject.c
+@@ -30,6 +30,7 @@
+ #include <dispatch/dispatch.h>
+ #include <dlfcn.h>
+ #include <errno.h>
++#include <math.h>
+ #include <fcntl.h>
+ #include <mach/mach.h>
+ #include <mach/mach_time.h>
+@@ -705,6 +706,89 @@
+ 	method_setImplementation(method, (IMP)wait_for_als_arrival);
+ }
+ 
++/* ---- backboardd: the display's brightness -------------------------------------------------------- */
++
++/*
++ * The brightness slider reaches backboardd, which hands the value to CoreBrightness's brightness system
++ * ("[Backlight] Set BrightnessSystem property:DisplayBrightness to:{ Brightness: 0.33, ... }", EXP-0139); with no
++ * display it knows how to drive, it goes no further. Take it there: -[BrightnessSystem setProperty:forKey:] as it is,
++ * and for "DisplayBrightness" the Brightness (0 to 1, the slider's own scale) as the panel's level, 2 to 1023, into
++ * the kernel (sysctl kern.mi8_brightness, which sends the panel DCS 0x51: bsd/dev/mi8_adreno.c). The slider's scale is
++ * perceptual and the panel's roughly linear in light: squared on the way.
++ */
++typedef id (*set_property_t)(id self, SEL selector, id property, id key);
++static set_property_t orig_set_property;
++
++/*
++ * The screen's light is two things in iOS's brightness system: the level the slider sets (DisplayBrightness) and the
++ * factor the lock puts on it (DisplayBrightnessFactor, and ...WithFade: 0 when the phone is locked or dimmed off, 1
++ * otherwise; the fade is not followed). The panel gets the level, or 0 -- display off -- under a factor of 0 (EXP-0142).
++ */
++static float brightness_level = 0.5f, brightness_factor = 1.0f;
++static int brightness_sent = -1;
++
++static void
++brightness_send(void)
++{
++	int level = brightness_factor <= 0 ? 0 : 2 + (int)lroundf(1021.0f * brightness_level * brightness_level);
++
++	if (level != brightness_sent && sysctlbyname("kern.mi8_brightness", NULL, NULL, &level, sizeof(level)) == 0) {
++		brightness_sent = level;
++	} else if (level != brightness_sent) {
++		say("redwood: brightness %.3f x %.3f -> level %d: the kernel did not take it (errno %d)\n", brightness_level,
++		    brightness_factor, level, errno);
++	}
++}
++
++static id
++my_set_property(id self, SEL selector, id property, id key)
++{
++	id result = orig_set_property(self, selector, property, key);
++
++	if (key != NULL && property != NULL && CFGetTypeID((CFTypeRef)key) == CFStringGetTypeID()) {
++		float number = -1;
++
++		if (CFStringCompare((CFStringRef)key, CFSTR("DisplayBrightness"), 0) == kCFCompareEqualTo &&
++		    CFGetTypeID((CFTypeRef)property) == CFDictionaryGetTypeID()) {
++			CFNumberRef value = CFDictionaryGetValue((CFDictionaryRef)property, CFSTR("Brightness"));
++
++			if (value != NULL && CFGetTypeID(value) == CFNumberGetTypeID() &&
++			    CFNumberGetValue(value, kCFNumberFloatType, &number) && number >= 0 && number <= 1) {
++				brightness_level = number;
++				brightness_send();
++			}
++		} else if ((CFStringCompare((CFStringRef)key, CFSTR("DisplayBrightnessFactor"), 0) == kCFCompareEqualTo ||
++		    CFStringCompare((CFStringRef)key, CFSTR("DisplayBrightnessFactorWithFade"), 0) == kCFCompareEqualTo) &&
++		    CFGetTypeID((CFTypeRef)property) == CFNumberGetTypeID() &&
++		    CFNumberGetValue((CFNumberRef)property, kCFNumberFloatType, &number) && number >= 0 && number <= 1) {
++			brightness_factor = number;
++			brightness_send();
++		}
++	}
++	return result;
++}
++
++/* CoreBrightness may not be loaded when this library starts: look again until it is (half a minute at the most). */
++static void
++brightness_bridge(int tries)
++{
++	Class cls = objc_getClass("BrightnessSystem");
++	Method method = cls ? class_getInstanceMethod(cls, sel_registerName("setProperty:forKey:")) : NULL;
++
++	if (method == NULL) {
++		if (tries < 60) {
++			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC), dispatch_get_global_queue(0, 0), ^{
++				brightness_bridge(tries + 1);
++			});
++		} else {
++			say("redwood: brightness: no -[BrightnessSystem setProperty:forKey:]: the slider stays without effect\n");
++		}
++		return;
++	}
++	orig_set_property = (set_property_t)method_setImplementation(method, (IMP)my_set_property);
++	say("redwood: brightness: the brightness system's display brightness goes to the panel (after %d looks)\n", tries + 1);
++}
++
+ /* ---- backboardd: the touch screen and the buttons ---------------------------------------------- */
+ 
+ /* IOKit's HID event system, the part that has no public header on iOS (prototypes checked against 20F66) */
+@@ -1252,6 +1336,7 @@
+ 		}
+ 		opengl_es();
+ 		window_server_fixes();
++		brightness_bridge(0);
+ 		/*
+ 		 * brightness_fixes() is not used for now: with it backboardd no longer took our touch
+ 		 * screen service for its own ("still waiting for a main screen digitizer"), whether the
+--- a/userland/src/inject_sb.c
++++ b/userland/src/inject_sb.c
+@@ -35,7 +35,11 @@
+ #include <IOKit/IOKitLib.h>
+ #include <dispatch/dispatch.h>
+ #include <dlfcn.h>
++#include <arpa/inet.h>
+ #include <fcntl.h>
++#include <ifaddrs.h>
++#include <net/if.h>
++#include <netinet/in.h>
+ #include <mach-o/dyld.h>
+ #include <mach/mach_time.h>
+ #include <notify.h>
+@@ -100,6 +104,200 @@
+ 	}
+ }
+ 
++/*
++ * touch_lat=1 (EXP-0158): what SpringBoard is told about the display -- CADisplay's rates (seconds a
++ * frame or frames a second, as CoreAnimation keeps them) and minimum frame duration (in heartbeats),
++ * UIScreen's maximumFramesPerSecond -- to see why its display link ticks every 33.3 ms (U-068).
++ */
++static double
++double_of(id object, const char *name)
++{
++	SEL selector = sel_registerName(name);
++
++	return object && class_getInstanceMethod(object_getClass(object), selector) ?
++	    ((double (*)(id, SEL))objc_msgSend)(object, selector) : -1;
++}
++
++static long
++long_of(id object, const char *name)
++{
++	SEL selector = sel_registerName(name);
++
++	return object && class_getInstanceMethod(object_getClass(object), selector) ?
++	    ((long (*)(id, SEL))objc_msgSend)(object, selector) : -1;
++}
++
++static void
++display_diag(void)
++{
++	Class cadisplay = objc_getClass("CADisplay"), uiscreen = objc_getClass("UIScreen");
++	id display = cadisplay ? ((id (*)(Class, SEL))objc_msgSend)(cadisplay, sel_registerName("mainDisplay")) : nil;
++	id screen = uiscreen ? ((id (*)(Class, SEL))objc_msgSend)(uiscreen, sel_registerName("mainScreen")) : nil;
++
++	say("redwood: display: refreshRate %.6f heartbeatRate %.6f hardwareRefreshRate %.6f minimumFrameDuration %ld "
++	    "preferredFrameDuration %ld latency %.6f; UIScreen maximumFramesPerSecond %ld\n",
++	    double_of(display, "refreshRate"), double_of(display, "heartbeatRate"), double_of(display, "hardwareRefreshRate"),
++	    long_of(display, "minimumFrameDuration"), long_of(display, "preferredFrameDuration"), double_of(display, "latency"),
++	    long_of(screen, "maximumFramesPerSecond"));
++}
++
++/*
++ * touch_lat=1 (EXP-0159): who in SpringBoard asks CADisplayLink for what rate, and what rate its
++ * running display links tick at (every 5 s: those not paused), to find what makes its animations
++ * tick every 33.3 ms (U-068). The caller is named by dladdr() of the return address.
++ */
++typedef struct { float minimum, maximum, preferred; } fps_range;
++static IMP link_add, link_fps, link_interval, link_range;
++static CFTypeRef links[32];
++static int link_count, link_lines;
++static bool link_diag;         /* touch_lat=1: the lines below */
++static bool link_clamp;        /* boot-arg sb_fps_clamp=1: a range whose top is 30 or less is asked for as 60..60 */
++
++static void
++say_caller(const char *what, id link, void *caller, const char *value)
++{
++	Dl_info info = { 0 };
++
++	if (!link_diag || link_lines++ > 300) {
++		return;
++	}
++	dladdr(caller, &info);
++	say("redwood: link %p %s %s from %s +%#lx\n", (void *)link, what, value,
++	    info.dli_fname ? strrchr(info.dli_fname, '/') + 1 : "?",
++	    info.dli_fbase ? (unsigned long)((char *)caller - (char *)info.dli_fbase) : 0ul);
++}
++
++static void
++hooked_link_add(id self, SEL _cmd, id loop, id mode)
++{
++	if (link_count < 32) {
++		links[link_count++] = CFRetain((CFTypeRef)self);
++	}
++	say_caller("added", self, __builtin_return_address(0), "");
++	((void (*)(id, SEL, id, id))link_add)(self, _cmd, loop, mode);
++}
++
++static void
++hooked_link_fps(id self, SEL _cmd, long fps)
++{
++	char value[32];
++
++	snprintf(value, sizeof(value), "%ld", fps);
++	say_caller("preferredFramesPerSecond", self, __builtin_return_address(0), value);
++	((void (*)(id, SEL, long))link_fps)(self, _cmd, fps);
++}
++
++static void
++hooked_link_interval(id self, SEL _cmd, long interval)
++{
++	char value[32];
++
++	snprintf(value, sizeof(value), "%ld", interval);
++	say_caller("frameInterval", self, __builtin_return_address(0), value);
++	((void (*)(id, SEL, long))link_interval)(self, _cmd, interval);
++}
++
++static void
++hooked_link_range(id self, SEL _cmd, fps_range range)
++{
++	char value[64];
++
++	snprintf(value, sizeof(value), "%.0f..%.0f pref %.0f", range.minimum, range.maximum, range.preferred);
++	say_caller("preferredFrameRateRange", self, __builtin_return_address(0), value);
++	if (link_clamp && range.maximum > 0 && range.maximum <= 30) {
++		range.minimum = range.maximum = range.preferred = 60;
++	}
++	((void (*)(id, SEL, fps_range))link_range)(self, _cmd, range);
++}
++
++static IMP
++hook_link(const char *selector, IMP replacement)
++{
++	Method method = class_getInstanceMethod(objc_getClass("CADisplayLink"), sel_registerName(selector));
++
++	return method ? method_setImplementation(method, replacement) : NULL;
++}
++
++static void
++dump_links(void)
++{
++	static int thermal_lines;
++
++	if (thermal_lines++ < 3) {
++		id info = ((id (*)(Class, SEL))objc_msgSend)(objc_getClass("NSProcessInfo"), sel_registerName("processInfo"));
++
++		say("redwood: SpringBoard: thermalState %ld lowPowerMode %ld\n", long_of(info, "thermalState"),
++		    long_of(info, "isLowPowerModeEnabled") & 0xff);
++	}
++	for (int i = 0; i < link_count && link_lines < 600; i++) {
++		id link = (id)links[i];
++		SEL range_selector = sel_registerName("preferredFrameRateRange");
++		fps_range range = { -1, -1, -1 };
++		double timestamp = double_of(link, "timestamp"), target = double_of(link, "targetTimestamp");
++
++		if (((BOOL (*)(id, SEL))objc_msgSend)(link, sel_registerName("isPaused"))) {
++			continue;
++		}
++		if (class_getInstanceMethod(object_getClass(link), range_selector)) {
++			range = ((fps_range (*)(id, SEL))objc_msgSend)(link, range_selector);
++		}
++		link_lines++;
++		say("redwood: link %p running: preferredFramesPerSecond %ld frameInterval %ld range %.0f..%.0f pref %.0f "
++		    "duration %.4f target-timestamp %.4f\n", (void *)link, long_of(link, "preferredFramesPerSecond"),
++		    long_of(link, "frameInterval"), range.minimum, range.maximum, range.preferred, double_of(link, "duration"),
++		    target - timestamp);
++	}
++}
++
++/* boot-arg sb_fps_clamp=1, with or without touch_lat=1 (EXP-0160) */
++static void
++fps_clamp_install(void)
++{
++	char args[1024] = "";
++	size_t size = sizeof(args) - 1;
++
++	link_clamp = sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "sb_fps_clamp=1") != NULL;
++	if (link_clamp && link_range == NULL) {
++		link_range = hook_link("setPreferredFrameRateRange:", (IMP)hooked_link_range);
++	}
++	say("redwood: SpringBoard: display links asking for 30 fps or less get 60: %s\n",
++	    !link_clamp ? "no" : link_range ? "yes" : "no (no such method)");
++}
++
++static void
++watch_display_links(void)
++{
++	{
++		char args[1024] = "";
++		size_t size = sizeof(args) - 1;
++		id info = ((id (*)(Class, SEL))objc_msgSend)(objc_getClass("NSProcessInfo"), sel_registerName("processInfo"));
++
++		(void)args;
++		(void)size;
++		link_diag = true;
++		say("redwood: SpringBoard: thermalState %ld lowPowerMode %ld; fps clamp %d\n", long_of(info, "thermalState"),
++		    long_of(info, "isLowPowerModeEnabled"), link_clamp);
++	}
++	link_add = hook_link("addToRunLoop:forMode:", (IMP)hooked_link_add);
++	link_fps = hook_link("setPreferredFramesPerSecond:", (IMP)hooked_link_fps);
++	link_interval = hook_link("setFrameInterval:", (IMP)hooked_link_interval);
++	if (link_range == NULL) {
++		link_range = hook_link("setPreferredFrameRateRange:", (IMP)hooked_link_range);
++	}
++	say("redwood: link hooks: add %p fps %p interval %p range %p\n", (void *)link_add, (void *)link_fps,
++	    (void *)link_interval, (void *)link_range);
++	{
++		dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
++
++		dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), 5 * NSEC_PER_SEC,
++		    NSEC_PER_SEC / 10);
++		dispatch_source_set_event_handler(timer, ^{
++			dump_links();
++		});
++		dispatch_resume(timer);
++	}
++}
++
+ static void
+ watch_main_loop(void)
+ {
+@@ -112,6 +310,11 @@
+ 		return;
+ 	}
+ 	mach_timebase_info(&timebase);
++	display_diag();
++	watch_display_links();
++	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++		display_diag();
++	});
+ 	CFRunLoopAddObserver(CFRunLoopGetMain(), CFRunLoopObserverCreate(NULL, kCFRunLoopAfterWaiting, true, LONG_MIN,
+ 	    main_loop_turn, NULL), kCFRunLoopCommonModes);
+ 	CFRunLoopAddObserver(CFRunLoopGetMain(), CFRunLoopObserverCreate(NULL, kCFRunLoopBeforeWaiting, true, CA_COMMIT_ORDER - 1,
+@@ -670,11 +873,17 @@
+  * notifier runs once per image already loaded and once per image afterwards, and the first time the
+  * class is there the replacement goes in.
+  */
++static bool torch_installed;
++static void flashlight_install(void);
++
+ static void
+ image_added(__unused const struct mach_header *header, __unused intptr_t image_slide)
+ {
+ 	static bool told;
+ 
++	if (!torch_installed) {
++		flashlight_install();
++	}
+ 	if (original_prewarm_orb_view_shaders != NULL || objc_getClass("SiriPresentationViewController") == NULL) {
+ 		return;
+ 	}
+@@ -1050,6 +1259,255 @@
+ 	method_setImplementation(add, (IMP)add_animation_cc);
+ }
+ 
++
++/*
++ * Control Center's sliders (EXP-0140/0141): their views are made with user interaction off, so a drag on one went to Control Center itself; turned on here when a touch lands next to one (ccslider=0: not). Boot-arg ccdiag=1 (EXP-0140): why the brightness slider in Control Center can't be dragged. Writes down, for
++ * touches that land in the Control Center window, the view that is hit (with its superviews, their
++ * userInteractionEnabled and gesture recognizers), and the state changes of the gesture recognizers whose view is in
++ * that window. Only looks.
++ */
++struct diag_point { double x, y; };
++static id (*original_diag_hit_test)(id self, SEL selector, struct diag_point point, id event);
++static void (*original_diag_set_state)(id self, SEL selector, long state);
++static unsigned diag_hits, diag_states, diag_trees;
++static bool diag_fix, diag_log;
++struct diag_rect { double x, y, w, h; };
++
++/* the views under `view`: class, frame, hidden, alpha, interaction (what the slider is made of, and where) */
++static void
++diag_tree(id view, int depth)
++{
++	struct diag_rect frame = ((struct diag_rect (*)(id, SEL))objc_msgSend)(view, sel_registerName("frame"));
++	id subviews = SEND(id, view, "subviews");
++	unsigned long count = subviews ? SEND(unsigned long, subviews, "count") : 0;
++
++	say("redwood: ccdiag:   tree %*s%s (%.0f,%.0f %.0fx%.0f)%s alpha %.2f interaction %d clips %d subviews %lu\n", 2 * depth, "",
++	    object_getClassName(view), frame.x, frame.y, frame.w, frame.h, SEND(BOOL, view, "isHidden") ? " hidden" : "",
++	    SEND(double, view, "alpha"), SEND(BOOL, view, "isUserInteractionEnabled"), SEND(BOOL, view, "clipsToBounds"), count);
++	for (unsigned long i = 0; depth < 5 && i < count && i < 10; i++) {
++		diag_tree(SEND1(id, subviews, "objectAtIndex:", unsigned long, i), depth + 1);
++	}
++}
++
++static bool
++diag_window_is_cc(id window)
++{
++	return window != NULL && strstr(object_getClassName(window), "ControlCenter") != NULL;
++}
++
++static id
++diag_hit_test(id self, SEL selector, struct diag_point point, id event)
++{
++	id hit = original_diag_hit_test(self, selector, point, event);
++
++	/* the sliders' views are made with user interaction off (EXP-0140, boot-arg ccslider=0 leaves them so), so touches stop at their module's
++	 * container and the slider's own gesture recognizer never sees them: turn it on, and look again */
++	if (diag_fix && hit != NULL && diag_window_is_cc(self) && strcmp(object_getClassName(hit), "CCUIContentModuleContentContainerView") == 0) {
++		id subviews = SEND(id, hit, "subviews");
++		unsigned long count = subviews ? SEND(unsigned long, subviews, "count") : 0;
++		bool changed = false;
++
++		for (unsigned long i = 0; i < count; i++) {
++			id sub = SEND1(id, subviews, "objectAtIndex:", unsigned long, i);
++
++			if (strstr(object_getClassName(sub), "SliderView") != NULL && !SEND(BOOL, sub, "isUserInteractionEnabled")) {
++				SEND1(void, sub, "setUserInteractionEnabled:", BOOL, YES);
++				changed = true;
++				say("redwood: ccdiag: %s: user interaction turned on\n", object_getClassName(sub));
++			}
++		}
++		if (changed) {
++			hit = original_diag_hit_test(self, selector, point, event);
++		}
++	}
++	if (diag_log && hit != NULL && diag_window_is_cc(self) && diag_hits < 60) {
++		diag_hits++;
++		say("redwood: ccdiag: hit (%.0f,%.0f) in %s:\n", point.x, point.y, object_getClassName(self));
++		id view = hit;
++
++		for (int depth = 0; view != NULL && depth < 12; depth++, view = SEND(id, view, "superview")) {
++			id recognizers = SEND(id, view, "gestureRecognizers");
++			unsigned long count = recognizers ? SEND(unsigned long, recognizers, "count") : 0;
++			char kinds[200] = "";
++
++			for (unsigned long i = 0; i < count && i < 6; i++) {
++				id recognizer = SEND1(id, recognizers, "objectAtIndex:", unsigned long, i);
++
++				snprintf(kinds + strlen(kinds), sizeof(kinds) - strlen(kinds), " %s%s", object_getClassName(recognizer),
++				    SEND(BOOL, recognizer, "isEnabled") ? "" : "(off)");
++			}
++			say("redwood: ccdiag:   %*s%s interaction %d%s%s\n", depth, "", object_getClassName(view),
++			    SEND(BOOL, view, "isUserInteractionEnabled"), count ? " recognizers:" : "", kinds);
++		}
++		if (diag_trees < 6 && strcmp(object_getClassName(hit), "CCUIContentModuleContentContainerView") == 0) {
++			diag_trees++;
++			diag_tree(hit, 0);
++		}
++	}
++	return hit;
++}
++
++static void
++diag_set_state(id self, SEL selector, long state)
++{
++	id view = SEND(id, self, "view");
++	id window = view ? SEND(id, view, "window") : NULL;
++
++	if (diag_log && diag_window_is_cc(window) && diag_states < 200) {
++		diag_states++;
++		say("redwood: ccdiag: %s (on %s) state -> %ld\n", object_getClassName(self), object_getClassName(view), state);
++	}
++	original_diag_set_state(self, selector, state);
++}
++
++static void
++control_center_diag(const char *arguments)
++{
++	Class window = objc_getClass("UIWindow"), recognizer = objc_getClass("UIGestureRecognizer");
++	SEL hit = sel_registerName("hitTest:withEvent:"), set_state = sel_registerName("setState:");
++	Method hit_method = window ? class_getInstanceMethod(window, hit) : NULL;
++	Method state_method = recognizer ? class_getInstanceMethod(recognizer, set_state) : NULL;
++
++	diag_log = strstr(arguments, "ccdiag=1") != NULL;
++	diag_fix = strstr(arguments, "ccslider=0") == NULL;
++	if ((!diag_log && !diag_fix) || hit_method == NULL || state_method == NULL) {
++		return;
++	}
++	original_diag_hit_test = (id (*)(id, SEL, struct diag_point, id))method_getImplementation(hit_method);
++	class_replaceMethod(window, hit, (IMP)diag_hit_test, method_getTypeEncoding(hit_method));
++	original_diag_set_state = (void (*)(id, SEL, long))method_getImplementation(state_method);
++	method_setImplementation(state_method, (IMP)diag_set_state);
++	say("redwood: Control Center: sliders %s%s\n", diag_fix ? "made to take touches" : "left alone", diag_log ? ", hit views and gesture states written down (ccdiag=1)" : "");
++}
++
++/*
++ * The flashlight (EXP-0144): Control Center's button and the lock screen's reach AVFlashlight, which asks mediaserverd's
++ * FigFlashlight -- and there is no mediaserverd here. So in SpringBoard AVFlashlight is given the kernel's light instead
++ * (/dev/redwood-torch, boot-arg torch=3, bsd/dev/redwood_torch.c: 0 to 1000 thousandths of the phone's torch current, the
++ * kernel's own limits on time and temperature apply). Where the device is not there, nothing is changed. Every call is
++ * said (the first so many), since which of AVFlashlight's methods the button uses is not known.
++ */
++static int torch_fd = -1;
++static float torch_level = 1.0f;                        /* what turnPowerOn lights; set by setFlashlightLevel: */
++static bool torch_lit, torch_installed;
++static unsigned torch_told;
++
++static void
++torch_send(uint32_t thousandths)
++{
++	ssize_t n;
++
++	if (torch_fd < 0 && (torch_fd = open("/dev/redwood-torch", O_WRONLY)) < 0) {
++		say("redwood: flashlight: /dev/redwood-torch cannot be opened (%d)\n", errno);
++		return;
++	}
++	n = write(torch_fd, &thousandths, sizeof(thousandths));
++	if (torch_told++ < 60 || n != (ssize_t)sizeof(thousandths)) {
++		say("redwood: flashlight: %u of 1000 asked of the kernel%s\n", thousandths, n == (ssize_t)sizeof(thousandths) ? "" : " (NOT TAKEN)");
++	}
++}
++
++static id
++flashlight_init(id self, __unused SEL selector)
++{
++	if (torch_told++ < 60) {
++		say("redwood: flashlight: -[AVFlashlight init]\n");
++	}
++	return self;
++}
++
++static BOOL
++flashlight_yes(__unused id self, __unused SEL selector)
++{
++	return YES;
++}
++
++static BOOL
++flashlight_no(__unused id self, __unused SEL selector)
++{
++	return NO;
++}
++
++static float
++flashlight_get_level(__unused id self, __unused SEL selector)
++{
++	return torch_lit ? torch_level : 0.0f;
++}
++
++static BOOL
++flashlight_set_level(id self, __unused SEL selector, float level, __unused id *error)
++{
++	level = level < 0.0f ? 0.0f : level > 1.0f ? 1.0f : level;
++	SEND1(void, self, "willChangeValueForKey:", id, (id)CFSTR("flashlightLevel"));
++	if (level > 0.0f) {
++		torch_level = level;
++	}
++	torch_lit = level > 0.0f;
++	torch_send((uint32_t)(level * 1000.0f + 0.5f));
++	SEND1(void, self, "didChangeValueForKey:", id, (id)CFSTR("flashlightLevel"));
++	return YES;
++}
++
++static BOOL
++flashlight_power_on(id self, __unused SEL selector, __unused id *error)
++{
++	SEND1(void, self, "willChangeValueForKey:", id, (id)CFSTR("flashlightLevel"));
++	torch_lit = true;
++	torch_send((uint32_t)(torch_level * 1000.0f + 0.5f));
++	SEND1(void, self, "didChangeValueForKey:", id, (id)CFSTR("flashlightLevel"));
++	return YES;
++}
++
++static void
++flashlight_power_off(id self, __unused SEL selector)
++{
++	SEND1(void, self, "willChangeValueForKey:", id, (id)CFSTR("flashlightLevel"));
++	torch_lit = false;
++	torch_send(0);
++	SEND1(void, self, "didChangeValueForKey:", id, (id)CFSTR("flashlightLevel"));
++}
++
++/* Once AVFlashlight is there (its framework may come late, with the Control Center module), and the kernel has the light. */
++static void
++flashlight_install(void)
++{
++	static const struct { const char *selector; IMP implementation; } methods[] = {
++		{ "init", (IMP)flashlight_init },
++		{ "isAvailable", (IMP)flashlight_yes },
++		{ "isOverheated", (IMP)flashlight_no },
++		{ "flashlightLevel", (IMP)flashlight_get_level },
++		{ "setFlashlightLevel:withError:", (IMP)flashlight_set_level },
++		{ "turnPowerOnWithError:", (IMP)flashlight_power_on },
++		{ "turnPowerOff", (IMP)flashlight_power_off },
++	};
++	Class cls;
++	unsigned count = 0;
++	Method *list;
++
++	if (torch_installed || (cls = objc_getClass("AVFlashlight")) == NULL) {
++		return;
++	}
++	if (access("/dev/redwood-torch", W_OK) != 0) {
++		return;                 /* (no torch=3 in this run: AVFlashlight stays what it is; looked at again when another image comes) */
++	}
++	torch_installed = true;
++	list = class_copyMethodList(cls, &count);
++	for (unsigned i = 0; i < count; i++) {
++		say("redwood: flashlight: -[AVFlashlight %s]\n", sel_getName(method_getName(list[i])));
++	}
++	free(list);
++	for (size_t i = 0; i < sizeof(methods) / sizeof(methods[0]); i++) {
++		Method method = class_getInstanceMethod(cls, sel_registerName(methods[i].selector));
++
++		if (method != NULL) {
++			method_setImplementation(method, methods[i].implementation);
++		} else {
++			say("redwood: flashlight: AVFlashlight has no %s\n", methods[i].selector);
++		}
++	}
++	say("redwood: flashlight: AVFlashlight is the kernel's light (/dev/redwood-torch)\n");
++}
++
+ /*
+  * Open the tweak loader of the package manager's prefix, when there is one. Nothing here depends on
+  * it: without a prefix (or without ElleKit in it) the file is not there and this does nothing.
+@@ -1068,6 +1526,246 @@
+ 		say("redwood: the tweak loader %s: %s\n", REDWOOD_TWEAK_LOADER, dlerror());
+ 	} else {
+ 		say("redwood: tweaks: %s opened\n", REDWOOD_TWEAK_LOADER);
++	}
++}
++
++/*
++ * The Wi-Fi bars of the status bar are drawn by UIKit's signal view (_UIStatusBarWifiSignalView, of the base class
++ * _UIStatusBarSignalView), whose "signal mode" says how: 0 inactive (every bar grey), 1 searching, 2 active (the bars that
++ * count dark). The cellular view stays inactive here for want of CommCenter (hakios, upstream, replaces its setSignalMode:);
++ * the Wi-Fi view is fed by wifid's link-quality events, and with the radio joined and en0 given an address it is still grey
++ * (EXP-0221..0230). So, while en0 has an IPv4 address, the Wi-Fi view is made active -- and what it is asked, and how many
++ * bars it is told, is said in the log once each, to see what the system itself wanted (EXP-0231).
++ */
++static bool wifi_has_address(void);
++extern id objc_loadWeak(id *location);
++extern id objc_storeWeak(id *location, id obj);
++static void (*original_wifi_signal_mode)(id self, SEL sel, long mode);
++static void (*original_wifi_active_bars)(id self, SEL sel, long bars);
++static long (*original_bar_count)(id self, SEL sel, id update);
++
++static long
++wifi_bar_count(id self, SEL sel, id update)
++{
++	static unsigned said;
++	long count = original_bar_count(self, sel, update);
++
++	if (said < 6) {
++		said++;
++		say("redwood: wifi: the item counts %ld bars (address %s)\n", count, wifi_has_address() ? "there" : "not there");
++	}
++	return count < 3 && wifi_has_address() ? 3 : count;
++}
++
++static bool
++wifi_has_address(void)
++{
++	static time_t checked;
++	static bool has;
++	time_t now = time(NULL);
++	struct ifaddrs *list = NULL, *a;
++
++	if (now == checked) {
++		return has;
++	}
++	checked = now;
++	has = false;
++	if (getifaddrs(&list) == 0) {
++		for (a = list; a != NULL; a = a->ifa_next) {
++			if (a->ifa_addr != NULL && a->ifa_addr->sa_family == AF_INET && strcmp(a->ifa_name, "en0") == 0) {
++				has = true;
++			}
++		}
++		freeifaddrs(list);
++	}
++	return has;
++}
++
++static void
++wifi_set_signal_mode(id self, SEL sel, long mode)
++{
++	static unsigned said_modes;
++	const char *name = object_getClassName(self);
++	bool wifi = name != NULL && strstr(name, "Wifi") != NULL;
++	long wanted = mode;
++
++	if (wifi && mode >= 0 && mode < 8 && !(said_modes & (1u << mode))) {
++		said_modes |= 1u << mode;
++		say("redwood: wifi: %s asked for signal mode %ld\n", name, mode);
++	}
++	if (wifi && mode != 2 && wifi_has_address()) {
++		wanted = 2;
++	}
++	original_wifi_signal_mode(self, sel, wanted);
++}
++
++static void
++wifi_set_active_bars(id self, SEL sel, long bars)
++{
++	static unsigned said_bars;
++	const char *name = object_getClassName(self);
++
++	bool wifi = name != NULL && strstr(name, "Wifi") != NULL;
++
++	if (wifi && bars >= 0 && bars < 8 && !(said_bars & (1u << bars))) {
++		said_bars |= 1u << bars;
++		say("redwood: wifi: %s told %ld active bars\n", name, bars);
++	}
++	if (wifi && bars < 3 && wifi_has_address()) {
++		bars = 3;
++	}
++	original_wifi_active_bars(self, sel, bars);
++}
++
++
++/* what the Wi-Fi bars' classes offer (names only), once: to find the method that really sets their look (EXP-0232) */
++static void
++wifi_classes_dump(void)
++{
++	unsigned count = 0, i;
++	Class *list = objc_copyClassList(&count);
++
++	for (i = 0; i < count; i++) {
++		const char *name = class_getName(list[i]);
++
++		if (name != NULL && (strstr(name, "StatusBarWifi") != NULL || strcmp(name, "_UIStatusBarSignalView") == 0)) {
++			unsigned n = 0, m;
++			Method *methods = class_copyMethodList(list[i], &n);
++			char line[1100];
++			size_t used = (size_t)snprintf(line, sizeof(line), "redwood: wifi: class %s (super %s):", name,
++			    class_getSuperclass(list[i]) ? class_getName(class_getSuperclass(list[i])) : "-");
++
++			for (m = 0; m < n && used < sizeof(line) - 80; m++) {
++				used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", sel_getName(method_getName(methods[m])));
++			}
++			say("%s\n", line);
++			free(methods);
++		}
++	}
++	free(list);
++}
++
++
++/*
++ * The views as they are, not as they are told (EXP-0233): on the home screen the Wi-Fi icon is all dim while the control
++ * centre's own status bar draws it bright, so the data is right and the home screen's view did not take it (an update that
++ * never came, or its own mode). Every _UIStatusBarWifiSignalView that gets a window is kept (weakly), and once a second, with
++ * en0 given an address, each is set active with 3 bars; what it had is said in the log (a few times).
++ */
++#define WIFI_VIEWS 12
++static id wifi_views[WIFI_VIEWS];
++static void (*original_wifi_move_to_window)(id self, SEL sel);
++
++static void
++wifi_view_move_to_window(id self, SEL sel)
++{
++	bool known = false;
++	unsigned i;
++
++	original_wifi_move_to_window(self, sel);
++	for (i = 0; i < WIFI_VIEWS; i++) {
++		known |= objc_loadWeak(&wifi_views[i]) == self;
++	}
++	for (i = 0; i < WIFI_VIEWS && !known; i++) {
++		if (objc_loadWeak(&wifi_views[i]) == NULL) {
++			objc_storeWeak(&wifi_views[i], self);
++			known = true;
++		}
++	}
++}
++
++static void
++wifi_views_tick(void)
++{
++	static unsigned said;
++	unsigned i, alive = 0;
++	bool address = wifi_has_address();
++
++	for (i = 0; i < WIFI_VIEWS; i++) {
++		id view = objc_loadWeak(&wifi_views[i]);
++
++		if (view == NULL) {
++			continue;
++		}
++		alive++;
++		if (said < 8) {
++			long mode = ((long (*)(id, SEL))objc_msgSend)(view, sel_registerName("signalMode"));
++			long bars = ((long (*)(id, SEL))objc_msgSend)(view, sel_registerName("numberOfActiveBars"));
++			long total = ((long (*)(id, SEL))objc_msgSend)(view, sel_registerName("numberOfBars"));
++
++			said++;
++			say("redwood: wifi: view %p: mode %ld, %ld of %ld bars, address %s\n", (void *)view, mode, bars, total, address ? "there" : "not there");
++		}
++		if (address && original_wifi_active_bars != NULL && original_wifi_signal_mode != NULL) {
++			original_wifi_signal_mode(view, sel_registerName("setSignalMode:"), 2);
++			original_wifi_active_bars(view, sel_registerName("setNumberOfActiveBars:"), 3);
++		}
++	}
++	if (said < 8 && alive == 0) {
++		said++;
++		say("redwood: wifi: no Wi-Fi signal view with a window yet\n");
++	}
++}
++
++static void
++wifi_signal_view_hook(void)
++{
++	static const char *const classes[] = { "_UIStatusBarWifiSignalView", "_UIStatusBarSignalView" };
++	static int tries;
++	bool done = false;
++
++	for (unsigned c = 0; c < sizeof(classes) / sizeof(classes[0]) && !done; c++) {
++		Class cls = objc_getClass(classes[c]);
++		Method mode = cls ? class_getInstanceMethod(cls, sel_registerName("setSignalMode:")) : NULL;
++		Method bars = cls ? class_getInstanceMethod(cls, sel_registerName("setNumberOfActiveBars:")) : NULL;
++
++		if (mode != NULL) {
++			original_wifi_signal_mode = (void (*)(id, SEL, long))method_getImplementation(mode);
++			method_setImplementation(mode, (IMP)wifi_set_signal_mode);
++			say("redwood: wifi: -[%s setSignalMode:] replaced (types \"%s\")\n", classes[c], method_getTypeEncoding(mode));
++			done = true;
++		}
++		if (bars != NULL) {
++			original_wifi_active_bars = (void (*)(id, SEL, long))method_getImplementation(bars);
++			method_setImplementation(bars, (IMP)wifi_set_active_bars);
++			say("redwood: wifi: -[%s setNumberOfActiveBars:] replaced\n", classes[c]);
++		}
++	}
++	if (done) {
++		Class wifi_view = objc_getClass("_UIStatusBarWifiSignalView");
++		Method move = wifi_view ? class_getInstanceMethod(wifi_view, sel_registerName("didMoveToWindow")) : NULL;
++		static dispatch_source_t timer;
++
++		if (move != NULL && original_wifi_move_to_window == NULL) {
++			original_wifi_move_to_window = (void (*)(id, SEL))method_getImplementation(move);
++			method_setImplementation(move, (IMP)wifi_view_move_to_window);
++		}
++		if (timer == NULL) {
++			timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
++			dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 10);
++			dispatch_source_set_event_handler(timer, ^{
++				wifi_views_tick();
++			});
++			dispatch_resume(timer);
++		}
++	}
++	if (done) {
++		Class item = objc_getClass("_UIStatusBarWifiItem");
++		Method count = item ? class_getInstanceMethod(item, sel_registerName("_barCountForUpdate:")) : NULL;
++
++		if (count != NULL) {
++			original_bar_count = (long (*)(id, SEL, id))method_getImplementation(count);
++			method_setImplementation(count, (IMP)wifi_bar_count);
++			say("redwood: wifi: -[_UIStatusBarWifiItem _barCountForUpdate:] replaced (types \"%s\")\n", method_getTypeEncoding(count));
++		}
++	}
++	if (!done && tries++ < 6) {
++		/* UIKit's classes may not be there yet: look again soon */
++		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++			wifi_signal_view_hook();
++		});
++	} else if (!done) {
++		say("redwood: wifi: no signal view class found\n");
+ 	}
+ }
+ 
+@@ -1097,6 +1795,7 @@
+ 		});
+ 		return;
+ 	}
++	wifi_signal_view_hook();
+ 	/*
+ 	 * The tweaks of the package manager's prefix, if one is installed: ElleKit's loader
+ 	 * (/var/jb/usr/lib/TweakLoader.dylib) reads /var/jb/usr/lib/TweakInject and opens the tweaks
+@@ -1196,6 +1895,7 @@
+ 		if (device && class_getInstanceMethod(object_getClass(device), monitoring)) {
+ 			((void (*)(id, SEL, BOOL))objc_msgSend)(device, monitoring, YES);
+ 		}
++		fps_clamp_install();
+ 		watch_main_loop();
+ 		{
+ 			char arguments[1024] = "";
+@@ -1203,6 +1903,8 @@
+ 
+ 			if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
+ 				control_center_fades(arguments);
++				control_center_diag(arguments);
++				flashlight_install();
+ 			}
+ 		}
+ 		say("redwood: battery: SOC=%d%% battery=%d charger=%d charging=%d\n",
+--- a/userland/src/net_test.m
++++ b/userland/src/net_test.m
+@@ -50,18 +50,42 @@
+ #include <errno.h>
+ #include <ifaddrs.h>
+ #include <mach/mach.h>
++#include <mach/task.h>
++#include <mach/thread_act.h>
+ #include <sys/sysctl.h>
+ #include <mach/mach_time.h>
+ #include <net/if.h>
+ #include <net/if_dl.h>
+ #include <netdb.h>
+ #include <netinet/in.h>
++#include <Network/Network.h>
++#include <dlfcn.h>
++#include <fcntl.h>
++#include <signal.h>
++#include <sys/ioctl.h>
++#include <sys/socket.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/ioctl.h>
+ #include <sys/socket.h>
+ #include <unistd.h>
++
++/* (sys/kern_event.h and sys/sys_domain.h are not in the iOS SDK) */
++#ifndef SYSPROTO_EVENT
++#define SYSPROTO_EVENT 1
++#endif
++#define KEV_VENDOR_APPLE 1
++#define KEV_ANY_SUBCLASS 0
++struct kev_request {
++	uint32_t vendor_code, kev_class, kev_subclass;
++};
++struct kern_event_msg {
++	uint32_t total_size, vendor_code, kev_class, kev_subclass, id, event_code;
++	uint32_t event_data[1];
++};
++#define SIOCSKEVFILT _IOW('e', 2, struct kev_request)
++
+ 
+ /* not in the iOS SDK's headers, in the libraries all the same */
+ extern mach_port_t bootstrap_port;
+@@ -391,11 +415,13 @@
+ 	}
+ 	for (const char *word = strtok(arguments, " "); word != NULL; word = strtok(NULL, " ")) {
+ 		wanted |= strcmp(word, "wifi=1") == 0;
++		/* Mi 8 (WCN3990 under ath10k): the radio is mi8_rproc.c's, after the modem, about 160 s in */
++		wanted |= strncmp(word, "wifi_lx=", 8) == 0 && strcmp(word + 8, "0") != 0;
+ 	}
+ 	if (!wanted) {
+ 		return;
+ 	}
+-	while (!(there = if_nametoindex("en0") != 0) && seconds() - start < 120) {
++	while (!(there = if_nametoindex("en0") != 0) && seconds() - start < 300) {
+ 		usleep(500000);
+ 	}
+ 	if (!there) {
+@@ -427,6 +453,327 @@
+ 	}
+ 	printf("net_test: wifi: configd has no network service for en0 (a kernel without its IOKit objects): DHCP asked for\n");
+ 	dhcp("en0");
++}
++
++/* ---- path ------------------------------------------------------------------------------------------- */
++
++/*
++ * What an application is told about the network: Network.framework's path (what NWPathMonitor shows Music,
++ * Safari and the status bar's data). EXP-0226: Music says "You are offline" with Wi-Fi joined and DHCP done.
++ */
++static void
++path_look(double seconds)
++{
++	dispatch_queue_t queue = dispatch_queue_create("net_test.path", DISPATCH_QUEUE_SERIAL);
++	nw_path_monitor_t monitor = nw_path_monitor_create();
++
++	nw_path_monitor_set_queue(monitor, queue);
++	nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
++		nw_path_status_t status = nw_path_get_status(path);
++		NSMutableString *interfaces = [NSMutableString string];
++
++		nw_path_enumerate_interfaces(path, ^bool (nw_interface_t interface) {
++			[interfaces appendFormat:@" %s(type %d)", nw_interface_get_name(interface), (int)nw_interface_get_type(interface)];
++			return true;
++		});
++		printf("net_test: path: status %d (1 satisfied, 2 unsatisfied, 3 satisfiable); wifi %d cellular %d wired %d; ipv4 %d ipv6 %d dns %d; "
++		    "expensive %d constrained %d; interfaces:%s\n", (int)status, nw_path_uses_interface_type(path, nw_interface_type_wifi),
++		    nw_path_uses_interface_type(path, nw_interface_type_cellular), nw_path_uses_interface_type(path, nw_interface_type_wired),
++		    nw_path_has_ipv4(path), nw_path_has_ipv6(path), nw_path_has_dns(path), nw_path_is_expensive(path),
++		    nw_path_is_constrained(path), interfaces.UTF8String);
++	});
++	nw_path_monitor_start(monitor);
++	usleep((useconds_t)(seconds * 1e6));
++	nw_path_monitor_cancel(monitor);
++}
++
++/* ---- kev ----------------------------------------------------------------------------------------------- */
++
++/*
++ * EXP-0230: listen the way IO80211.framework does (a PF_SYSTEM kernel-event socket, class 6 = IEEE 802.11), and
++ * count the events by number for some seconds: do the link-quality events (39) reach user space?
++ */
++static void
++kev_look(double length)
++{
++	int fd = socket(PF_SYSTEM, SOCK_RAW, SYSPROTO_EVENT);
++	struct kev_request request = { .vendor_code = KEV_VENDOR_APPLE, .kev_class = 6, .kev_subclass = KEV_ANY_SUBCLASS };
++	unsigned counts[256] = { 0 }, sizes[256] = { 0 };
++	double start = seconds();
++	char buffer[4096];
++
++	if (fd < 0 || ioctl(fd, SIOCSKEVFILT, &request) != 0) {
++		printf("net_test: kev: no socket (%d)\n", errno);
++		return;
++	}
++	fcntl(fd, F_SETFL, O_NONBLOCK);
++	while (seconds() - start < length) {
++		ssize_t got = recv(fd, buffer, sizeof(buffer), 0);
++
++		if (got >= (ssize_t)sizeof(struct kern_event_msg)) {
++			struct kern_event_msg *message = (struct kern_event_msg *)buffer;
++
++			if (message->event_code < 256) {
++				counts[message->event_code]++;
++				sizes[message->event_code] = message->total_size;
++			}
++		} else {
++			usleep(100000);
++		}
++	}
++	for (unsigned code = 0; code < 256; code++) {
++		if (counts[code] != 0) {
++			printf("net_test: kev: event %u: %u times, %u bytes in all\n", code, counts[code], sizes[code]);
++		}
++	}
++	printf("net_test: kev: %.0f s listened\n", length);
++	close(fd);
++}
++
++/* ---- gestalt ------------------------------------------------------------------------------------------ */
++
++/* EXP-0234: what MobileGestalt says of the screen: a wide-gamut one makes WebKit draw its tiles in 10-bit surfaces we do not have */
++static void
++gestalt_look(void)
++{
++	void *handle = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_NOW);
++	CFTypeRef (*copy)(CFStringRef) = handle ? (CFTypeRef (*)(CFStringRef))dlsym(handle, "MGCopyAnswer") : NULL;
++	const char *keys[] = { "HasExtendedColorDisplay", "main-screen-scale", "main-screen-width", "main-screen-height", "DeviceSupportsP3", "ArtworkDeviceSubType" };
++
++	if (copy == NULL) {
++		printf("net_test: gestalt: no MGCopyAnswer\n");
++		return;
++	}
++	for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
++		CFStringRef key = CFStringCreateWithCString(NULL, keys[i], kCFStringEncodingUTF8);
++		CFTypeRef answer = copy(key);
++		NSString *text = answer ? [(__bridge id)answer description] : @"(none)";
++
++		printf("net_test: gestalt: %s = %s\n", keys[i], text.UTF8String);
++		if (answer) {
++			CFRelease(answer);
++		}
++		CFRelease(key);
++	}
++}
++
++/* ---- samples ------------------------------------------------------------------------------------------ */
++
++/*
++ * EXP-0235: where the threads of a hung program stand, as sample(1) shows it: the registers of each thread of every process whose
++ * name has one of the NEEDLES, and the frame-pointer chain behind them; each address named by dladdr() here -- the shared cache is at
++ * the same address in every process. Each process is looked at at most three times.
++ */
++extern kern_return_t task_read_for_pid(mach_port_t target, int pid, mach_port_t *task);
++extern kern_return_t task_inspect_for_pid(mach_port_t target, int pid, mach_port_t *task);
++
++static void
++sample_one(pid_t pid, const char *comm)
++{
++	task_t task = MACH_PORT_NULL;
++	thread_act_array_t threads = NULL;
++	mach_msg_type_number_t count = 0;
++	kern_return_t kr, results[3];
++	const char *kinds[3] = { "task_for_pid", "task_read_for_pid", "task_inspect_for_pid" };
++	unsigned kind;
++
++	for (kind = 0; kind < 3; kind++) {
++		task = MACH_PORT_NULL;
++		/*
++		 * EXP-0235 e: the read port only. With cs_relax_platform_task_ports=1 a control port of another task would get through
++		 * task_for_pid, and using it without Developer Mode panics the kernel (task_conversion_eval_internal, ipc_tt.c).
++		 */
++		if (kind == 0) {
++			results[kind] = KERN_NOT_SUPPORTED;
++			continue;
++		}
++		kr = kind == 1 ? task_read_for_pid(mach_task_self(), pid, &task) : task_inspect_for_pid(mach_task_self(), pid, &task);
++		results[kind] = kr;
++		if (kr == KERN_SUCCESS && task != MACH_PORT_NULL) {
++			kr = task_threads(task, &threads, &count);
++			results[kind] = kr == KERN_SUCCESS ? 0 : kr;
++			if (kr == KERN_SUCCESS) {
++				break;
++			}
++		}
++	}
++	if (kind == 3) {
++		printf("net_test: sample %s[%d]: no way in: %s %d, %s %d, %s %d\n", comm, pid, kinds[0], results[0], kinds[1], results[1], kinds[2],
++		    results[2]);
++		return;
++	}
++	{
++		/* EXP-0235 d: a task or thread suspended by RunningBoard shows as a nonzero suspend count -- the one guess that needs no registers */
++		struct task_basic_info_64 tbi;
++		mach_msg_type_number_t tbi_count = TASK_BASIC_INFO_64_COUNT;
++		kern_return_t tkr = task_info(task, TASK_BASIC_INFO_64, (task_info_t)&tbi, &tbi_count);
++
++		printf("net_test: sample %s[%d]: through %s, task_info %d, task suspend %d, %u threads\n", comm, pid, kinds[kind], tkr,
++		    tkr == KERN_SUCCESS ? tbi.suspend_count : -1, count);
++	}
++	for (mach_msg_type_number_t t = 0; t < count; t++) {
++		arm_thread_state64_t state;
++		mach_msg_type_number_t state_count = ARM_THREAD_STATE64_COUNT;
++		thread_basic_info_data_t basic;
++		mach_msg_type_number_t basic_count = THREAD_BASIC_INFO_COUNT;
++		uint64_t frames[14];
++		unsigned n = 0;
++		char line[1600];
++		size_t used;
++		uint64_t fp;
++
++		kern_return_t skr, ikr;
++
++		memset(&basic, 0, sizeof(basic));
++		ikr = thread_info(threads[t], THREAD_BASIC_INFO, (thread_info_t)&basic, &basic_count);
++		skr = thread_get_state(threads[t], ARM_THREAD_STATE64, (thread_state_t)&state, &state_count);
++		if (skr != KERN_SUCCESS) {
++			printf("net_test: sample %s[%d] thread %u: no registers (%d); info %d run %d suspend %d sleep %ds cpu %d%% flags %#x\n", comm, pid,
++			    t, skr, ikr, basic.run_state, basic.suspend_count, basic.sleep_time, basic.cpu_usage / 10, basic.flags);
++			mach_port_deallocate(mach_task_self(), threads[t]);
++			continue;
++		}
++		frames[n++] = state.__pc;
++		frames[n++] = state.__lr;
++		fp = state.__fp;
++		while (n < 14 && fp != 0 && (fp & 7) == 0) {
++			uint64_t pair[2];
++			vm_size_t got = 0;
++
++			if (vm_read_overwrite(task, (vm_address_t)fp, sizeof(pair), (vm_address_t)pair, &got) != KERN_SUCCESS || got != sizeof(pair) ||
++			    pair[1] == 0) {
++				break;
++			}
++			frames[n++] = pair[1];
++			if (pair[0] <= fp) {
++				break;
++			}
++			fp = pair[0];
++		}
++		used = (size_t)snprintf(line, sizeof(line), "net_test: sample %s[%d] thread %u (state %d, suspend %d, sleep %ds, cpu %d%%):", comm, pid, t,
++		    basic.run_state, basic.suspend_count, basic.sleep_time, basic.cpu_usage / 10);
++		for (unsigned i = 0; i < n && used < sizeof(line) - 120; i++) {
++			Dl_info info;
++
++			if (dladdr((void *)frames[i], &info) && info.dli_sname != NULL && strcmp(info.dli_sname, "<redacted>") != 0) {
++				const char *lib = info.dli_fname ? strrchr(info.dli_fname, '/') : NULL;
++
++				used += (size_t)snprintf(line + used, sizeof(line) - used, " %s(%s)+%llu", info.dli_sname, lib ? lib + 1 : "?",
++				    (unsigned long long)(frames[i] - (uint64_t)info.dli_saddr));
++			} else if (info.dli_fbase != NULL) {
++				/* EXP-0235 f: a redacted name as library + offset from its Mach-O header, for naming it offline from the dyld cache */
++				const char *lib = info.dli_fname ? strrchr(info.dli_fname, '/') : NULL;
++
++				used += (size_t)snprintf(line + used, sizeof(line) - used, " %s+%#llx", lib ? lib + 1 : "?",
++				    (unsigned long long)(frames[i] - (uint64_t)info.dli_fbase));
++			} else {
++				used += (size_t)snprintf(line + used, sizeof(line) - used, " %#llx", (unsigned long long)frames[i]);
++			}
++		}
++		printf("%s\n", line);
++		mach_port_deallocate(mach_task_self(), threads[t]);
++	}
++	vm_deallocate(mach_task_self(), (vm_address_t)threads, count * sizeof(thread_t));
++	mach_port_deallocate(mach_task_self(), task);
++}
++
++static void
++samples_look(unsigned rounds, double interval)
++{
++	static const char *const needles[] = { "WebKi", "WebContent", "MobileSafari", "GPU", "Networking" };
++	struct { pid_t pid; unsigned looked; } seen[64] = { { 0, 0 } };
++	int safari_round = -1;
++
++	for (unsigned round = 0; round < rounds; round++) {
++		int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
++		size_t size = 0;
++		struct kinfo_proc *list;
++
++		usleep((useconds_t)(interval * 1e6));
++		if (sysctl(mib, 3, NULL, &size, NULL, 0) != 0 || (list = malloc(size)) == NULL) {
++			continue;
++		}
++		if (sysctl(mib, 3, list, &size, NULL, 0) == 0) {
++			for (size_t i = 0; i < size / sizeof(*list); i++) {
++				const char *comm = list[i].kp_proc.p_comm;
++				pid_t pid = list[i].kp_proc.p_pid;
++
++				for (unsigned k = 0; k < sizeof(needles) / sizeof(needles[0]); k++) {
++					unsigned slot;
++
++					if (strstr(comm, needles[k]) == NULL) {
++						continue;
++					}
++					if (safari_round < 0 && strstr(comm, "MobileSafari") != NULL) {
++						safari_round = (int)round;
++					}
++					for (slot = 0; slot < 64 && seen[slot].pid != 0 && seen[slot].pid != pid; slot++) {
++					}
++					if (slot < 64 && seen[slot].looked < 3) {
++						seen[slot].pid = pid;
++						/* the first look is at once, the others a few rounds apart, so that a hang shows as the same place twice */
++						if (seen[slot].looked == 0 || round % 3 == 0) {
++							seen[slot].looked++;
++							sample_one(pid, comm);
++						}
++					}
++				}
++			}
++		}
++		/* EXP-0235 f: about 60 s after Safari shows, every process once -- the one Safari waits on is somewhere among them */
++		if (safari_round >= 0 && (int)round == safari_round + 4) {
++			printf("net_test: sample all: begin\n");
++			for (size_t i = 0; i < size / sizeof(*list); i++) {
++				pid_t pid = list[i].kp_proc.p_pid;
++
++				if (pid > 0 && pid != getpid()) {
++					sample_one(pid, list[i].kp_proc.p_comm);
++				}
++			}
++			printf("net_test: sample all: end\n");
++		}
++		free(list);
++	}
++}
++
++/* ---- restartconfd ------------------------------------------------------------------------------------- */
++
++/*
++ * EXP-0220: configd starts about 160 s before the Mi 8's radio (en0) shows up, and does not make a network
++ * service for an interface that comes later [guess]. This ends configd; launchd starts it again when anything
++ * asks for it, and it reads the interfaces afresh. Only for finding out; the real fix is for the radio to be
++ * there when configd starts, or for configd to be told.
++ */
++static void
++restartconfd(void)
++{
++	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0 };
++	size_t size = 0;
++	struct kinfo_proc *list;
++	int killed = 0;
++	double start = seconds();
++
++	while (if_nametoindex("en0") == 0 && seconds() - start < 400) {
++		usleep(500000);
++	}
++	printf("net_test: restartconfd: en0 %s after %.1f s\n", if_nametoindex("en0") ? "is there" : "NOT there", seconds() - start);
++	sleep(5);
++	if (sysctl(mib, 3, NULL, &size, NULL, 0) != 0 || (list = malloc(size)) == NULL) {
++		printf("net_test: restartconfd: no process list\n");
++		return;
++	}
++	if (sysctl(mib, 3, list, &size, NULL, 0) == 0) {
++		for (size_t i = 0; i < size / sizeof(*list); i++) {
++			if (strcmp(list[i].kp_proc.p_comm, "configd") == 0 && kill(list[i].kp_proc.p_pid, SIGTERM) == 0) {
++				printf("net_test: restartconfd: configd %d ended\n", list[i].kp_proc.p_pid);
++				killed++;
++			}
++		}
++	}
++	free(list);
++	if (killed == 0) {
++		printf("net_test: restartconfd: no configd found\n");
++	}
+ }
+ 
+ /* ---- watch ------------------------------------------------------------------------------------------ */
+@@ -548,6 +895,7 @@
+ int
+ main(int argc, char **argv)
+ {
++	setvbuf(stdout, NULL, _IOLBF, 0);      /* the console is not a terminal: without this the lines wait for the process to end */
+ 	setvbuf(stdout, NULL, _IOLBF, 0);
+ 	@autoreleasepool {
+ 		for (int i = 1; i < argc; i++) {
+@@ -582,6 +930,18 @@
+ 				usleep((useconds_t)(atof(argv[++i]) * 1e6));
+ 			} else if (strcmp(step, "wifi") == 0) {
+ 				wifi();
++			} else if (strcmp(step, "samples") == 0 && i + 2 < argc) {
++				unsigned rounds = (unsigned)atoi(argv[++i]);
++
++				samples_look(rounds, atof(argv[++i]));
++			} else if (strcmp(step, "gestalt") == 0) {
++				gestalt_look();
++			} else if (strcmp(step, "kev") == 0 && i + 1 < argc) {
++				kev_look(atof(argv[++i]));
++			} else if (strcmp(step, "path") == 0 && i + 1 < argc) {
++				path_look(atof(argv[++i]));
++			} else if (strcmp(step, "restartconfd") == 0) {
++				restartconfd();
+ 			} else if (strcmp(step, "watch") == 0 && i + 1 < argc) {
+ 				watch(atof(argv[++i]));
+ 			} else if (strcmp(step, "wrongjoin") == 0) {
