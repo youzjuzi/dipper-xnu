@@ -124,7 +124,9 @@ sha256sum -c SHA256SUMS
 - 日常源码固定在 work/，本轮未修改源码。此前适配清单 74 项中 73 项匹配，loader 一项为已记录的本机配置；清单外源码树并未完整审计。
 - 私人配置见 local/README.md 和 local/index.json；恢复备份在 local/backups/20261030-first-install-01/。原始设备信息不得提交。
 - 本次证据在 work/runs/20261030-first-install-01/ 至 03/；第 03 轮确认恢复后的主备 GPT 字节未变、内核识别完整 userdata 容量。旧的 iOS 启动证据不能代替本次首次安装验收。
-- 下一步：由持有人重建数据文件系统并验证 Android 启动。当前 TWRP 已自动挂载旧 /data 与 /sdcard，执行操作前重新核对挂载状态；禁止直接沿用上一轮已卸载的假设。随后才重新划分 darwin、匹配配置、写入回读并启动验收。完整 XNU all 与补丁导出工具化仍待完成。
+- 工具新增：tools/restore-android-layout.py 和测试、安装说明随本次本地提交保存，不推送远程；本机历史配置在 local/devices/mi8/android-restore-20261030.json，回放在 work/runs/20261030-restore-tool-01/。配置对应恢复前历史状态，禁止直接在已恢复手机重跑；通用脚本真机执行待验。
+- 恢复阶段完成：持有人已 Format Data 并完成 Android 初始化，提供 sys.boot_completed=1 与 /data 总量 116193656 KiB 的 ADB 输出；证据在 work/runs/20261030-first-install-04/。root 未核验，不能沿用格式化前的授权/可用性假设。
+- 下一步：等待持有人进入 TWRP 后，只读核对当前 GPT、容量与挂载状态，再制定 darwin 重分区方案。尚未开始重新分区、写镜像或本轮 iOS 启动。完整 XNU all 与补丁导出工具化仍待完成。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

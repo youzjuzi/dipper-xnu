@@ -37,4 +37,6 @@
 
 ## 当前分支任务
 
-`test/first-install` 的[首次安装验收计划](development/FIRST_INSTALL.md)已建立：先核对当前分区，恢复 Android 布局并验收，再重新分区、写入回读和启动。持有人已恢复 Android GPT；重进 TWRP 后主备 GPT 与核验过的原始布局一致，内核 userdata 容量约 113.09 GiB，darwin 已移除。尚未重建数据文件系统或验证 Android 启动，首次安装未完成。上述已验证功能范围不变。
+`test/first-install` 的[首次安装验收计划](development/FIRST_INSTALL.md)已建立：先核对当前分区，恢复 Android 布局并验收，再重新分区、写入回读和启动。持有人已恢复 Android GPT；重进 TWRP 后主备 GPT 与核验过的原始布局一致，内核 userdata 容量约 113.09 GiB，darwin 已移除。持有人随后完成 Format Data 与 Android 初始化，提供启动完成及 /data 总量约 110.81 GiB 的 ADB 输出，Android 恢复阶段通过；重新划分 darwin 和 iOS 首次安装仍未完成。上述已验证功能范围不变。
+
+恢复方案可使用[离线恢复工具](install/RESTORE_ANDROID.md)生成；合成测试与既有 GPT 回放通过，生成脚本尚未执行实机验证，不改变上述设备验收边界。
