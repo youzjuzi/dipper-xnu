@@ -41,3 +41,5 @@
 - 文档分类见 docs/README.md：development、build、install、validation、legal；新增文档归入相应类别，不平铺 docs 根目录。首次安装计划为 docs/development/FIRST_INSTALL.md；当前维护分支及任务以 DEVELOPMENT.md 现场交接为准。
 
 - tools 分类固定为 prepare/、build/、partition/、tests/，入口见 tools/README.md；新增工具归入对应类别。历史轮次保留原始命令和摘要，当前教程使用新路径。
+
+- 公开首页和 build/install 教程使用读者视角：保留标准目录/参数占位符、适用版本和验证边界，不写固定私人实验路径、聊天引用或内部轮次。具体过程与证据索引归 development/、validation/，不得用删减叙述掩盖未验证事项。

@@ -20,13 +20,13 @@ adb shell 'ls -l /dev/block/by-name/darwin /dev/block/by-name/userdata'
 
 统一按[设备版本、TWRP 与固件准备](DEVICE_PREPARATION.md)核对 Android/MIUI 版本，提取 4 个 GPU 固件并进行手机端与主机端 SHA256 校验，保存到 `work/hackios/fw-gpu/`。该页也列出 TWRP 官方来源及 Wi-Fi 输入区别，避免维护多份提取流程。
 
-本轮基线为 Android 10 / MIUI V12.5.2.0.QEACNXM；不是要求所有设备强行降级。本次未下载原厂 ZIP 做逐字节对照，手机端文件摘要不称为厂商签名验证。固件不提交仓库。
+已验证的设备基线为 Android 10 / MIUI V12.5.2.0.QEACNXM；不是要求所有设备强行降级。本次未下载原厂 ZIP 做逐字节对照，手机端文件摘要不称为厂商签名验证。固件不提交仓库。
 
 ## 3. 匹配源码并重建
 
 按 [启动教程配置章节](STARTUP.md#1-让源码匹配新分区) 将 loader/内核的边界和 GUID 与实际 GPT 对齐。私人配置、GPT 备份和修改前源码放在忽略目录 `local/`；不要把唯一 GUID 回写到公共补丁和清单。
 
-本轮实测边界已与公开源码相同，只需将 loader 的零 GUID 占位符替换成本机值，再重新编译 loader/UEFI；内核不需要因为 GUID 而改动。如果边界不同，必须修改内核并重编译。
+若实际边界与源码一致，仅唯一 GUID 需要更新时，修改 loader 后重编译 loader/UEFI；若边界不同，必须同步内核并重编译。
 
 ```sh
 bash tools/build/build-loader-uefi.sh

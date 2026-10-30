@@ -16,13 +16,13 @@
 
 ## 近期更新 · 2026-10-31
 
-已走通本机“恢复 Android 布局 → 重新划出约 24 GiB darwin → 系统镜像回读 → 匹配新 GUID、重建 loader/UEFI → 进入 iOS”的流程，持有人确认启动成功。
+已在测试设备上走通“恢复 Android 布局 → 重新划出约 24 GiB darwin → 系统镜像回读 → 匹配新 GUID、重建 loader/UEFI → 进入 iOS”的流程，测试者确认启动成功。
 
 - 分区前后均完成 Format Data、Android 启动和数据容量验收；系统镜像准确范围回读 SHA256 与主机一致。
 - 教程整理为[分区、写入与回退](docs/install/INSTALL.md)和[配置、重建与启动](docs/install/STARTUP.md)，Android 恢复作为回退章节保留。
 - **固件提取已实测**：Android 10 / MIUI V12.5.2.0.QEACNXM 下，使用已有 root 提取 4 个 GPU 固件，双端及固定 SHA256 全部一致；步骤见[设备准备教程](docs/install/DEVICE_PREPARATION.md)。
 - **工具目录整理**：11 个脚本归入 `tools/prepare/`、`build/`、`partition/`、`tests/`，脚本引用与教程命令已同步，31 项回归测试通过。后续按[工具导航](tools/README.md)使用新路径。
-- 本轮逐项外设回归与退出后重启 Android 仍待验；先前 Wi-Fi、亮度等测试结果单独保留，不视作本轮复测。
+- 重新分区后的逐项外设回归与退出验收仍待完成；先前 Wi-Fi、亮度等测试结果单独保留，不视作本轮复测。
 
 完整变化见 [更新日志](CHANGELOG.md)，阶段与证据见[首次安装任务](docs/development/FIRST_INSTALL.md)。
 
@@ -45,7 +45,7 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 
 ## 功能状态
 
-当前状态（2026-10-31）。已有分区的短时外设测试与本次重新分区后的 iOS 启动均有记录；下表外设结果来自此前测试，本轮完整回归、退出收尾和长期稳定性仍待验。
+当前状态（2026-10-31）。已有分区的短时外设测试与本次重新分区后的 iOS 启动均有记录；下表外设结果来自此前测试，重新分区后的完整回归、退出收尾和长期稳定性仍待验。
 
 | 功能 | 状态 |
 | --- | --- |
@@ -115,6 +115,7 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 - **edk2-porting / Renegade Project、TianoCore、SimpleInit**：SDM845 的 UEFI 与启动支持。
 - **UniXNU / DarwinBoot**：启动组件与早期移植参考。
 - **Linux、Mesa / freedreno、FreeBSD**：硬件驱动、图形与兼容层基础。
+- **[Team Win / TWRP 与 dipper 维护者](https://twrp.me/xiaomi/xiaomimi8.html)**：提供分区维护、格式化与镜像回读所用的 Recovery 环境。
 - **Theos、LLVM 及相关工具链项目**：构建工具。
 
 完整说明见 [致谢](ACKNOWLEDGEMENTS.md) 与 [第三方来源](THIRD_PARTY_NOTICES.md)。

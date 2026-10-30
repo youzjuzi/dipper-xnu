@@ -1,6 +1,6 @@
 # 第三方来源与修改记录
 
-更新日期：2026-10-30。上游版本见 `upstream.lock.json`，适配文件及其内容摘要见 `source-manifest.json`。补丁包含 dipper 平台适配，原有第三方版权和许可声明继续适用。
+更新日期：2026-10-31。上游版本见 `upstream.lock.json`，适配文件及其内容摘要见 `source-manifest.json`。补丁包含 dipper 平台适配，原有第三方版权和许可声明继续适用。
 
 | 来源 | 使用范围 | 许可证与通知 |
 |---|---|---|
@@ -15,6 +15,10 @@
 | [FreeBSD](https://github.com/freebsd/freebsd-src) | 上游无线兼容层基础 | linux_80211.c 原 BSD-2-Clause 通知已补入 LICENSES/ |
 
 没有把这些项目的全部源码复制到本仓库。通过脚本取得的上游内容仍受原许可证约束。提供链接和致谢不取代保留版权、提供源码或其他许可义务。
+
+## 外部设备维护工具
+
+[Team Win / TWRP](https://twrp.me/xiaomi/xiaomimi8.html) 及 dipper 维护者提供设备维护所需的 Recovery 环境；本项目已验证使用版本为 3.7.0_9-0。TWRP 用于分区维护、Format Data、只读回读等，不是 iOS 的 UEFI 或内核组件。本仓库仅提供官方获取入口和操作说明，不附带或镜像分发 TWRP 二进制，其权利与许可遵循上游声明。
 
 ## GPU 代码的许可范围
 

@@ -1,8 +1,8 @@
 # 创建 darwin 分区：通用工具
 
-[tools/partition/partition-darwin.py](../../tools/partition/partition-darwin.py) 将本次成功的分区步骤整理为可复用的离线方案生成器。它不连接 ADB，不执行手机命令；生成的 shell 脚本由持有人审查后执行。它只改 GPT，不写入 darwin.img、不格式化、不自动重启。
+[tools/partition/partition-darwin.py](../../tools/partition/partition-darwin.py) 是用于生成 dipper 分区方案的离线工具。它不连接 ADB，不执行手机命令；生成的 shell 脚本由持有人审查后执行。它只改 GPT，不写入 darwin.img、不格式化、不自动重启。
 
-本次实际流程已通过：当前 GPT 备份 → 写入分区 → 回读 → 重进 TWRP 核对容量 → Format Data → Android 初始化与容量验收。证据与未完成的首次安装项目见 [首次安装任务](../development/FIRST_INSTALL.md)。
+已验证的分区流程为：当前 GPT 备份 → 写入分区 → 回读 → 重进 TWRP 核对容量 → Format Data → Android 初始化与容量验收。证据与未完成的首次安装项目见 [首次安装任务](../development/FIRST_INSTALL.md)。
 
 ## 支持范围和目录
 
@@ -40,7 +40,7 @@
 }
 ```
 
-路径相对于配置文件；用 `python3 -c 'import uuid; print(uuid.uuid4())'` 生成一个新 GUID 后存入本轮配置，不复制旧设备 GUID。大小单位为 GiB，只接受正整数。分区起点向上按 1 MiB 对齐，末端为 GPT 最后可用 LBA，因此实际容量可能比请求值少不到 1 MiB，方案会列出差额。本次 24 GiB 方案实际少 8192 字节。镜像是否能容纳及运行时空间是否足够，需要后续镜像验收另行核对。
+路径相对于配置文件；用 `python3 -c 'import uuid; print(uuid.uuid4())'` 生成一个新 GUID 后存入本轮配置，不复制旧设备 GUID。大小单位为 GiB，只接受正整数。分区起点向上按 1 MiB 对齐，末端为 GPT 最后可用 LBA，因此实际容量可能比请求值少不到 1 MiB，方案会列出差额。已验证的 24 GiB 示例因对齐少 8192 字节，其他布局须按实际计算。镜像是否能容纳及运行时空间是否足够，需要后续镜像验收另行核对。
 
 ## 2. 生成并审查
 
@@ -90,7 +90,7 @@ python3 tools/partition/partition-darwin.py --config work/runs/<run-id>/config.j
 
 ## 验证边界
 
-14 项分区工具测试通过，包含 10 种 shell 保护条件的假设备拒绝子场景；共享恢复工具的 17 项测试通过。测试不会访问真实块设备。使用本次保存的分区前后 GPT 离线回放，生成条目与已经实机成功的条目完全一致，重启后的两个节点容量通过校验。
+14 项分区工具测试通过，包含 10 种 shell 保护条件的假设备拒绝子场景；共享恢复工具的 17 项测试通过。测试不会访问真实块设备。使用已保存实机分区前后 GPT 离线回放，生成条目与已经实机成功的条目完全一致，重启后的两个节点容量通过校验。
 
 本通用生成器输出的脚本尚未在真实手机重新执行；本机一次性脚本的实机成功与通用工具的离线通过分别记录。当前手机已经分区，不需要为了测试再次分区。测试命令：
 

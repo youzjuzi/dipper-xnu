@@ -2,7 +2,7 @@
 
 本页负责持久存储操作；[配置、重建与启动](STARTUP.md)负责加载器、UEFI 和 RAM 启动。首次安装按本页第 1–6 节执行，回退使用第 7 节；已有布局且镜像回读匹配时，直接进入启动教程，不重复分区或刷写。
 
-2026-10-30 已完成 Android 布局恢复、Format Data 与容量验收，重新划出约 24 GiB darwin，再次验收 Android，核对新 GUID、重建 loader/UEFI，完成镜像准确范围回读；持有人随后确认成功进入 iOS。本轮外设逐项回归、退出后完整重启 Android 尚未确认。证据见[首次安装任务](../development/FIRST_INSTALL.md)。这是本机结果，不能套用其 GPT、GUID 或历史脚本到其他设备。
+此路线已在测试设备上完成 Android 布局恢复、重新分区、镜像准确范围回读，并由测试者确认进入 iOS。逐项外设回归和退出收尾仍有待验项目，详见[功能状态](../STATUS.md)及[验证记录](../validation/VALIDATION.md)。每台设备都必须独立核对 GPT、GUID 和输入，不能套用测试设备的历史参数。
 
 所有设备修改均由持有人执行。构建准备见[构建教程](../build/BUILD.md)，已有布局的固件及功能测试见[测试参考](EXISTING_INSTALL.md)。
 
@@ -22,9 +22,9 @@
 设备版本、TWRP 官方下载与核验、GPU 固件提取见[设备准备教程](DEVICE_PREPARATION.md)。
 
 - Bootloader 已解锁，能够进入厂商 bootloader 的 fastboot。
-- 有适配 dipper 且经过验证的 recovery，可访问 root adb、GPT 工具和块设备；历史实验使用 TWRP 3.3.1；本轮分区与恢复使用 TWRP 3.7.0_9-0，不随仓库提供。
+- 有适配 dipper 且经过验证的 recovery，可访问 root adb、GPT 工具和块设备；已验证的分区与恢复环境为 TWRP 3.7.0_9-0，不随仓库提供。
 - 已备份个人文件及设备分区，并在电脑或外置介质验证哈希。GPT 主表、备份表，以及 boot、modem、persist、modemst1/2、fsg 等恢复材料均需保留。
-- 已准备适用本机的恢复手段和原系统恢复材料。历史设备有 9008 恢复条件，不能推定其他设备也有相同条件。
+- 已准备适用本机的恢复手段和原系统恢复材料。不要假定其他设备的 9008 工具或授权条件适用于自己的设备。
 - 接受重建 userdata 会删除 Android 应用、设置和用户文件；修改 GPT 后，仅刷回原 boot 不能恢复原分区布局或用户数据。
 
 本文不提供他人的 GPT 备份、分区唯一 GUID 或通用 EDL 写入参数。不要覆盖 modem、persist、modemst1/2、fsg 等设备身份和校准分区。
@@ -66,7 +66,7 @@ sha256sum ./dipper-gpt-before.bin
 
 使用[离线分区工具说明](PARTITION_DARWIN.md)采集本机主备 GPT、填写私有配置、审查方案，再生成本轮脚本。工具只支持说明中限定的 dipper 尾部分区布局；不提供保留数据缩容。不要直接复用历史轮次的脚本。
 
-配置中的 `darwin_size_gib` 表示 GiB；本轮请求 24 GiB，按 1 MiB 对齐后实际为 25769795584 字节，比精确 24 GiB 少 8192 字节。以下仅为验收参考，不能代替本机方案：
+配置中的 `darwin_size_gib` 表示 GiB；已验证示例请求 24 GiB，按 1 MiB 对齐后实际为 25769795584 字节，比精确 24 GiB 少 8192 字节。以下仅为验收参考，不能代替本机方案：
 
 | 分区 | 起始 LBA（4096 字节） | 结束 LBA | 节点字节数 |
 | --- | --- | --- | --- |
@@ -83,7 +83,7 @@ sha256sum ./dipper-gpt-before.bin
 adb -s "$ANDROID_SERIAL" shell 'getprop sys.boot_completed; df -k /data'
 ```
 
-本轮恢复完整 userdata 后 `/data` 为 116193656 KiB；划出 darwin 后为 91422752 KiB，两次均 `sys.boot_completed=1`。MIUI“系统固件”显示曾从约 9G 变成约 34G，不能仅凭这个分类判断失败；应以 GPT、节点容量和文件系统容量共同验收。文件系统总量小于分区容量是正常开销，但明显少一整块空间时须检查是否仍在使用旧文件系统。
+MIUI 的“系统固件”分类数字不能单独用来判断分区是否成功。应以 GPT、内核节点容量及文件系统读数共同验收。文件系统总量小于分区容量有正常开销，但明显缺失一大段空间时，须检查是否仍在使用未重建的旧文件系统。具体容量对照见[验证记录](../validation/VALIDATION.md)。
 
 保存新 GUID、边界和备份到本机 `local/`。按[启动教程的配置与重建步骤](STARTUP.md#1-让源码匹配新分区)准备匹配产物，再继续镜像写入。
 
@@ -140,7 +140,7 @@ adb -s "$ANDROID_SERIAL" exec-out 'set -o pipefail; dd if=/dev/block/by-name/dar
 结果必须等于主机 `darwin.img` 的 SHA256。fastboot 的 OKAY 不能替代回读验证；稀疏传输可能跳过区域，不能只根据传输成功推断实际数据完整。回读不一致时不进入启动步骤，也不要清除其他分区。
 
 
-检查 dd 实际计数为 8365539328 字节，并同时确认命令退出成功、摘要匹配；不同镜像必须重新计算读取长度，不能沿用此 count。第 09 轮已对该范围完成实时回读，与主机摘要一致。通过后进入[启动教程](STARTUP.md)。
+检查 dd 实际计数为 8365539328 字节，并同时确认命令退出成功、摘要匹配；不同镜像必须重新计算读取长度，不能沿用此 count。该固定镜像范围已通过实机回读验证。通过后进入[启动教程](STARTUP.md)。
 
 ## 7. 回退：恢复 Android 布局
 
@@ -210,8 +210,8 @@ python3 tools/partition/restore-android-layout.py --config local/devices/<alias>
 
 ### 已验证边界
 
-2026-10-30：17 项合成 GPT/CLI 测试通过；使用本机恢复前及重启后 GPT、已记录内核容量的离线回放通过。原一次性 v2 脚本已由持有人执行并回读通过；本通用生成器新增身份、挂载/holder 等保护后的生成脚本尚未在手机执行，不继承 v2 的全部真机验证结论。本机后来已重新分区并进入 iOS；本次保存的恢复配置仅对应当时状态，只供历史回放。再次回退必须重新采集当前 GPT，生成新方案。
+恢复工具的 17 项合成 GPT/CLI 测试及已保存实机 GPT 离线回放通过。设备恢复流程已通过实机验证，但增加保护条件后的通用生成脚本尚未单独实机执行，不能视为所有设备均已验证。每次回退都须重新采集当前 GPT 并生成方案，不重用过期配置。
 
 测试入口：`python3 tools/tests/test-restore-android-layout.py`。任务进度见 [首次安装任务](../development/FIRST_INSTALL.md)。
 
-恢复 GPT 和重启后容量核验通过之后，持有人仍须 Format Data、初始化 Android，再检查 `sys.boot_completed` 和 `df -k /data`。本轮先恢复 GPT 未格式化时，文件系统仍只有旧容量；格式化后才完成恢复验收。无法进入 Recovery/fastboot 时，使用事先验证的本机恢复手段，不能猜测 EDL 参数。
+恢复 GPT 和重启后容量核验通过之后，持有人仍须 Format Data、初始化 Android，再检查 `sys.boot_completed` 和 `df -k /data`。只恢复 GPT 不会自动扩展旧文件系统；恢复验收仍须包含数据文件系统重建与 Android 容量核对。无法进入 Recovery/fastboot 时，使用事先验证的本机恢复手段，不能猜测 EDL 参数。

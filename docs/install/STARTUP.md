@@ -1,6 +1,6 @@
 # 配置、重建与临时启动
 
-先完成[分区、镜像写入与回读](INSTALL.md)，或确认已有分区和镜像内容匹配。本页用于后续启动和开发验证；无需每次重新分区或刷写系统。2026-10-30 第 10 轮持有人确认新分区成功进入 iOS；外设逐项回归和退出后 Android 重启仍待确认。
+先完成[分区、镜像写入与回读](INSTALL.md)，或确认已有分区和镜像内容匹配。本页用于后续启动和开发验证，无需每次重新分区或刷写系统。已验证结果与未覆盖项目见[功能状态](../STATUS.md)。
 
 ## 1. 让源码匹配新分区
 
@@ -18,7 +18,7 @@ C 结构中的 GUID 必须按字段正确转换，不能把字符串直接粘进
 
 ## 2. 按变化范围重建并保存候选
 
-源码仍在唯一的 `work/` 中开发。重编译前，将将被覆盖的 loader 源码、loader.efi、boot-dipper.img、BootShim/FD 和本机配置备份到 `local/backups/<run-id>/`，保存摘要与对应关系；原生构建会更新原输出位置。运行记录放 `work/runs/<run-id>/`，不复制整套源码。
+源码仍在唯一的 `work/` 中开发。重编译前，将会被覆盖的 loader 源码、loader.efi、boot-dipper.img、BootShim/FD 和本机配置备份到 `local/backups/<run-id>/`，保存摘要与对应关系；原生构建会更新原输出位置。运行记录放 `work/runs/<run-id>/`，不复制整套源码。
 
 | 变化 | 必须处理 |
 | --- | --- |
@@ -39,13 +39,15 @@ python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --se
 
 Wi-Fi 需要已核验的对应固件；基础测试可省略 `--wifi --peripherals`。此处候选限时 300 秒，默认不启用持久存储写入或旧 var_store。具体测试矩阵见[已有分区测试](EXISTING_INSTALL.md)。
 
-本轮第 08 轮只改 loader GUID，内核边界不变，因此未无意义地重编译内核或系统镜像。实际重建 loader/UEFI，并核对：ARM64 EFI、新 GUID、固件卷内嵌的完整 loader、boot 镜像中 BootShim+FD+USB XNUP、DTB；内核及两个启动 APFS 摘要与已验产物相同。新候选保存在该轮 candidate/，不是直接使用旧目录的散装文件。
+重建后核对新 GUID、ARM64 EFI、UEFI 内嵌的 loader，以及 boot 镜像中的 BootShim、FD、USB 引导载荷与 DTB。沿用的内核和用户态产物也要核对摘要；在新的 candidate/ 中保存完整的一组启动文件。
 
 `tools/build/build-loader-uefi.sh` 会嵌入 USB 引导载荷；缺少它，即使看到 UEFI 也不保证出现 xnuloader 服务。构建命令退出成功只是主机证据，设备成功须另验。
 
 ## 3. 临时启动
 
-命令在主机 Bash 执行。先由持有人进入厂商 bootloader，使用 `fastboot devices` 识别本机序列号，再设置变量；不是 TWRP 的 adb 模式。
+日常启动 iOS 不需要重新刷入 TWRP，也不需要先进入 TWRP。Recovery 只在分区维护和回读等步骤使用；首次安装或进入已安装 TWRP 的说明见[设备准备教程](DEVICE_PREPARATION.md)。
+
+命令在主机 Bash 执行。先进入厂商 bootloader，使用 `fastboot devices` 识别本机序列号，再设置变量；不是 TWRP 的 adb 模式。
 
 ```sh
 : "${BOOT_SERIAL:?设置厂商 fastboot 序列号}"
@@ -56,7 +58,7 @@ fastboot -s "$BOOT_SERIAL" getvar product
 fastboot -s "$BOOT_SERIAL" boot "$CANDIDATE/boot-dipper.img"
 ```
 
-这是临时加载 UEFI，不是 `fastboot flash boot`。等待设备重新出现；厂商 fastboot 序列号与 loader 阶段不同，本轮后者为 `xnuloader`。若连接多台设备，先只保留本次目标，明确确认身份。
+这是临时加载 UEFI，不是 `fastboot flash boot`。等待设备重新出现；厂商 fastboot 序列号与 loader 阶段不同，当前 loader 使用 `xnuloader`。若连接多台设备，先只保留本次目标，明确确认身份。
 
 ```sh
 fastboot devices
@@ -72,7 +74,7 @@ fastboot -s xnuloader oem run
 
 ## 4. 验收、日志与结束
 
-UEFI 画面、xnuloader 身份和 fastboot OKAY 分别只证明各自阶段；真正进入 iOS 需持有人观察屏幕。记录桌面、触摸及本轮实际测试项目，结合内核根卷挂载和用户态日志，不能从“能进桌面”推定全部外设正常。
+UEFI 画面、xnuloader 身份和 fastboot OKAY 分别只证明各自阶段；真正进入 iOS 需要观察实际屏幕。记录桌面、触摸及本轮实际测试项目，结合内核根卷挂载和用户态日志，不能从“能进桌面”推定全部外设正常。
 
 loader 可响应时取证，文件放本轮新运行目录，避免覆盖旧日志：
 
@@ -82,6 +84,6 @@ fastboot -s xnuloader oem log
 fastboot -s xnuloader get_staged "$LOG_DIR/kernel-log.txt"
 ```
 
-先设置并创建本轮 `LOG_DIR`，确认输出文件不存在。接口暂不可用不应改用刷写命令。当前 GPU SMMU/基带退出恢复尚未闭合；限时结束或失败后，由持有人完整重启再开始下一轮，不能直接连续 rerun。回到 Android 后检查启动完成与 `/data`；需要恢复分区布局时才用[Android 回退章节](INSTALL.md#7-回退恢复-android-布局)。
+先设置并创建本轮 `LOG_DIR`，确认输出文件不存在。接口暂不可用不应改用刷写命令。当前 GPU SMMU/基带退出恢复尚未闭合；限时结束或失败后，完整重启再开始下一轮，不能直接连续 rerun。回到 Android 后检查启动完成与 `/data`；需要恢复分区布局时才用[Android 回退章节](INSTALL.md#7-回退恢复-android-布局)。
 
-本轮第 10 轮：主机实时确认 xnuloader，`oem run` 日志仅有 OKAY；持有人随后明确报告“成功进入ios了 没问题”。因此记为持有人确认的 iOS 启动成功，未取得详细内核启动日志，未将本轮外设逐项回归或最终 Android 重启记为通过。
+首次安装测试已由测试者确认进入 iOS；详细内核日志、逐项外设回归和退出收尾的覆盖范围见[验证记录](../validation/VALIDATION.md)，不能仅依据 oem run 的 OKAY 判断成功。

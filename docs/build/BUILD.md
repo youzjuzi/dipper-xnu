@@ -66,7 +66,7 @@ python3 tools/prepare/prepare.py --prepare
 
 脚本会下载锁定版本及相关子模块，合并内核与用户空间目录，基于 Apple XNU 应用 HackiOS 基线和 dipper 补丁，再检查修改文件的 SHA256。`xnu-mi8.patch` 基于 HackiOS 基线，不能直接应用到原版 XNU。上游树可能包含 prebuilt，本流程不把这些产物作为已重建的 dipper 产物使用。
 
-本轮已实际从上游取得固定版本。子模块只取构建需要的层级，不递归拉取 OpenSSL 等依赖自己的测试仓库；每个版本仍由 gitlink 固定。网络失败时保留日志和固定 commit，不能通过切换到最新分支绕过。
+固定上游版本的获取流程已验证。子模块只取构建需要的层级，不递归拉取 OpenSSL 等依赖自己的测试仓库；每个版本仍由 gitlink 固定。网络失败时保留日志和固定 commit，不能通过切换到最新分支绕过。
 
 主要输出目录：
 
@@ -116,11 +116,11 @@ stat xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development
 sha256sum xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
 ```
 
-文件应为 ARM64 Mach-O 内核。本轮显式 `build` 目标退出码为 0；它执行头文件准备、编译和链接。原教程不指定目标的 `-j8 -k` 会继续执行 `all` 中的导出检查与工具生成，本轮因平台导出符号和 LLDB 脚本的 `python` 命令问题退出 2；这些检查尚未修复，不能宣称完整 `all` 通过。任何命令非零退出都应先检查日志。主机链接成功不代表设备可启动。
+文件应为 ARM64 Mach-O 内核。已验证显式 `build` 目标退出码为 0；它执行头文件准备、编译和链接。原教程不指定目标的 `-j8 -k` 会继续执行 `all` 中的导出检查与工具生成，已记录的构建因平台导出符号和 LLDB 脚本的 `python` 命令问题退出 2；这些检查尚未修复，不能宣称完整 `all` 通过。任何命令非零退出都应先检查日志。主机链接成功不代表设备可启动。
 
 ## 5. 编译加载器与 UEFI
 
-重新分区后，先按 [设备配置匹配](../install/STARTUP.md#1-让源码匹配新分区)核对 GUID 与边界；已有构建不能直接沿用旧 GUID。第 08 轮只有唯一 GUID 改变，按本节重编译 loader/UEFI；内核边界未变，未重新编译内核。
+重新分区后，先按 [设备配置匹配](../install/STARTUP.md#1-让源码匹配新分区)核对 GUID 与边界；已有构建不能直接沿用旧 GUID。若仅唯一 GUID 改变，按本节重编译 loader/UEFI；内核边界和内容不变时，可在核验后沿用既有内核。
 
 此入口会刷新 work/ 中的原生构建输出。再次运行前，将旧 loader 源码/产物、UEFI/BootShim/FD 和本机配置复制到 local/backups/ 对应目录并校验；新候选保存到独立 work/runs/ 目录。不要复制整套源码或重新运行 prepare.py。
 
@@ -152,7 +152,7 @@ bash tools/build/build-loader-uefi.sh
 2. `tools/build/build-userland.sh` 从源码生成 `root.apfs` 和 `flashboot.apfs`。
 3. `tools/build/pack-darwin.py` 生成并校验 `darwin.img`。
 
-这些主机步骤已实际完成。进入设备测试前还必须准备经核查的本设备固件、分区配置及内核启动载荷；本轮的 [已有分区路线](../install/EXISTING_INSTALL.md) 已完成桌面启动验证。公开 loader 的分区 GUID 是零占位符，边界来自历史实验，必须对照本机 GPT 修改并重编译；不能删除校验强行启动。主机产物检查完成后，先补齐 [设备输入](USERLAND.md#4-设备输入与实机测试)，再进入设备测试。
+这些主机步骤已实际完成。进入设备测试前还必须准备经核查的本设备固件、分区配置及内核启动载荷；[已有分区路线](../install/EXISTING_INSTALL.md) 已完成桌面启动验证。公开 loader 的分区 GUID 是零占位符，边界来自历史实验，必须对照本机 GPT 修改并重编译；不能删除校验强行启动。主机产物检查完成后，先补齐 [设备输入](USERLAND.md#4-设备输入与实机测试)，再进入设备测试。
 
 ## 7. 常见问题
 

@@ -8,14 +8,14 @@
 
 | 项目 | 最近记录 | 证据与边界 |
 | --- | --- | --- |
-| 手机 | 小米 8，设备代号 dipper，SDM845 / A630 | 本机首次安装实验 |
-| Android | Android 10 | 2026-10-31 Android 下 getprop 再次实读 |
-| MIUI | V12.5.2.0.QEACNXM | 同次实读；不是要求其他版本强行刷成此版本 |
+| 手机 | 小米 8，设备代号 dipper，SDM845 / A630 | 已验证设备 |
+| Android | Android 10 | 2026-10-31 实机确认 |
+| MIUI | V12.5.2.0.QEACNXM | 已验证版本；不要求其他版本强行刷成此版本 |
 | Recovery | TWRP 3.7.0_9-0 | Recovery 内 getprop 与 root 身份核验 |
 | 系统卷目标 | iOS 16.5 / 20F66 | 本仓库固定输入；与 Android 版本分别记录 |
-| Android root | 2026-10-31 su 返回 uid=0 | 本轮 Android root 提取实测通过；不以此推定其他设备可用 |
+| Android root | 2026-10-31 su 返回 uid=0 | Android root 提取已通过实机验证 |
 
-Android 版本与 root 已于 2026-10-31 再次实读，证据在 `work/runs/20261031-firmware-01/`；Recovery 仍为历史实读。最初 Android 原始记录在 `work/runs/20261030-first-install-01/`，Recovery 在第 02 轮；当时持有人表示已刷入 TWRP，但未提供实际 flash 命令、刷入目标及镜像摘要。不能据此宣称已验证某个 TWRP 下载镜像或 boot/recovery 写入过程。
+下列步骤以表中版本为测试基线。使用前请读取自己的设备版本并核对输入，不要把测试设备的结果直接套用到其他设备。验证范围见文末，实验过程见[验证记录](../validation/VALIDATION.md)。
 
 在 Android 已启动并允许 USB 调试后，选择自己的设备，在主机 Bash 执行：
 
@@ -31,9 +31,9 @@ adb -s "$DEVICE_SERIAL" shell 'getprop ro.product.device; getprop ro.build.versi
 
 - [Team Win 小米 8 设备页](https://twrp.me/xiaomi/xiaomimi8.html)：确认设备代号 dipper 和安装说明。
 - [dipper 官方下载列表](https://dl.twrp.me/dipper/)。
-- [本轮同版本 3.7.0_9-0 下载页](https://dl.twrp.me/dipper/twrp-3.7.0_9-0-dipper.img.html)：提供镜像、SHA256 文件及 PGP 签名入口。
+- [3.7.0_9-0 下载页](https://dl.twrp.me/dipper/twrp-3.7.0_9-0-dipper.img.html)：提供镜像、SHA256 文件及 PGP 签名入口。
 
-2026-10-31 核对官方页面时可获取该版本。这里固定本轮实测版本，不把“最新版本”当作兼容性证据。其他 Mi 8 系列机型的镜像不能按名称相近混用。已有可用 TWRP 时不必为本教程重新刷写。
+2026-10-31 核对官方页面时可获取该版本。这里采用已验证版本，不把“最新版本”当作兼容性证据。其他 Mi 8 系列机型的镜像不能按名称相近混用。已有可用 TWRP 时不必为本教程重新刷写。
 
 将镜像和对应 SHA256 校验文件下载到工作区现有 `downloads/` 下的独立目录，保留文件名，在该目录核验：
 
@@ -43,7 +43,56 @@ sha256sum -c twrp-3.7.0_9-0-dipper.img.sha256
 
 若下载页面实际提供的是纯摘要文本，使用 `sha256sum twrp-3.7.0_9-0-dipper.img`，与页面对应值逐字核对。失配或拿不到可信摘要就停止；不自行重写校验文件让它通过。校验同一网站的摘要能检查文件一致性，不等于已完成独立的签名认证。
 
-把来源页面、下载日期、镜像 SHA256 与本机存放位置登记到私有设备记录。本仓库不镜像分发 TWRP，也不预填未经核对的镜像摘要。对尚未安装 Recovery 的设备，按官方 dipper 页面核实安装方案后由持有人操作；本文不将本机未知的历史刷入命令编造成已验证流程。加载 iOS UEFI 的 `fastboot boot` 与安装 TWRP 是两件事，见[启动教程](STARTUP.md)。
+把来源页面、下载日期、镜像 SHA256 与本机存放位置登记到私有设备记录。本仓库不镜像分发 TWRP，也不预填未经核对的镜像摘要。尚未安装 Recovery 时，先按下文核对安装条件。加载 iOS UEFI 的 `fastboot boot` 与安装 TWRP 是两件事，见[启动教程](STARTUP.md)。
+
+### 已安装 TWRP：进入即可，不重复刷写
+
+如果手机已经安装可用 TWRP，Android 正常启动且 ADB 已授权时执行：
+
+```sh
+: "${DEVICE_SERIAL:?先设置并核对 ADB 序列号}"
+adb -s "$DEVICE_SERIAL" reboot recovery
+```
+
+等待 Recovery 启动，再执行下方版本与 root 检查。ADB 不可用时，可在关机状态按住 **音量上 + 电源键**，出现 Mi 8 标志后松开；对应按键说明见 [LineageOS dipper 设备资料](https://github.com/LineageOS/lineage_wiki/blob/main/_data/devices/dipper.yml)。如果进入原厂 Recovery，则不能按 TWRP 命令继续操作。
+
+### 尚未安装 TWRP：官方首次安装路线
+
+仅适用于明确需要安装 TWRP 的 dipper，bootloader 必须已解锁，镜像与恢复材料已核对。本段根据 [Team Win dipper 安装说明](https://twrp.me/xiaomi/xiaomimi8.html)整理；以下命令来自官方安装说明；本项目验证了 TWRP 环境中的维护操作，尚未单独复测该安装流程。
+
+1. 按前文获取 dipper 镜像，验证官方摘要，记录文件路径和摘要；确认备份及恢复手段。尚未解锁时不要为了试命令直接解锁，解锁是另一项会清除数据的操作。
+2. 在已授权 Android ADB 中进入厂商 bootloader：
+
+```sh
+adb -s "$DEVICE_SERIAL" reboot bootloader
+fastboot devices
+```
+
+3. 选择这台手机的厂商 fastboot 序列号，核对 product 为 dipper，以及实际存在 recovery 分区。这里不是 product 为 xnuloader 的 UEFI 服务。
+
+```sh
+: "${BOOT_SERIAL:?设置已确认的厂商 fastboot 序列号}"
+: "${TWRP_IMAGE:?设置已通过官方摘要校验的镜像绝对路径}"
+fastboot -s "$BOOT_SERIAL" getvar product
+fastboot -s "$BOOT_SERIAL" getvar partition-size:recovery
+sha256sum "$TWRP_IMAGE"
+```
+
+4. 仅在上述核对全部通过、镜像适用于本机且容量可容纳时，执行以下持久写入。目标是 **recovery**，不要替换为 boot 或整盘节点：
+
+```sh
+fastboot -s "$BOOT_SERIAL" flash recovery "$TWRP_IMAGE"
+```
+
+5. 确认刷写成功后，按住 Recovery 的按键组合，在执行以下命令后直接进入 Recovery；避免先进入 Android。官方说明指出，某些系统可能在正常启动时恢复原厂 Recovery。
+
+```sh
+fastboot -s "$BOOT_SERIAL" reboot
+```
+
+6. 进入后检查版本和 root。保存实际刷写命令、输出、镜像摘要和启动结果；fastboot OKAY 本身不算 Recovery 可用性验收。只为安装或进入 TWRP，不应顺带执行 Format Data、分区、关闭校验或刷其他镜像；分区任务按独立教程安排。
+
+### Recovery 内核验与下一步
 
 进入 TWRP 后核验：
 
@@ -51,13 +100,21 @@ sha256sum -c twrp-3.7.0_9-0-dipper.img.sha256
 adb -s "$DEVICE_SERIAL" shell 'id; getprop ro.product.device; getprop ro.twrp.version; cat /proc/mounts'
 ```
 
-本轮应确认 dipper、3.7.0_9-0 和 uid=0。TWRP 不自带本项目所需的 sgdisk 保证；分区工具准备及其独立摘要要求见[分区教程](INSTALL.md)。
+应确认 dipper、3.7.0_9-0 和 uid=0。TWRP 不自带本项目所需的 sgdisk 保证；分区工具准备及其独立摘要要求见[分区教程](INSTALL.md)。
+
+### TWRP 与 iOS 启动的区别
+
+| 要做的事 | 入口 | 是否需要再次安装 TWRP |
+| --- | --- | --- |
+| Android root 下提取 GPU 固件 | 本页第 3 节 | 不需要 |
+| 修改布局、Format Data、系统镜像回读 | 进入已安装的 TWRP，按[分区教程](INSTALL.md) | 已安装可用时不需要 |
+| 日常启动 iOS | 厂商 fastboot 临时加载 boot-dipper.img，再进入 xnuloader | 不需要；按[启动教程](STARTUP.md) |
 
 ## 3. GPU 固件清单
 
-以下摘要来自本机上述 MIUI 的实际文件，未与原厂 ZIP 做逐字节对照。不同版本摘要不符时停止核对来源，不能修改预期值绕过当前构建校验。
+以下摘要来自上述 MIUI 版本的实机文件，未与原厂 ZIP 做逐字节对照。不同版本摘要不符时停止核对来源，不能修改预期值绕过当前构建校验。
 
-| 手机文件 | 本轮 SHA256 |
+| 手机文件 | 已验证 SHA256 |
 | --- | --- |
 | /vendor/firmware/a630_gmu.bin | b07f90299ff2ae33948fcfd6ed67f53fbd287b5bf85ff2d43db11d4d32c1621f |
 | /vendor/firmware/a630_sqe.fw | 34edacb6fdedfbfc07ed5cd1d29b0b57a3543ef5be6ab34a43bd64686826fa1e |
@@ -91,11 +148,11 @@ adb -s "$DEVICE_SERIAL" exec-out su -c id
 ```bash
 set -euo pipefail
 : "${DEVICE_SERIAL:?设置目标 ADB 序列号}"
-: "${RUN_ID:?设置新的轮次名称，例如 20261031-firmware-01}"
+: "${RUN_ID:?设置新的轮次名称，使用自己的日期和轮次}"
 MODE=android  # android / root / recovery，按上面的读取条件选择
 case "$MODE" in android|root|recovery) ;; *) exit 1 ;; esac
 OUT="work/runs/$RUN_ID"
-mkdir "$OUT"                  # 要求 work/runs 已存在，且本轮目录不存在
+mkdir "$OUT"                  # 要求 work/runs 已存在，且目标目录不存在
 mkdir "$OUT/gpu"
 cat > "$OUT/gpu/SHA256SUMS" <<'HASHES'
 b07f90299ff2ae33948fcfd6ed67f53fbd287b5bf85ff2d43db11d4d32c1621f  a630_gmu.bin
@@ -122,7 +179,7 @@ done
 (cd "$OUT/gpu" && sha256sum -c SHA256SUMS)
 ```
 
-任何命令或摘要检查失败都停止。手机端前后摘要与主机摘要一致，且匹配固定输入，才算本轮提取通过。记录实际 MODE、Android/TWRP 版本和日期；部分失败的文件保留为失败证据，重新尝试使用新轮次。
+任何命令或摘要检查失败都停止。手机端前后摘要与主机摘要一致，且匹配固定输入，才算提取通过。记录实际 MODE、Android/TWRP 版本和日期；部分失败的文件保留为失败证据，重新尝试使用新轮次。
 
 ### 放入构建输入目录
 
@@ -157,14 +214,15 @@ Wi-Fi 分两类输入：
 
 ## 验证范围
 
-GPU 固件文件及固定摘要来自已保存的实机基线；上述提取示例于 2026-10-31 以 MODE=root 在 Android 实机执行通过：4 个文件提取前后手机端摘要与主机摘要一致，固定 SHA256 全部通过，与现有构建输入逐字节相同。结果保存在 work/runs/20261031-firmware-01/gpu/；未覆盖原输入、未写手机分区。普通 Android 无 root 模式、TWRP 提取模式及复制到构建目录示例本轮未执行。TWRP 官方来源页面已核对；本机当时实际刷入镜像的来源、SHA256 与刷入目标仍待补证。
+2026-10-31 已在 Android 10 / MIUI V12.5.2.0.QEACNXM 上使用已有 root 验证提取流程。4 个 GPU 固件的手机端前后摘要、主机端摘要和固定 SHA256 均一致，与已有构建输入逐字节相同。测试未覆盖或修改原有构建输入。
 
-
-| 路线或检查 | 本轮结果 |
+| 路线或检查 | 验证结果 |
 | --- | --- |
-| Android 版本、启动完成、su root | 已实时确认 |
+| Android 版本、启动完成、su root | 已实机确认 |
 | MODE=root 提取 4 个 GPU 固件 | 实机通过 |
 | 提取前后手机端、主机端、固定 SHA256 | 全部一致 |
-| 与原构建输入比较 | 逐字节相同，未覆盖 |
-| 普通 ADB / TWRP 提取路线 | 本轮未执行 |
-| 提取后复制、重新构建与启动 | 本轮未执行；不能用提取通过替代 |
+| 普通 ADB / TWRP 固件提取 | 尚未单独实测 |
+| 官方 TWRP 首次刷入步骤 | 已核对官方说明，尚未单独复测 |
+| 提取后复制、重新构建与启动 | 未在本次提取测试中执行 |
+
+详细测试过程见[验证记录](../validation/VALIDATION.md)。
