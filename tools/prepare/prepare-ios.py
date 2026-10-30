@@ -10,7 +10,7 @@ import plistlib
 import subprocess
 import zipfile
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 IPSW_SHA256 = 'c1091c401f67e3aa7cdfeb2cc19e6c79be3c957aae4e097a019e9ccea07d52f2'
 PARTS = (
     ('096-04088-077.dmg', 'rootfs.dmg', 4728546953),
@@ -28,7 +28,7 @@ def prepare(ipsw):
     kernel = ROOT / 'work/hackios'
     dest = kernel / 'ios165'
     if not (dest / 'fetch.sh').is_file():
-        raise SystemExit('Prepare sources first: python3 tools/prepare.py --prepare')
+        raise SystemExit('Prepare sources first: python3 tools/prepare/prepare.py --prepare')
     print('Checking the complete IPSW SHA256...', flush=True)
     if digest(ipsw) != IPSW_SHA256:
         raise SystemExit('IPSW SHA256 mismatch; no inputs extracted. See docs/build/INPUTS.md.')

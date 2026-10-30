@@ -7,7 +7,7 @@
 需要支持 APFS 的 7-Zip（23 或更新版本）。在仓库根目录执行：
 
 ```sh
-python3 tools/prepare-ios.py \
+python3 tools/prepare/prepare-ios.py \
   --ipsw "$DIPPER_INPUTS/iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw"
 ```
 
@@ -20,7 +20,7 @@ python3 tools/prepare-ios.py \
 ```sh
 export BUILD_TIMEZONE=Asia/Tokyo   # 可改为自己的时区；未设置且主机无法查询时使用 UTC
 export BUILD_JOBS=8
-bash tools/build-userland.sh
+bash tools/build/build-userland.sh
 ```
 
 入口明确采用 `GL=1 FLASHBOOT=1 CRYPTEXES=flash REST=1`，从源码编译 Mesa、图形适配、注入库及网络程序；拒绝 `PREBUILT`，缺少交叉链接器时直接报错。`SHARE=1` 排除上游脚本可选的本机网络密码和 SSH 密钥。不会额外生成 RAM 根卷方案的 `system.apfs`。固定 `umask 022`，避免 launchd 拒绝组可写的配置；桌面验收不执行后台 CPU 基准。
@@ -37,7 +37,7 @@ bash tools/build-userland.sh
 ## 3. 生成写入 darwin 的原始系统组合镜像
 
 ```sh
-python3 tools/pack-darwin.py
+python3 tools/build/pack-darwin.py
 ```
 
 输出为 `work/images/darwin.img`，8,365,539,328 字节。脚本不会覆盖已有输出，校验输入来源、各 APFS 魔数和大小，并要求最终 SHA-256 为：
@@ -55,6 +55,6 @@ python3 tools/pack-darwin.py
 - GPU 固件：在 `work/hackios/fw-gpu/` 放置与 dipper 匹配的 `a630_gmu.bin`、`a630_sqe.fw`、`a630_zap.mdt`、`a630_zap.b02`，记录获取链接/来源、版本和 SHA-256 后重建启动卷。
 - Wi-Fi：内核通过本机 Android modem 分区读取基带与板级数据；另需 [WCN3990 特性描述文件](INPUTS.md#wcn3990-wi-fi-特性描述文件) `firmware-5.bin`，经校验后装入 root.apfs。需核对本机 modem 布局。上游 `wpss` / `qca6750` 示例属于另一设备，不能当作 WCN3990 的通用输入。
 - 本机分区参数：公开 loader 的 `BLOCK_DARWIN_UNIQ` 是零占位符；内核和 loader 的边界需与本机 GPT 对齐后重编译。具体见 [启动教程配置章节](../install/STARTUP.md#1-让源码匹配新分区)。
-- dipper 完整启动参数及最终 `payload.bin`：现已提供 `tools/build-payload.py --output work/runs/desktop-01`，用于已核对 GPT 和系统区的 5 分钟桌面测试。它不包含 Wi-Fi、存储写入或旧用户状态恢复，不能代替设备配置核对。
+- dipper 完整启动参数及最终 `payload.bin`：现已提供 `tools/build/build-payload.py --output work/runs/desktop-01`，用于已核对 GPT 和系统区的 5 分钟桌面测试。它不包含 Wi-Fi、存储写入或旧用户状态恢复，不能代替设备配置核对。
 
 先只读核对设备与输入，完成设备配置和载荷打包，再按 [已有分区测试](../install/EXISTING_INSTALL.md) 进行实机验收。结果与未通过项记录在 [复现记录](../validation/REPRODUCTION.md)。

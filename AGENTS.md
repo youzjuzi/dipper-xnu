@@ -38,4 +38,6 @@
 - 父仓库分支切换不更新被忽略的 work/。切任务前先导出并保存所有源码差异；切到不同源码版本后，核对 work/ 与目标提交的对应关系才能编译。禁止以覆盖、清空或另复制一份来回避未保存修改。
 - docs/development/DEVELOPMENT.md 的“当前开发现场交接”是唯一开发现场入口，每次结束更新任务、分支/提交、未导出修改、产物证据和下一步。STATUS 记录产品功能边界，不复制一份平行状态文档。
 
-- 文档分类见 docs/README.md：development、build、install、validation、legal；新增文档归入相应类别，不平铺 docs 根目录。当前分支计划为 docs/development/FIRST_INSTALL.md。
+- 文档分类见 docs/README.md：development、build、install、validation、legal；新增文档归入相应类别，不平铺 docs 根目录。首次安装计划为 docs/development/FIRST_INSTALL.md；当前维护分支及任务以 DEVELOPMENT.md 现场交接为准。
+
+- tools 分类固定为 prepare/、build/、partition/、tests/，入口见 tools/README.md；新增工具归入对应类别。历史轮次保留原始命令和摘要，当前教程使用新路径。

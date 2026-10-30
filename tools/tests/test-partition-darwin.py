@@ -11,12 +11,12 @@ import unittest
 
 
 def module(name, file):
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(file))
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parent / file)
     result = importlib.util.module_from_spec(spec); spec.loader.exec_module(result)
     return result
 
 
-m = module('partition', 'partition-darwin.py')
+m = module('partition', '../partition/partition-darwin.py')
 f = module('fixtures', 'test-restore-android-layout.py')
 f.N = 30038016
 NEW_GUID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'

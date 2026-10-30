@@ -20,6 +20,7 @@
 
 - 分区前后均完成 Format Data、Android 启动和数据容量验收；系统镜像准确范围回读 SHA256 与主机一致。
 - 教程整理为[分区、写入与回退](docs/install/INSTALL.md)和[配置、重建与启动](docs/install/STARTUP.md)，Android 恢复作为回退章节保留。
+- **工具目录整理**：11 个脚本归入 `tools/prepare/`、`build/`、`partition/`、`tests/`，脚本引用与教程命令已同步，31 项回归测试通过。后续按[工具导航](tools/README.md)使用新路径。
 - 本轮逐项外设回归与退出后重启 Android 仍待验；先前 Wi-Fi、亮度等测试结果单独保留，不视作本轮复测。
 
 完整变化见 [更新日志](CHANGELOG.md)，阶段与证据见[首次安装任务](docs/development/FIRST_INSTALL.md)。
@@ -69,6 +70,17 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 2. [用户空间与打包](docs/build/USERLAND.md)：提取 IPSW、编译适配程序、生成启动卷和系统镜像。
 3. [分区、写入与回退](docs/install/INSTALL.md)：备份、分区、格式化、系统镜像回读与恢复 Android。
 4. [配置、重建与启动](docs/install/STARTUP.md)：匹配新 GUID、重建 loader/UEFI、打包和日常 RAM 启动；[外设测试参考](docs/install/EXISTING_INSTALL.md)。
+
+工具入口按用途分类，命令均从仓库根目录执行：
+
+| 目录 | 用途 |
+| --- | --- |
+| `tools/prepare/` | 固定源码准备、SDK 校验、IPSW 提取 |
+| `tools/build/` | 编译加载器、UEFI、用户态，打包镜像与载荷 |
+| `tools/partition/` | 分区及 Android 恢复方案生成、回读核验 |
+| `tools/tests/` | 主机回归测试 |
+
+完整脚本清单见[工具导航](tools/README.md)。旧实验记录保留当时路径，后续运行请使用当前教程的新路径。
 
 **首次安装需要划出独立的 `darwin` 分区，会清空 Android 用户数据。** 系统持久写入该分区，之后通过临时加载 UEFI 启动。
 

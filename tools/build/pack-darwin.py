@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = '9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560'
 
 

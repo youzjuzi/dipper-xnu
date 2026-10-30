@@ -38,9 +38,9 @@ adb shell 'ls -l /dev/block/by-name/darwin /dev/block/by-name/userdata'
 本轮实测边界已与公开源码相同，只需将 loader 的零 GUID 占位符替换成本机值，再重新编译 loader/UEFI；内核不需要因为 GUID 而改动。如果边界不同，必须修改内核并重编译。
 
 ```sh
-bash tools/build-loader-uefi.sh
-bash tools/build-userland.sh
-python3 tools/build-payload.py --output work/runs/desktop-01 --seconds 300
+bash tools/build/build-loader-uefi.sh
+bash tools/build/build-userland.sh
+python3 tools/build/build-payload.py --output work/runs/desktop-01 --seconds 300
 ```
 
 用户空间入口启用按需服务，并加入 installd、sleepd；桌面验收不运行上游默认的后台 CPU 基准。打包入口会从 APFS 回读 4 个 GPU 固件，与输入比较后才生成载荷；输出目录必须不存在。
@@ -67,7 +67,7 @@ fastboot get_staged kernel-log.txt
 在基础桌面测试通过、手机完整重启回 Android 后，先按 [外部材料](../build/INPUTS.md#wcn3990-wi-fi-特性描述文件) 补齐 `firmware-5.bin` 并重建用户空间，再生成新载荷：
 
 ```sh
-python3 tools/build-payload.py --wifi --seconds 900 --output work/runs/wifi-01
+python3 tools/build/build-payload.py --wifi --seconds 900 --output work/runs/wifi-01
 ```
 
 按第 4 节的 RAM 启动顺序使用新目录中的文件。此配置开启 Mi8 的 MSS/GLINK/WLFW 与 ath10k station 路线，固件从本机原厂 `modem` 分区读取，包括 MBA、modem、wlanmdsp 和匹配设备的 bdwlan 文件。不要套用其他设备的 `wifi=1` 配置，也不要凭文件名猜测或替换板级校准文件。
@@ -83,7 +83,7 @@ loader 日志只保留启动头部和有限的循环缓冲。排查早期初始�
 ## 6. 外设与日常交互测试
 
 ```sh
-python3 tools/build-payload.py --wifi --peripherals --seconds 900 --output work/runs/peripherals-01
+python3 tools/build/build-payload.py --wifi --peripherals --seconds 900 --output work/runs/peripherals-01
 ```
 
 `--peripherals` 加入 `battery=1 torch=3 haptic=3`：电量来自 loader 读取的 PMI8998，手电筒和马达由 iOS 操作触发，不在开机时自动播放。小米 8 的 PMIC 马达不需要另一设备使用的 `aw8697_haptic.bin`。亮度、锁屏和音量键使用已编译的适配逻辑，不需要添加实验用亮度扫描参数。Wi-Fi 可省略 `--wifi` 单独关闭。

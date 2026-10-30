@@ -30,10 +30,10 @@ C 结构中的 GUID 必须按字段正确转换，不能把字符串直接粘进
 在仓库根目录完成[构建环境](../build/BUILD.md)与[用户空间准备](../build/USERLAND.md)后：
 
 ```sh
-bash tools/build-loader-uefi.sh
+bash tools/build/build-loader-uefi.sh
 # RUN_ID 换成本轮唯一名称；候选目录必须不存在。
 : "${RUN_ID:?先设置本轮名称}"
-python3 tools/build-payload.py --output "work/runs/$RUN_ID/candidate" --seconds 300 --wifi --peripherals
+python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --seconds 300 --wifi --peripherals
 (cd "work/runs/$RUN_ID/candidate" && sha256sum -c SHA256SUMS)
 ```
 
@@ -41,7 +41,7 @@ Wi-Fi 需要已核验的对应固件；基础测试可省略 `--wifi --periphera
 
 本轮第 08 轮只改 loader GUID，内核边界不变，因此未无意义地重编译内核或系统镜像。实际重建 loader/UEFI，并核对：ARM64 EFI、新 GUID、固件卷内嵌的完整 loader、boot 镜像中 BootShim+FD+USB XNUP、DTB；内核及两个启动 APFS 摘要与已验产物相同。新候选保存在该轮 candidate/，不是直接使用旧目录的散装文件。
 
-`tools/build-loader-uefi.sh` 会嵌入 USB 引导载荷；缺少它，即使看到 UEFI 也不保证出现 xnuloader 服务。构建命令退出成功只是主机证据，设备成功须另验。
+`tools/build/build-loader-uefi.sh` 会嵌入 USB 引导载荷；缺少它，即使看到 UEFI 也不保证出现 xnuloader 服务。构建命令退出成功只是主机证据，设备成功须另验。
 
 ## 3. 临时启动
 

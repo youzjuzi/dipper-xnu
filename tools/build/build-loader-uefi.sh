@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# Host-only compilation. Requires tools/prepare.py --prepare first.
+# Host-only compilation. Requires tools/prepare/prepare.py --prepare first.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 W="$ROOT/work"
 # Keep this entry point fixed to dipper. Forwarding arbitrary upstream options
 # could select another device/output or trigger fastboot via combined flags.
