@@ -126,7 +126,10 @@ sha256sum -c SHA256SUMS
 - 本次证据在 work/runs/20261030-first-install-01/ 至 03/；第 03 轮确认恢复后的主备 GPT 字节未变、内核识别完整 userdata 容量。旧的 iOS 启动证据不能代替本次首次安装验收。
 - 工具新增：tools/restore-android-layout.py 和测试、安装说明随本次本地提交保存，不推送远程；本机历史配置在 local/devices/mi8/android-restore-20261030.json，回放在 work/runs/20261030-restore-tool-01/。配置对应恢复前历史状态，禁止直接在已恢复手机重跑；通用脚本真机执行待验。
 - 恢复阶段完成：持有人已 Format Data 并完成 Android 初始化，提供 sys.boot_completed=1 与 /data 总量 116193656 KiB 的 ADB 输出；证据在 work/runs/20261030-first-install-04/。root 未核验，不能沿用格式化前的授权/可用性假设。
-- 下一步：等待持有人进入 TWRP 后，只读核对当前 GPT、容量与挂载状态，再制定 darwin 重分区方案。尚未开始重新分区、写镜像或本轮 iOS 启动。完整 XNU all 与补丁导出工具化仍待完成。
+- 第 05 轮已准备约 24 GiB darwin 分区方案、当前 GPT 备份及私有脚本，见 work/runs/20261030-first-install-05/。持有人已执行分区脚本；实时回读主备 GPT 与 expected-gpt-entries.bin 一致，前 20 项未变。旧脚本已完成，不得重复执行。
+- 第 06/07 轮：Recovery 重启后的 GPT 与 userdata/darwin 节点容量核验通过；持有人完成 Format Data，提供 Android 启动完成及 /data 总量 91422752 KiB 的 ADB 输出，阶段 04 通过。证据在 work/runs/20261030-first-install-06/、07/。
+- 通用分区工具：tools/partition-darwin.py、测试和 docs/install/PARTITION_DARWIN.md 随本次本地提交保存，不推送远程；复用恢复工具保护逻辑，14 项新测试及 17 项恢复回归通过。本机历史配置在 local/devices/mi8/darwin-partition-20261030.json，离线回放在 work/runs/20261030-partition-tool-01/，完整条目匹配实机成功结果。当前手机不得重复执行分区，新生成脚本未单独实机执行。
+- 下一步：依据第 05 轮新 darwin GUID 与已核验边界核对 loader/内核配置，必要时重建并验收产物；不能直接使用旧 GUID 的 loader。尚未写镜像或本轮启动 iOS；完整 XNU all 与补丁导出工具化仍待完成。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

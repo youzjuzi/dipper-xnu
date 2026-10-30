@@ -1,6 +1,6 @@
 # 首次安装验收任务
 
-分支：`test/first-install`。建立日期：2026-10-30。任务状态：Android GPT 恢复及 Recovery 重启后回读通过；持有人完成 Format Data 和 Android 初始化，提供启动与数据容量输出，恢复阶段通过；重新分区及 iOS 首次安装待验。
+分支：`test/first-install`。建立日期：2026-10-30。任务状态：Android GPT 恢复及 Recovery 重启后回读通过；持有人完成 Format Data 和 Android 初始化，提供启动与数据容量输出，恢复阶段通过；随后重新分区、Format Data 及 Android 启动/容量验收通过，配置匹配、镜像写入与 iOS 启动待验。
 
 ## 总目标
 
@@ -15,7 +15,7 @@
 | 01 当前状态盘点 | 只读确认设备身份、容量、扇区大小、LUN/节点、完整 GPT、userdata/darwin 范围、挂载与加密情况；核对现有备份及镜像 | 主备 GPT 一致、布局可解释；原始数据与摘要保存在本机，缺项明确列出 | 布局及恢复所需 GPT 已核验 |
 | 02 恢复方案与备份核验 | 对照本机原始布局证据，列出恢复前后区间、工具、个人数据处理与恢复步骤；核验 GPT 和关键分区备份的来源与摘要 | 具体写入范围及清空影响已确认；所需恢复材料齐备，方案可审查 | 本次 GPT 恢复方案通过；非全机备份验收 |
 | 03 恢复 Android 布局 | 持有人执行审核后的恢复步骤；重新读取 GPT 和文件系统状态，验证 Android 启动与容量 | 目标布局匹配、无重叠，Android 实际可启动；记录恢复后的 GPT | 通过：GPT/内核容量已核验；格式化及 Android 启动/数据容量由持有人操作与 ADB 输出确认 |
-| 04 重新分区 | 按本机容量和目标布局规划 userdata/darwin，核对后由持有人执行；重新读取分区表与文件系统，检查 Android | 新主备 GPT 有效，边界/容量正确，Android 仍可启动 | 待开始 |
+| 04 重新分区 | 按本机容量和目标布局规划 userdata/darwin，核对后由持有人执行；重新读取分区表与文件系统，检查 Android | 新主备 GPT 有效，边界/容量正确，Android 仍可启动 | 通过：GPT/节点容量已核验，Format Data 后 Android 启动及容量由持有人 ADB 输出确认 |
 | 05 匹配配置及准备产物 | 用新布局/GUID匹配 loader 与内核；必要时重建，核对系统镜像、UEFI、启动卷和载荷摘要 | 源码、设备配置与本轮产物相互对应，打包校验通过 | 待开始 |
 | 06 写入与回读 | 持有人将核验镜像写入本机 darwin；只读回读准确的系统镜像字节范围 | 回读 SHA256 等于主机输入；不能只依据 fastboot OKAY | 待开始 |
 | 07 启动与收尾 | 按现有文档临时启动，检查 SpringBoard、触摸、GPU、Wi-Fi/Safari、亮度等既有项目；退出后完整重启验证 Android | 有日志与持有人实机确认；失败与未覆盖项明确，完成教程及验证记录更新 | 待开始 |
@@ -56,3 +56,21 @@
 持有人完成 Recovery Format Data，回 Android 完成初始化，报告设置中的系统固件约 9G。其提供的 ADB 输出显示 sys.boot_completed=1，/data 总量 116193656 KiB（约 110.81 GiB）、可用 114887932 KiB（约 109.57 GiB）。相较旧文件系统，数据容量已恢复；df 容量不等于原始分区字节数。阶段 03 据此前 GPT/内核核验和本次持有人提供的启动、容量证据通过。原始用户输出与证据来源说明在 work/runs/20261030-first-install-04/。
 
 root 是否可用尚未核验；本次没有重新分区。下一步在 TWRP 只读确认最新 GPT/容量/挂载状态，再制定阶段 04 方案。
+
+## 阶段 04：约 24 GiB darwin 分区准备
+
+第 05 轮重新读取 TWRP 当前 GPT，主备校验通过且与 Android 恢复后布局一致。准备 userdata 约 89.09 GiB、darwin 约 24 GiB 的方案；为保持 1 MiB 起点对齐，darwin 实际为 25769795584 字节（比 24 GiB 少 8192 字节）。sgdisk pretend 演练通过，之后 GPT 回读未变；脚本主机/设备语法及传输摘要通过。
+
+现场在 work/runs/20261030-first-install-05/，备份在 local/backups/20261030-first-install-05/。准备阶段仅上传脚本到 Recovery RAM，当时尚未执行分区；执行结果见下节。实际执行由持有人完成；缩小 userdata 后先回读 GPT，再重进 Recovery 核对容量并 Format Data，格式化前不得启动 Android。本阶段不写入系统镜像。
+
+### 第 05 轮执行结果
+
+持有人已执行分区脚本；代理回读主备 GPT CRC/条目通过，完整条目表与预定结果一致，前 20 项和磁盘身份/几何未变。userdata 为 95655297024 字节，darwin 为 25769795584 字节。写入当时内核仍报告旧 userdata 121425080320 字节，故先停下，随后按第 06/07 轮核对新节点并重建 Data。原始证据在同轮 after-verification.json 等文件。
+
+第 06 轮：持有人重进 TWRP 后，代理确认主备 GPT 与写入后逐字节一致，CRC/条目有效；内核 userdata 为 95655297024 字节、darwin 为 25769795584 字节。该轮两者均未挂载；随后由持有人 Format Data 重建 userdata，Android 验收见第 07 轮，darwin 不作格式化。证据在 work/runs/20261030-first-install-06/。
+
+### 第 07 轮：重新分区后的 Android 验收
+
+持有人确认 Format Data 后完成 Android 启动，提供 sys.boot_completed=1，/data 总量 91422752 KiB（约 87.19 GiB）、可用 90118260 KiB（约 85.94 GiB）。结合此前 GPT/节点核验，阶段 04 通过。MIUI 系统固件显示约 34G，可能包含非 Android 数据分区容量；分类算法未独立核验，不据此判定固件实际大小。证据在 work/runs/20261030-first-install-07/。下一步匹配新分区配置及准备产物，尚未写入镜像。
+
+本次分区步骤已整理为[通用分区工具](../install/PARTITION_DARWIN.md)，公共逻辑与本机参数分离；本机历史配置仅用于离线回放，不是再次分区的待执行方案。通用工具离线通过不替代设备镜像写入验收。

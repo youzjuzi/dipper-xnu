@@ -77,14 +77,18 @@ def pair(primary, backup, sector, sectors):
     return a
 
 
-def load_plan(path):
-    c = json.loads(path.read_text()); base = path.parent
+def validate_device_config(c):
     require(c['schema_version'] == 1 and c['device'] == 'dipper', 'only dipper schema 1 supported')
     require(c['disk'] == '/dev/block/sda' and c['sector_size'] == 4096, 'only dipper sda / 4096-byte sectors supported')
     require(type(c['disk_bytes']) is int and c['disk_bytes'] > 0 and c['disk_bytes'] % 4096 == 0, 'invalid disk size')
     for key in ('serial', 'twrp_version'):
         require(isinstance(c[key], str) and re.fullmatch(r'[A-Za-z0-9_.-]+', c[key]), 'invalid ' + key)
     require(re.fullmatch(r'[0-9a-f]{64}', c['sgdisk_sha256']), 'invalid sgdisk SHA256')
+
+
+def load_plan(path):
+    c = json.loads(path.read_text()); base = path.parent
+    validate_device_config(c)
     blobs = {k: capture(base, c[k]) for k in ('before_primary', 'before_backup', 'original_primary')}
     sectors = c['disk_bytes'] // 4096
     before = pair(blobs['before_primary'], blobs['before_backup'], 4096, sectors)
@@ -115,12 +119,11 @@ def load_plan(path):
     return c, blobs, target, plan
 
 
-def render_script(c, blobs, plan):
+def render_guard(c, blobs, confirmation, nodes, absent_nodes=(), unmount_data=False):
     q = shlex.quote
-    u, d = plan['userdata_entry'], plan['remove_entry']
     lines = ['#!/sbin/sh', '# Generated for one reviewed snapshot; not a universal flash script.',
              'set -eu', 'stop() { echo "STOP: $*" >&2; exit 1; }',
-             '[ "${1:-}" = RESTORE-ANDROID-GPT ] || stop "explicit RESTORE-ANDROID-GPT argument required"',
+             f'[ "${{1:-}}" = {q(confirmation)} ] || stop "explicit {confirmation} argument required"',
              '[ "$(id -u)" = 0 ] || stop "root required"']
     for prop, value in [('ro.product.device', c['device']), ('ro.serialno', c['serial']), ('ro.twrp.version', c['twrp_version'])]:
         lines.append(f'[ "$(getprop {prop})" = {q(value)} ] || stop "{prop} mismatch"')
@@ -134,7 +137,7 @@ def render_script(c, blobs, plan):
         lines += [f'dd if=/dev/block/sda of="$tmp/{name}" bs=4096 skip={skip} count={len(blobs[name]) // 4096} || stop "GPT read failed"',
                   f'digest=$(sha256sum "$tmp/{name}") || stop "GPT hash failed"',
                   f'[ "${{digest%% *}}" = {sha(blobs[name])} ] || stop "{name} changed; regenerate plan"']
-    lines += ['# Refuse mounted partitions and device-mapper holders. No automatic unmount.',
+    lines += ['# Check all remaining mounts and device-mapper holders before writing.',
               'check_unused() {', '  node=$1',
               '  dev=$(cat "/sys/class/block/$node/dev") || stop "missing block node"',
               '  [ -d "/sys/class/block/$node/holders" ] || stop "missing holders directory"',
@@ -148,8 +151,24 @@ def render_script(c, blobs, plan):
               '[ -r /proc/swaps ] || stop "swap state unavailable"',
               'while read -r filename rest; do',
               '  [ "$filename" = Filename ] || stop "active swap unsupported"',
-              'done < /proc/swaps',
-              f'check_unused sda{u}', f'check_unused sda{d}',
+              'done < /proc/swaps']
+    for node in absent_nodes:
+        lines.append(f'[ ! -e /dev/block/{node} ] || stop "{node} already exists"')
+    if unmount_data:
+        lines += ['sync', 'for mountpoint in /sdcard /data; do',
+                  '  if grep -q " $mountpoint " /proc/mounts; then',
+                  '    umount "$mountpoint" || stop "cannot unmount $mountpoint"',
+                  '  else', '    rc=$?',
+                  '    [ "$rc" -eq 1 ] || stop "mount check failed"',
+                  '  fi', 'done']
+    lines.extend(f'check_unused {node}' for node in nodes)
+    return lines
+
+
+def render_script(c, blobs, plan):
+    u, d = plan['userdata_entry'], plan['remove_entry']
+    lines = render_guard(c, blobs, 'RESTORE-ANDROID-GPT', [f'sda{u}', f'sda{d}'])
+    lines += [
               '/tmp/sgdisk --verify /dev/block/sda',
               f'/tmp/sgdisk --delete={d} --delete={u} --new={u}:{plan["userdata_start"]}:{plan["userdata_end"]} --typecode={u}:0FC63DAF-8483-4772-8E79-3D69D8477DE4 --partition-guid={u}:{plan["userdata_guid"]} --change-name={u}:userdata /dev/block/sda',
               '/tmp/sgdisk --print --verify /dev/block/sda',
