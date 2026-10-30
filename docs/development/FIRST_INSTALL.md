@@ -1,6 +1,6 @@
 # 首次安装验收任务
 
-分支：`test/first-install`。建立日期：2026-10-30。任务状态：Android GPT 恢复及 Recovery 重启后回读通过；持有人完成 Format Data 和 Android 初始化，提供启动与数据容量输出，恢复阶段通过；随后重新分区、Format Data 及 Android 启动/容量验收通过，配置匹配、镜像写入与 iOS 启动待验。
+分支：`test/first-install`。建立日期：2026-10-30。任务状态：Android GPT 恢复及 Recovery 重启后回读通过；持有人完成 Format Data 和 Android 初始化，提供启动与数据容量输出，恢复阶段通过；随后重新分区、Format Data 及 Android 启动/容量验收通过，新分区配置匹配及 loader/UEFI 主机构建通过；镜像准确范围回读通过，持有人确认成功进入 iOS；阶段 07 的逐项回归和最终 Android 重启待验。
 
 ## 总目标
 
@@ -16,9 +16,9 @@
 | 02 恢复方案与备份核验 | 对照本机原始布局证据，列出恢复前后区间、工具、个人数据处理与恢复步骤；核验 GPT 和关键分区备份的来源与摘要 | 具体写入范围及清空影响已确认；所需恢复材料齐备，方案可审查 | 本次 GPT 恢复方案通过；非全机备份验收 |
 | 03 恢复 Android 布局 | 持有人执行审核后的恢复步骤；重新读取 GPT 和文件系统状态，验证 Android 启动与容量 | 目标布局匹配、无重叠，Android 实际可启动；记录恢复后的 GPT | 通过：GPT/内核容量已核验；格式化及 Android 启动/数据容量由持有人操作与 ADB 输出确认 |
 | 04 重新分区 | 按本机容量和目标布局规划 userdata/darwin，核对后由持有人执行；重新读取分区表与文件系统，检查 Android | 新主备 GPT 有效，边界/容量正确，Android 仍可启动 | 通过：GPT/节点容量已核验，Format Data 后 Android 启动及容量由持有人 ADB 输出确认 |
-| 05 匹配配置及准备产物 | 用新布局/GUID匹配 loader 与内核；必要时重建，核对系统镜像、UEFI、启动卷和载荷摘要 | 源码、设备配置与本轮产物相互对应，打包校验通过 | 待开始 |
-| 06 写入与回读 | 持有人将核验镜像写入本机 darwin；只读回读准确的系统镜像字节范围 | 回读 SHA256 等于主机输入；不能只依据 fastboot OKAY | 待开始 |
-| 07 启动与收尾 | 按现有文档临时启动，检查 SpringBoard、触摸、GPU、Wi-Fi/Safari、亮度等既有项目；退出后完整重启验证 Android | 有日志与持有人实机确认；失败与未覆盖项明确，完成教程及验证记录更新 | 待开始 |
+| 05 匹配配置及准备产物 | 用新布局/GUID匹配 loader 与内核；必要时重建，核对系统镜像、UEFI、启动卷和载荷摘要 | 源码、设备配置与本轮产物相互对应，打包校验通过 | 主机通过：新 GUID loader/UEFI 已重建，候选及系统镜像校验通过；后续持有人确认进入 iOS |
+| 06 写入与回读 | 持有人将核验镜像写入本机 darwin；只读回读准确的系统镜像字节范围 | 回读 SHA256 等于主机输入；不能只依据 fastboot OKAY | 通过：TWRP 回读前 8365539328 字节与主机镜像摘要一致；未取得 fastboot 操作日志 |
+| 07 启动与收尾 | 按现有文档临时启动，检查 SpringBoard、触摸、GPU、Wi-Fi/Safari、亮度等既有项目；退出后完整重启验证 Android | 有日志与持有人实机确认；失败与未覆盖项明确，完成教程及验证记录更新 | iOS 启动由持有人确认；逐项回归及退出后 Android 重启待验 |
 
 阶段 03/04 会涉及 Android 用户数据清空，当前目标不包含保留数据缩容。任务开始时手机已装有 darwin；恢复后已移除，后续仍须重读当前布局，不能直接复用历史参数。具体设备写入由持有人操作，必须先形成基于实时读取结果的方案；本计划不是通用分区命令，也不授权代理自行写设备。不要使用其他设备 GPT/GUID，不覆盖身份和校准分区。指定摘要不符时停止对应步骤。
 
@@ -74,3 +74,21 @@ root 是否可用尚未核验；本次没有重新分区。下一步在 TWRP 只
 持有人确认 Format Data 后完成 Android 启动，提供 sys.boot_completed=1，/data 总量 91422752 KiB（约 87.19 GiB）、可用 90118260 KiB（约 85.94 GiB）。结合此前 GPT/节点核验，阶段 04 通过。MIUI 系统固件显示约 34G，可能包含非 Android 数据分区容量；分类算法未独立核验，不据此判定固件实际大小。证据在 work/runs/20261030-first-install-07/。下一步匹配新分区配置及准备产物，尚未写入镜像。
 
 本次分区步骤已整理为[通用分区工具](../install/PARTITION_DARWIN.md)，公共逻辑与本机参数分离；本机历史配置仅用于离线回放，不是再次分区的待执行方案。通用工具离线通过不替代设备镜像写入验收。
+
+## 第 08 轮：新布局配置与 loader/UEFI 构建
+
+依据第 06 轮已验证 GPT 核对：darwin 起止 LBA、块数和类型未变，唯一 GUID 改变。当前 loader 的旧 GUID 需替换；内核 UFS 边界仍一致，无需因此重编译内核。先备份旧本机源码/配置和启动产物，再仅修改忽略目录中的 loader GUID，公共源码保持零占位。
+
+按构建教程执行 `bash tools/build-loader-uefi.sh`，退出 0。验证新 ARM64 EFI loader 的 GUID、新 loader 确实嵌入 UEFI 压缩固件卷、boot 镜像解包为 BootShim+FD+USB XNUP、DTB 一致，均通过。74 项源码核对只有本机 loader 配置差异。内核、root.apfs、flashboot.apfs 与上次实机摘要相同。
+
+现有 darwin.img 完整 SHA256 与固定输入一致，8365539328 字节，小于 darwin 分区；无需重建系统镜像。使用仓库 build-payload.py 打包 300 秒 Wi-Fi/外设候选，保存在 work/runs/20261030-first-install-08/candidate/。日志、源码差异与验证在同轮目录，旧产物在 local/backups/20261030-first-install-08/。这是主机验证，尚未刷写/回读新分区或启动本轮 iOS。下一步阶段 06。
+
+## 第 09 轮：新 darwin 镜像回读验收
+
+TWRP 下主备 GPT 与第 06 轮一致，新 darwin GUID/容量匹配候选配置且未挂载。代理只读回读镜像准确范围 8365539328 字节，SHA256 为 `9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560`，与本轮重新计算的主机镜像一致。dd 完整字节计数和管道退出码通过，未依赖 fastboot OKAY；持有人未提供 fastboot 日志。证据在 work/runs/20261030-first-install-09/，阶段 06 通过。下一步使用第 08 轮候选临时启动 UEFI，确认 xnuloader 后加载内核/用户态，当时 iOS 实机启动待验；后续结果见第 10 轮。
+
+## 第 10 轮：新分区 iOS 启动成功
+
+代理实时 fastboot 查询确认 product 为 xnuloader；使用第 08 轮 300 秒候选，存储写入关闭。持有人随后明确报告“成功进入ios了 没问题”。据此确认本次恢复、重新分区、镜像回读、配置匹配及新 loader/UEFI 启动链已走通。boot.log 仅含 oem run 的 OKAY，不是内核启动日志；本轮未补采详细启动日志。外设逐项回归、限时退出后的完整 Android 重启仍待验，不能继承旧布局的全部功能验收。原始记录在 work/runs/20261030-first-install-10/。
+
+教程已分为[分区、写入与回退](../install/INSTALL.md)和[配置、重建与启动](../install/STARTUP.md)，独立恢复说明整合为前者的回退章节。

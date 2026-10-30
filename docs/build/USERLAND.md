@@ -54,7 +54,7 @@ python3 tools/pack-darwin.py
 
 - GPU 固件：在 `work/hackios/fw-gpu/` 放置与 dipper 匹配的 `a630_gmu.bin`、`a630_sqe.fw`、`a630_zap.mdt`、`a630_zap.b02`，记录获取链接/来源、版本和 SHA-256 后重建启动卷。
 - Wi-Fi：内核通过本机 Android modem 分区读取基带与板级数据；另需 [WCN3990 特性描述文件](INPUTS.md#wcn3990-wi-fi-特性描述文件) `firmware-5.bin`，经校验后装入 root.apfs。需核对本机 modem 布局。上游 `wpss` / `qca6750` 示例属于另一设备，不能当作 WCN3990 的通用输入。
-- 本机分区参数：公开 loader 的 `BLOCK_DARWIN_UNIQ` 是零占位符；内核和 loader 的边界需与本机 GPT 对齐后重编译。具体见 [安装教程第 5 节](../install/INSTALL.md#5-让源码匹配新分区)。
+- 本机分区参数：公开 loader 的 `BLOCK_DARWIN_UNIQ` 是零占位符；内核和 loader 的边界需与本机 GPT 对齐后重编译。具体见 [启动教程配置章节](../install/STARTUP.md#1-让源码匹配新分区)。
 - dipper 完整启动参数及最终 `payload.bin`：现已提供 `tools/build-payload.py --output work/runs/desktop-01`，用于已核对 GPT 和系统区的 5 分钟桌面测试。它不包含 Wi-Fi、存储写入或旧用户状态恢复，不能代替设备配置核对。
 
 先只读核对设备与输入，完成设备配置和载荷打包，再按 [已有分区测试](../install/EXISTING_INSTALL.md) 进行实机验收。结果与未通过项记录在 [复现记录](../validation/REPRODUCTION.md)。

@@ -120,6 +120,10 @@ sha256sum xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.develo
 
 ## 5. 编译加载器与 UEFI
 
+重新分区后，先按 [设备配置匹配](../install/STARTUP.md#1-让源码匹配新分区)核对 GUID 与边界；已有构建不能直接沿用旧 GUID。第 08 轮只有唯一 GUID 改变，按本节重编译 loader/UEFI；内核边界未变，未重新编译内核。
+
+此入口会刷新 work/ 中的原生构建输出。再次运行前，将旧 loader 源码/产物、UEFI/BootShim/FD 和本机配置复制到 local/backups/ 对应目录并校验；新候选保存到独立 work/runs/ 目录。不要复制整套源码或重新运行 prepare.py。
+
 返回仓库根目录：
 
 ```sh
@@ -140,7 +144,7 @@ bash tools/build-loader-uefi.sh
 
 ## 6. 用户空间、打包与启动
 
-设备端步骤单独见 **[分区、写入与启动教程](../install/INSTALL.md)**。当前实机路线需要 darwin 分区，首次重建 userdata 会清空 Android 数据；系统写入 UFS，之后临时加载 UEFI 启动。
+设备端步骤单独见 **[分区、写入与回退教程](../install/INSTALL.md)**。当前实机路线需要 darwin 分区，首次重建 userdata 会清空 Android 数据；系统写入 UFS，之后临时加载 UEFI 启动。
 
 按 [用户空间构建与主机打包](USERLAND.md) 继续：
 

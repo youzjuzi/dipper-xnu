@@ -117,11 +117,11 @@ sha256sum -c SHA256SUMS
 
 接手顺序固定为：AGENTS → docs/README（文档导航）→ STATUS（功能与设备边界）→ 本文（开发流程和现场交接）。每项任务结束更新下面的现场交接，不另建多个 current/latest 状态文件。设备标识、原始日志和私人配置只引用本机位置，不复制到公共文档。
 
-### 当前开发现场交接（2026-10-30，接手时重新核对）
+### 当前开发现场交接（2026-10-31，接手时重新核对）
 
-- 当前任务：[首次安装完整验收](FIRST_INSTALL.md)，分支 test/first-install，基线 f784c8e。Android GPT 恢复与 Recovery 重启后只读核验通过；main 未改动，未建立第二套源码。
-- 本次本地提交包含目录规范、docs 分类迁移、工具报错路径及恢复核验记录。按持有人要求不推送远程；当前提交号以 git log -1 为准，远端分支尚未包含本次维护结果。
-- 日常源码固定在 work/，本轮未修改源码。此前适配清单 74 项中 73 项匹配，loader 一项为已记录的本机配置；清单外源码树并未完整审计。
+- 当前任务：[首次安装完整验收](FIRST_INSTALL.md)，成果从 test/first-install（基线 f784c8e）合入本地 main，后续开发从 main 新建对应任务分支。恢复 Android、重新分区、镜像回读及本机新 loader/UEFI 启动链已走通，持有人确认进入 iOS；阶段 07 的逐项回归与退出收尾待验。未建立第二套源码；本次合并不改动忽略的 work/ 和 local/。
+- 本地主线纳入目录规范、docs 分类迁移、分区/恢复工具及首次安装记录，保留 test/first-install 历史分支。按持有人要求不推送远程；当前提交号以 git log -1 为准，本次未 fetch，不能将本地远端跟踪指针称为 GitHub 实时状态。
+- 日常源码固定在 work/；第 08 轮仅修改本机 loader 的 darwin 唯一 GUID。74 项适配清单中 73 项匹配公共摘要，loader 一项匹配更新后的本机配置；清单外源码树未完整审计。公共补丁继续保留零 GUID，不导出设备身份值。
 - 私人配置见 local/README.md 和 local/index.json；恢复备份在 local/backups/20261030-first-install-01/。原始设备信息不得提交。
 - 本次证据在 work/runs/20261030-first-install-01/ 至 03/；第 03 轮确认恢复后的主备 GPT 字节未变、内核识别完整 userdata 容量。旧的 iOS 启动证据不能代替本次首次安装验收。
 - 工具新增：tools/restore-android-layout.py 和测试、安装说明随本次本地提交保存，不推送远程；本机历史配置在 local/devices/mi8/android-restore-20261030.json，回放在 work/runs/20261030-restore-tool-01/。配置对应恢复前历史状态，禁止直接在已恢复手机重跑；通用脚本真机执行待验。
@@ -129,7 +129,11 @@ sha256sum -c SHA256SUMS
 - 第 05 轮已准备约 24 GiB darwin 分区方案、当前 GPT 备份及私有脚本，见 work/runs/20261030-first-install-05/。持有人已执行分区脚本；实时回读主备 GPT 与 expected-gpt-entries.bin 一致，前 20 项未变。旧脚本已完成，不得重复执行。
 - 第 06/07 轮：Recovery 重启后的 GPT 与 userdata/darwin 节点容量核验通过；持有人完成 Format Data，提供 Android 启动完成及 /data 总量 91422752 KiB 的 ADB 输出，阶段 04 通过。证据在 work/runs/20261030-first-install-06/、07/。
 - 通用分区工具：tools/partition-darwin.py、测试和 docs/install/PARTITION_DARWIN.md 随本次本地提交保存，不推送远程；复用恢复工具保护逻辑，14 项新测试及 17 项恢复回归通过。本机历史配置在 local/devices/mi8/darwin-partition-20261030.json，离线回放在 work/runs/20261030-partition-tool-01/，完整条目匹配实机成功结果。当前手机不得重复执行分区，新生成脚本未单独实机执行。
-- 下一步：依据第 05 轮新 darwin GUID 与已核验边界核对 loader/内核配置，必要时重建并验收产物；不能直接使用旧 GUID 的 loader。尚未写镜像或本轮启动 iOS；完整 XNU all 与补丁导出工具化仍待完成。
+- 第 08 轮已按教程重编译 loader/UEFI 并验证新 GUID、UEFI 内嵌 loader 与 boot 镜像结构，候选在 work/runs/20261030-first-install-08/candidate/。内核边界未变，内核与用户态沿用已核验产物；系统镜像完整摘要通过。local/device-layout.json 与 device-source-config.json 已同步新布局，并撤销旧系统区回读匹配标记。旧源码/启动产物在 local/backups/20261030-first-install-08/。
+- 第 09 轮回读通过：新 darwin 前 8365539328 字节 SHA256 与主机镜像一致，主备 GPT 未变，local/device-layout.json 已记为新布局系统区回读匹配。原始证据在 work/runs/20261030-first-install-09/；没有 fastboot 操作日志，验收基于代理实时回读。
+- 第 10 轮：代理确认 xnuloader，持有人确认新分区成功进入 iOS；boot.log 仅为命令确认，不冒充详细内核日志。证据在 work/runs/20261030-first-install-10/。安装教程拆为 INSTALL（分区/写入/回退）与 STARTUP（配置/重建/启动），恢复说明已合并。
+- 文档维护（2026-10-31）：首页与 CHANGELOG 已汇总首次安装进展，详细证据仍在 FIRST_INSTALL 与 VALIDATION；未新增平行开发日志，未重跑设备操作。
+- 下一步：阶段 07 补逐项外设回归和退出后的完整 Android 重启；教程与第 08–10 轮记录随本次合并纳入本地主线；未推送远程。完整 XNU all 与补丁导出工具化仍待完成。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

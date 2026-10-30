@@ -61,8 +61,26 @@
 
 ## 重新分区后的 Android 验收
 
-第 05/06 轮代理实读确认新主备 GPT 与方案一致，前 20 项未变；重进 Recovery 后 userdata 为 95655297024 字节、darwin 为 25769795584 字节。持有人随后 Format Data 并启动 Android，第 07 轮提供 sys.boot_completed=1、/data 总量 91422752 KiB、可用 90118260 KiB 的输出，重新分区阶段通过。第 07 轮为持有人提供的 ADB 证据，不宣称代理独立复读。镜像写入和本轮 iOS 启动仍待验。
+第 05/06 轮代理实读确认新主备 GPT 与方案一致，前 20 项未变；重进 Recovery 后 userdata 为 95655297024 字节、darwin 为 25769795584 字节。持有人随后 Format Data 并启动 Android，第 07 轮提供 sys.boot_completed=1、/data 总量 91422752 KiB、可用 90118260 KiB 的输出，重新分区阶段通过。第 07 轮为持有人提供的 ADB 证据，不宣称代理独立复读。当时镜像写入和 iOS 启动待验；后续见第 09/10 轮。
 
 ## 通用 darwin 分区工具
 
 14 项分区工具测试通过，包含 10 个假设备 shell 拒绝子场景（身份、root、工具/GPT 摘要、挂载/卸载失败、holder、swap、已存在节点及确认参数）；17 项恢复工具回归通过。没有访问真实设备。使用第 05 轮分区前 GPT 生成的完整条目表，与已执行成功的预期条目逐字节相同；第 06 轮 GPT 与已记录节点容量通过验收。回放资料在 work/runs/20261030-partition-tool-01/，新生成脚本真机执行仍未单独验证。
+
+## 新分区 GUID 的启动产物重建
+
+第 08 轮按仓库教程构建 loader/UEFI，退出 0；仅更新本机 loader GUID，内核边界与之前一致。ARM64 EFI、GUID、压缩固件卷内完整 loader、BootShim+FD+USB XNUP、DTB、74 项适配源码对应关系验证通过。新 UEFI SHA256 为 `ad209c3caf29a474b76acb841067100714667665260e7df3171c7a0a8488238e`，loader 为 `a5643b7e45e539f58c843d6aacaedf08feb5a44c7c0b1d114b25a726bbb96d4a`。内核及两个用户态 APFS 沿用上次实机已验摘要；现有 darwin.img 完整摘要与固定输入一致。候选及证据在 work/runs/20261030-first-install-08/。此轮仅主机通过；后续设备结果见第 09/10 轮。
+
+## 新分区镜像回读
+
+第 09 轮在 TWRP 中确认 darwin 未挂载，主备 GPT 与已验证新布局相同，GUID/容量匹配候选配置。实际回读前 8365539328 字节，完整字节计数、退出码与 SHA256 通过；摘要为 `9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560`，与同期重新计算的主机镜像一致。未取得 fastboot 操作日志，成功依据为实时回读。当时新分区 iOS 启动待验；后续结果见第 10 轮。
+
+## 第 10 轮：新分区 iOS 启动成功
+
+代理实时 fastboot 查询确认 product 为 xnuloader；使用第 08 轮 300 秒候选，存储写入关闭。持有人随后明确报告“成功进入ios了 没问题”。据此确认本次恢复、重新分区、镜像回读、配置匹配及新 loader/UEFI 启动链已走通。boot.log 仅含 oem run 的 OKAY，不是内核启动日志；本轮未补采详细启动日志。外设逐项回归、限时退出后的完整 Android 重启仍待验，不能继承旧布局的全部功能验收。原始记录在 work/runs/20261030-first-install-10/。
+
+教程已分为[分区、写入与回退](../install/INSTALL.md)和[配置、重建与启动](../install/STARTUP.md)，独立恢复说明整合为前者的回退章节。
+
+## 2026-10-31 主线合并前检查
+
+审查 test/first-install 相对 main 的工具与文档变更，17 项恢复测试及 14 项分区测试通过；151 个本地 Markdown 链接（含章节锚点）、SHA256SUMS 和 git diff --check 通过。分支未改变公共适配补丁、上游锁定或源码清单，未跟踪 work/local 私人文件。本轮不操作手机、不重新编译；保留通用生成脚本单独实机执行、逐项外设回归及退出后 Android 验收的待验边界。合并仅在本地进行，不推送。
