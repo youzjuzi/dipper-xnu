@@ -4,9 +4,25 @@
 
 面向 `dipper`（SDM845）的 XNU 与移动用户空间实验性移植项目。
 
-基于 [HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) 的工作，为 `dipper` 适配启动、显示、触摸、A630 GPU 和 WCN3990 Wi-Fi。目前已有进入 SpringBoard 桌面、GPU 渲染、触摸操作及通过 Wi-Fi 使用 Safari 的实机记录。
+基于 [HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) 的工作，为 `dipper` 适配启动、显示、触摸、A630 GPU 和 WCN3990 Wi-Fi。支持 SpringBoard 桌面、GPU 渲染、触摸及 Wi-Fi 上网。
 
 项目仍在开发中，尚不适合作为日常使用系统。
+
+<p align="center">
+  <img src="docs/images/mi8-ios-desktop.png" alt="小米 8 运行 iOS 16.5 SpringBoard 桌面的实机照片" width="320">
+  <br>
+  <sub>小米 8 · iOS 16.5 · 实机运行照片</sub>
+</p>
+
+## 近期更新 · 2026-10-30
+
+本次更新集中在 Wi-Fi 启动、屏幕亮度和源码构建流程：
+
+- 修复 Wi-Fi 初始化时连续内存申请失败，以及缺少特性文件导致无线无法启动的问题。
+- 修复亮度滑块移动但屏幕明暗不变的问题。
+- 补齐用户空间与镜像打包工具，以及已有分区的启动和外设测试教程。
+
+完整变化见 [更新日志](CHANGELOG.md)。
 
 ## 设备与系统
 
@@ -27,19 +43,19 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 
 ## 功能状态
 
-以下状态依据截至 **2026-10-26** 的开发设备实验记录，不代表所有功能均已稳定，也不代表本仓库已完成从零构建复现。
+当前状态（2026-10-30）。验证范围为已有 `darwin` 分区上的短时运行；首次重新分区安装和长期稳定性尚未验证。
 
 | 功能 | 状态 |
 | --- | --- |
 | 系统启动 | 已进入 SpringBoard 桌面 |
-| 显示与 GPU | 已使用 Mesa / freedreno 驱动 A630 进行桌面渲染，仍有卡顿与功耗问题 |
+| 显示与 GPU | Mesa / freedreno 驱动 A630；卡顿与功耗仍待改善 |
 | 触摸 | 已可用 |
-| 屏幕亮度 | 已可调节 |
+| 屏幕亮度与锁屏 | 设置及控制中心调光、锁屏与唤醒可用 |
 | 音量键 | 按键与音量条已可用，不代表音频输出可用 |
-| 手电筒与振动 | 已可用 |
+| 手电筒与振动 | 手电筒开关和振动可用；手电筒分档亮度不明显 |
 | 电量显示 | 已可用 |
 | Wi-Fi | 已能在设置中入网并获取 IP；状态栏图标仍为临时实现 |
-| Safari | 已能通过 Wi-Fi 打开网页 |
+| Safari | 已通过 Wi-Fi 打开并刷新网页 |
 | 电话与移动数据 | 尚未验证可用 |
 | 音频 | 尚未实现完整支持 |
 
@@ -49,12 +65,13 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 
 构建使用 **Linux x86_64**，开发环境为 **Ubuntu 26.04.1 LTS**。本仓库通过固定上游版本和 dipper 适配补丁组织源码。
 
-1. [构建教程](docs/BUILD.md)：准备环境、获取源码、编译内核和 UEFI，以及打包所需材料。
-2. [安装与启动教程](docs/INSTALL.md)：备份、分区、写入系统、回读校验和启动。
+1. [构建教程](docs/BUILD.md)与[输入材料](docs/INPUTS.md)：固定来源、校验、编译内核和 UEFI。
+2. [用户空间与打包](docs/USERLAND.md)：提取 IPSW、编译适配程序、生成启动卷和系统镜像。
+3. [安装与启动教程](docs/INSTALL.md)：备份、分区、写入系统、回读校验和启动；已有 darwin 分区见 [复用布局测试](docs/EXISTING_INSTALL.md)。
 
 **首次安装需要划出独立的 `darwin` 分区，会清空 Android 用户数据。** 系统持久写入该分区，之后通过临时加载 UEFI 启动。
 
-完整构建及安装流程仍在完善，已验证范围和待补步骤见教程。仓库不提供系统镜像、专有 SDK、设备固件或设备备份，所需外部材料由使用者自行合法获取。
+仓库仅提供源码、补丁和构建工具。系统镜像、专有 SDK、设备固件与备份需自行合法获取。构建及实机测试的详细依据见 [验证记录](docs/VALIDATION.md)。
 
 ## 已知问题
 
@@ -86,6 +103,6 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 
 ## 许可证
 
-各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围见 [许可说明](LICENSE.md) 和 [LICENSES](LICENSES/)。GPU 初始化表沿用其 GPL-2.0-only 来源许可，与 APSL 内核组合的分发条件尚未解决，详见 [GPU 许可说明](docs/GPU_LICENSE.md)。其他文件的许可范围见 [许可证说明](docs/LICENSE_REVIEW.md)。
+各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围见 [许可说明](LICENSE.md) 和 [LICENSES](LICENSES/)。其他文件的许可范围见 [许可证说明](docs/LICENSE_REVIEW.md)。
 
 本项目为独立研究项目，与设备厂商、系统厂商及所参考项目不存在官方隶属关系。

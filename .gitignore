@@ -1,6 +1,7 @@
 /work/
 /artifacts/
 /build/
+/local/
 __pycache__/
 *.pyc
 *.img

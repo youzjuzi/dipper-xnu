@@ -22,6 +22,19 @@ def patch(name, target):
         run('git', 'apply', '--check', str(p), cwd=target)
         run('git', 'apply', str(p), cwd=target)
 
+def prepare_submodules(edk2, unixnu):
+    # Match edk2-sdm845/build.sh: the firmware uses these direct dependency
+    # trees, not OpenSSL's nested test repositories (boringssl, krb5, etc.).
+    # Gitlinks still select exact commits; depth only limits fetched history.
+    args = ('git', 'submodule', 'update', '--init', '--depth', '1', '--jobs', '4')
+    run(*args, cwd=edk2)
+    for name in ('Common/edk2', 'Common/edk2-platforms',
+                 'GPLDrivers/Library/SimpleInit', 'tools/Installer'):
+        run(*args, cwd=edk2 / name)
+    # The dipper wrapper references this package; the other UniXNU drivers
+    # are not part of this HackiOS firmware build.
+    run(*args, '--', 'drivers/DarwinBoot', cwd=unixnu)
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare', action='store_true', help='fetch sources into a new work/ directory')
@@ -57,8 +70,7 @@ def main():
         src, dst = trees['userland'] / name, k / name
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst, follow_symlinks=False)
-    for name in ('edk2', 'unixnu'):
-        run('git', 'submodule', 'update', '--init', '--recursive', cwd=trees[name])
+    prepare_submodules(trees['edk2'], trees['unixnu'])
     x = k / 'xnu-src/xnu-8796.121.2'
     x.parent.mkdir(parents=True)
     shutil.move(str(trees['xnu']), str(x))

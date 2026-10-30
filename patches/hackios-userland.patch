@@ -56,9 +56,105 @@
  	return -call((unsigned)(DRM_COMMAND_BASE + index), data, size);
  }
  
+--- a/tools/mk-mesa.sh
++++ b/tools/mk-mesa.sh
+@@ -76,7 +76,11 @@
+ cp -r "$ROOT/tools/mesa/air" mesa-$VERSION/src/compiler/air
+ if [ ! -x venv/bin/python3 ]; then
+ 	python3 -m venv venv
+-	venv/bin/pip -q install mako pyyaml packaging
++fi
++# A failed download can leave a valid venv without its dependencies. Retry the
++# dependency step instead of treating the directory's existence as success.
++if ! venv/bin/python3 -c 'import mako, yaml, packaging' >/dev/null 2>&1; then
++	venv/bin/pip --isolated --disable-pip-version-check install --no-cache-dir mako pyyaml packaging
+ fi
+ export PATH=$B/venv/bin:$PATH
+ 
+@@ -110,12 +114,12 @@
+ 	-Dzstd=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dshader-cache=disabled -Dvalgrind=disabled \
+ 	-Dlibunwind=disabled -Dglvnd=disabled -Dvideo-codecs= -Dtools= -Dgallium-vdpau=disabled -Dgallium-va=disabled \
+ 	-Dgallium-xa=disabled -Dlmsensors=disabled -Dbuild-tests=false > meson-setup.log
+-ninja -C $BUILD > ninja.log
++ninja -j "${BUILD_JOBS:-8}" -C $BUILD > ninja.log
+ # air_run draws with a translated Metal shader and reads the pixels back; it is
+ # the only way to find out whether the Adreno takes work that did not come from
+ # the window server. Built only when asked, since it is a test program.
+ if [ "${AIR:-}" = 1 ]; then
+-	ninja -C $BUILD src/gallium/drivers/freedreno/air_run >> ninja.log
++	ninja -j "${BUILD_JOBS:-8}" -C $BUILD src/gallium/drivers/freedreno/air_run >> ninja.log
+ 	cp $BUILD/src/gallium/drivers/freedreno/air_run out/air_run
+ 	echo "mk-mesa.sh: $B/out/air_run ($(stat -c %s out/air_run) bytes)"
+ 	# and the same path as a library, which is not a test program: the Metal driver links
+@@ -123,7 +127,7 @@
+ 	# libOSMesa is below -- -x keeps the global symbols, which here are the rwa_* of
+ 	# tools/mesa/air/air_metal.h, and the install name has to be the path on the device
+ 	# because meson's own is @rpath.
+-	ninja -C $BUILD src/gallium/drivers/freedreno/libredwoodair.dylib >> ninja.log
++	ninja -j "${BUILD_JOBS:-8}" -C $BUILD src/gallium/drivers/freedreno/libredwoodair.dylib >> ninja.log
+ 	llvm-strip -x -o out/libredwoodair.dylib $BUILD/src/gallium/drivers/freedreno/libredwoodair.dylib
+ 	install_name_tool -id /redwood/lib/libredwoodair.dylib out/libredwoodair.dylib
+ 	echo "mk-mesa.sh: $B/out/libredwoodair.dylib ($(stat -c %s out/libredwoodair.dylib) bytes," \
 --- a/userland/build.sh
 +++ b/userland/build.sh
-@@ -362,7 +362,8 @@
+@@ -60,6 +60,7 @@
+ #                    `xl ramdisk userland/system.apfs`. Rebuilt when missing, when its inputs
+ #                    (stage0, the manifest, the cryptex files) are newer, or with SYSTEM=1 (after
+ #                    changing the recipe below).
++#                    SKIP_SYSTEM=1 omits this separate RAM-root image for the UFS boot recipe.
+ #   flashboot.apfs   FLASHBOOT=1: the RAM part of a boot whose root is the iOS volume on the phone's
+ #                    flash (see below); with CRYPTEXES=flash the boot volume alone, the cryptexes being
+ #                    on the flash. FLASHBOOT=1 also decides what goes into root.apfs: the job list is
+@@ -68,13 +69,15 @@
+ #                    That root.apfs is for a flash boot; a RAM boot wants one built without FLASHBOOT=1,
+ #                    or launchd will fail to start those few when something asks for them.
+ #
+-#   PREBUILT=1       do not compile anything: take our programs from ../prebuilt/userland (this is also
+-#                    what happens when the cross toolchain is not set up, see ../xnu-deps/setup.sh);
++#   PREBUILT=1       explicitly take programs from ../prebuilt/userland; an absent cross toolchain
++#                    otherwise fails instead of silently substituting prebuilt programs;
+ #                    the images are then made of them and of the iOS files alone (python3)
+ #   CHECK=1          check every image (every container) as it is made: apfsck has to find it clean and
+ #                    the kernel's apfs_lib has to read every volume back as the directory it was made of
+ #                    (../tools/apfs/check-image.sh; the system image takes a few minutes more)
+-set -e
++set -e -o pipefail
++# launchd rejects group-writable service files and parent directories.
++umask 022
+ cd "$(dirname "$(readlink -f "$0")")"
+ source ../xnu-env.sh
+ 
+@@ -103,7 +106,7 @@
+ 	com.apple.backboardd com.apple.mobile.usermanagerd com.apple.mobilegestalt.xpc com.apple.lsd
+ 	com.apple.powerd com.apple.analyticsd com.apple.logd_helper
+ 	com.apple.iconservices.iconservicesagent com.apple.pluginkit.pkd
+-	com.apple.SpringBoard
++	com.apple.SpringBoard com.apple.mobile.installd com.apple.sleepd
+ "}
+ # iOS's own Wi-Fi daemon, for Settings to have a Wi-Fi to show: the kernel answers it in
+ # bsd/dev/redwood_apple80211.c. With the radio (wifi=1) Settings then shows Wi-Fi on, the network joined and the
+@@ -140,7 +143,10 @@
+ /redwood/lib/libredwood-fairplay.dylib fairplayd.H2"
+ mkdir -p obj
+ 
+-if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
++if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then
++	echo "build.sh: ld64 is missing; set THEOS and run xnu-deps/setup.sh before building from source" >&2
++	exit 1
++fi
+ if [ -n "$PREBUILT" ]; then
+ 	echo "build.sh: not compiling, using the programs in prebuilt/userland"
+ 	for f in ../prebuilt/userland/*; do
+@@ -270,7 +276,7 @@
+ 		$DYN -o obj/vol_ls src/vol_ls.c
+ 		$DYN -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o obj/snap_test src/snap_test.c
+ 		$DYN -framework CoreFoundation -framework CoreGraphics -framework CoreText -o obj/font_test src/font_test.c
+-		$DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m
++		$DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -framework Network -o obj/net_test src/net_test.m
+ 		# (the account database answers only a client with the entitlements its own daemons hold: src/store_test.m)
+ 		$DYN -fobjc-arc -framework Foundation -framework Accounts -o obj/store_test src/store_test.m &&
+ 			{ ${LDID:-ldid} -Ssrc/store_test.entitlements obj/store_test 2>/dev/null ||
+@@ -362,7 +368,8 @@
  		fi
  	fi
  	# (drawable_test is built in the same block as surf_test, so it is copied with it)
@@ -68,6 +164,39 @@
  	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
  	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
  	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
+@@ -491,7 +498,9 @@
+ 	cp $IOS/var.skel root/etc/var.skel              # the directories init creates in /private/var
+ 	# time zones: the template's links go in a circle until the time zone daemon has run (/usr/share/zoneinfo
+ 	# points back into /var); point them at the data that ships with the system, and use this machine's zone
+-	zone=$(timedatectl show -p Timezone --value 2>/dev/null); zone=${zone:-UTC}
++	zone=${BUILD_TIMEZONE:-}
++	if [ -z "$zone" ]; then zone=$(timedatectl show -p Timezone --value 2>/dev/null || true); fi
++	zone=${zone:-UTC}
+ 	sed -i -e 's|^l\t/usr/share/zoneinfo\t/private/var/db/timezone/zoneinfo$|l\t/usr/share/zoneinfo.default\t/private/var/db/timezone/zoneinfo|' \
+ 		-e "s|^l\t/var/db/timezone/zoneinfo/[^\t]*\t/private/var/db/timezone/localtime\$|l\t/var/db/timezone/zoneinfo/$zone\t/private/var/db/timezone/localtime|" root/etc/var.skel
+ 	# ... and the files of ours it puts there (var/): those under mobile/ belong to the user mobile
+@@ -547,6 +556,12 @@
+ if [ -d ../fw-gpu ]; then
+ 	mkdir -p root/fw
+ 	cp ../fw-gpu/* root/fw/
++fi
++# Mi8 ath10k feature metadata from linux-firmware (not the modem DSP image).
++if [ -f ../fw-wifi/firmware-5.bin ]; then
++	printf '%s  %s\n' fef6539e0127579536bc977be57a90d018b83f2931fedc3a8870fbe38d6c4127 ../fw-wifi/firmware-5.bin | sha256sum -c -
++	mkdir -p root/fw
++	install -m 0644 ../fw-wifi/firmware-5.bin root/fw/
+ fi
+ # ... and the image of the Wi-Fi DSP, from /vendor/firmware_mnt/image of the same Android into ../fw-wifi
+ # (bsd/dev/redwood_wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
+@@ -708,7 +723,7 @@
+ fi
+ 
+ # --- the system image -----------------------------------------------------------------------------
+-if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
++if [ -z "$SKIP_SYSTEM" ] && [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
+ 	{ [ ! -f system.apfs ] || [ obj/stage0 -nt system.apfs ] || [ $IOS/system.manifest -nt system.apfs ] ||
+ 	  [ $IOS/cryptex -nt system.apfs ] || [ $IOS/cryptex-app -nt system.apfs ] || [ -n "$SYSTEM" ]; }; then
+ 	# what ios165/select-system.py has chosen since ios165/rootfs was extracted is not in it, and would not be
 --- a/userland/mkjobs.py
 +++ b/userland/mkjobs.py
 @@ -222,8 +222,15 @@

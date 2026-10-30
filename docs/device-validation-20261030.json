@@ -1,0 +1,126 @@
+{
+  "date": "2026-10-30",
+  "scope": "source-built desktop, Wi-Fi/Safari and peripheral tests using existing darwin partition",
+  "partition_changes": false,
+  "system_flash_performed": false,
+  "installed_system_prefix_bytes": 8365539328,
+  "installed_system_sha256": "9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560",
+  "first_run": "booted kernel and mounted system; launchd blocked by group-writable directory/plist modes",
+  "fix": "userland build umask 022 plus actual APFS permission checks before payload packaging",
+  "second_run": {
+    "system_root_readonly_mount": true,
+    "launchd_permission_rejections": 0,
+    "SpringBoard_present": true,
+    "Preferences_foreground": true,
+    "touch_down_events": 7,
+    "touch_up_events": 7,
+    "gpu_frames_observed": 380,
+    "desktop_image": "1125x2107 partial native framebuffer decoded from 4608-byte row stride; viewed and confirmed SpringBoard icons",
+    "wifi_tested": false,
+    "restored_old_user_state": false,
+    "final_loader_result": "result: returned 1441823 0",
+    "final_log_sha256": "531beaee8d66b787a1d8d1ee3d5d234f3df2f7a8b3b7a5defbf4c9bfba7ba25c",
+    "cold_reboot_requested_after_test": true,
+    "android_boot_completed_after_test": true
+  },
+  "artifacts": {
+    "kernel.macho": "01bc508afdb937cc67512c5ff9915e7b6228d0917eb7303480217b92ee656ca0",
+    "root.apfs": "7a110fb62094a3015760743738eaaca494eb0deb2c3ce099d3e74764ae88130e",
+    "flashboot.apfs": "2e574d89128a5faf1f18faac151e9381a0ebb61b077cf87f2d22807e33a72f1d",
+    "boot-dipper.img": "6f71b7f49d0d03cdf49c463a26d343046859b9b24c1feead80b651ea65f96352",
+    "loader.efi": "605e4fddfed349ebfab8be448813645165ace900efbcd50105666ddb17b34911",
+    "payload.bin": "417673b7f8a6f4838b43a3027f8ce37f68ead065219f7d427fd75b2d06612578"
+  },
+  "wifi_test": {
+    "initial_failure": "FW_READY followed by failed 46137344-byte contiguous allocation; driver returned errno 12",
+    "memory_fix": "reserve pool before modem worker starts; defer SMMU mapping until FW_READY",
+    "next_failure": "missing WCN3990 firmware-5.bin feature metadata; driver returned 60",
+    "input_fix": "verified 60-byte linux-firmware metadata against online source, approved local copy, APFS packaging and readback guard",
+    "successful_run": {
+      "date": "2026-10-30",
+      "device_checks": {
+        "early_radio_reservation": true,
+        "wlfw_fw_ready": true,
+        "feature_metadata_loaded": true,
+        "driver_start_rc_zero": true,
+        "en0_attached": true,
+        "radio_link_up": true,
+        "ipv4_address_observed": true,
+        "ipv6_address_observed": true,
+        "network_path_satisfied": true,
+        "path_uses_wifi": true,
+        "path_reports_dns_available": true
+      },
+      "user_confirmed_wifi_connected": true,
+      "user_confirmed_safari_page_open_and_refresh": true,
+      "evidence_boundary": "Network interface and path from device logs; page display and refresh from device holder; no throughput or long-term stability measurement",
+      "artifacts": {
+        "kernel.macho": "ce36be755c32a8cced5c42bdf428ee147dc3946644bc07554534c8cb490addb0",
+        "root.apfs": "2848705b7c2cb9144c2f812602b5a858d369dc53348d0e5f3364e22eb962d400",
+        "flashboot.apfs": "2e574d89128a5faf1f18faac151e9381a0ebb61b077cf87f2d22807e33a72f1d",
+        "boot-dipper.img": "6f71b7f49d0d03cdf49c463a26d343046859b9b24c1feead80b651ea65f96352",
+        "loader.efi": "605e4fddfed349ebfab8be448813645165ace900efbcd50105666ddb17b34911",
+        "payload.bin": "42e3b406f7336e5163579a1a10c61233d64f5493a2a688b4a46e75fe07382869"
+      },
+      "wifi_feature_metadata": {
+        "firmware-5.bin": "fef6539e0127579536bc977be57a90d018b83f2931fedc3a8870fbe38d6c4127"
+      },
+      "radio_events_sha256": "e58bf29052a89a019f7a7ca060c15c50df269327e1d785e0ce9eb529507272e3",
+      "before_stop_log_sha256": "28e706c00a13a18987afedcc396e678ca9ed7e1ddab4cf677dd83e409a719cad",
+      "final_loader_result": "result: returned 1441823 0",
+      "cold_reboot_after_test": true,
+      "android_boot_completed_after_test": true
+    }
+  },
+  "peripheral_test": {
+    "date": "2026-10-30",
+    "scope": "existing partition, RAM boot, no system flash or partition changes",
+    "initial_brightness_failure": "unconstrained DSI command allocation above 4 GiB; repeated rejected allocations were not released",
+    "fix": "limit physical page number to 32-bit DMA range and free invalid allocation",
+    "observed_bootargs_bytes": 578,
+    "maximum_bootargs_bytes": 591,
+    "device_log_checks": {
+      "dsi_dma_buffer_address": "0xfd4fc000",
+      "dsi_dma_buffer_bytes": 16384,
+      "dsi_buffer_within_32bit": true,
+      "sampled_brightness_write_failures": 0,
+      "sampled_above_4g_rejections": 0,
+      "motor_stopped_on_exit": true,
+      "torch_dark_on_exit": true,
+      "wifi_driver_rc_zero": true,
+      "wifi_path_status_in_retained_logs": "not observed in retained samples; webpage refresh confirmed by device holder"
+    },
+    "user_observations": {
+      "settings_brightness": "changes actual screen brightness",
+      "control_center_brightness": "changes actual screen brightness",
+      "lock_wake_three_cycles": "normal",
+      "other_peripherals_regression": "normal",
+      "wifi_safari_refresh": "normal",
+      "torch_intensity_steps": "not clearly distinguishable"
+    },
+    "evidence_boundary": "Physical brightness, touch, flashlight, vibration, volume UI, widgets and webpage result confirmed by device holder; register/driver/path evidence from logs",
+    "artifacts": {
+      "kernel.macho": "c4b308f02ed6add0a833c9a1d4936c994990ae1c1cfc2f4cde8f31e185af843b",
+      "root.apfs": "2848705b7c2cb9144c2f812602b5a858d369dc53348d0e5f3364e22eb962d400",
+      "flashboot.apfs": "2e574d89128a5faf1f18faac151e9381a0ebb61b077cf87f2d22807e33a72f1d",
+      "boot-dipper.img": "6f71b7f49d0d03cdf49c463a26d343046859b9b24c1feead80b651ea65f96352",
+      "loader.efi": "605e4fddfed349ebfab8be448813645165ace900efbcd50105666ddb17b34911",
+      "payload.bin": "ce6bd62f1b3a48d67dd25860a2634b7847a5d172dfced59d0c61d42eabdabcdd"
+    },
+    "event_log_sha256": "3b1561dc6117f45330e633e466610b7f0c21e361c98324eca9064e81ea36e7c5",
+    "final_log_sha256": "b02f9e4ff2aee974f16b292642129fe7ce986d4ecb35f0a930dbbe469ce0847e",
+    "first_run_user_observations": {
+      "brightness": "slider has no effect",
+      "lock_wake_touch": "normal",
+      "torch_and_haptics": "normal",
+      "volume_buttons_slider_battery_wallpaper_calendar_widget": "normal",
+      "final_loader_result": "result: returned 1441823 0\nFinished. Total time: 0.000s",
+      "cold_reboot_requested": true
+    },
+    "cleanup": {
+      "final_loader_result": "result: returned 1441823 0",
+      "cold_reboot": true,
+      "android_boot_completed": true
+    }
+  }
+}

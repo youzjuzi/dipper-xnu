@@ -24,7 +24,7 @@
       "upstream_file_exists": false,
       "license": "UNRESOLVED",
       "basis": "Direct #include and execution of GPL-derived table established; no MIT relicense or combination compatibility claim",
-      "sha256": "321218a6dbc0212c6364eaf4cc92d5bf996fd6716288a8160ffcde05a3aedade"
+      "sha256": "437bd6b7bf030919a8eb8746c820f742a783309e5efb82accf5198a24492b014"
     },
     {
       "component": "xnu-mi8",
@@ -80,7 +80,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "4cdeab0eb3fd84e3df0ca2fe0bb2cf0c018539bcc24cf0d798bd93e58470d68d"
+      "sha256": "46e8f91014491e534db10f6b08d5393c92a03e5b56bafc2af47a6b3571c45c08"
     },
     {
       "component": "xnu-mi8",
@@ -176,7 +176,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "1afeaa103a64af7a8261e7d7b018b1e8be8f59ba2070e8c9ae9855046c4a041f"
+      "sha256": "41b02f616aba22c6257caad8206e543fb00c56fcd8ba82db27a5c49c5e399749"
     },
     {
       "component": "xnu-mi8",
@@ -472,7 +472,7 @@
       "upstream_file_exists": true,
       "license": "MIT",
       "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "d434907449bf49ee87978880c83fbd7906cd84af730194334093960a7eb73183"
+      "sha256": "08984454214525134adbb3b38460f0942600a69efbb43f9869b17840c3b701bb"
     },
     {
       "component": "hackios-userland",
@@ -569,6 +569,30 @@
       "license": "BSD-2-Clause-Patent",
       "basis": "File SPDX and UniXNU package license",
       "sha256": "4bc82ea95b25e4303a702891e9334bb47f307dab606a38e43a4822d5b4c0ae41"
+    },
+    {
+      "component": "hackios-userland",
+      "path": "tools/mk-mesa.sh",
+      "upstream_file_exists": true,
+      "license": "MIT",
+      "basis": "Pinned HackiOS userland root MIT license; build orchestration only",
+      "sha256": "e49e895350293e5c5fe24fe9a54a5841fb29a79b95db12b122d376c225c4064e"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/sys/redwood_lx.h",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "Pinned HackiOS kernel repository license; existing source modifications",
+      "sha256": "ea95d98a326dead7651d386e0495186fcb195ec82ff4e966e2172aaa8caee391"
+    },
+    {
+      "component": "hackios-kernel",
+      "path": "wifi/lx/src/lx_base.c",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "Pinned HackiOS kernel repository license; existing source modifications",
+      "sha256": "7dc8c996c5e684af4435831eb553274e85294668a5651c73a6993153a1073aca"
     }
   ]
 }

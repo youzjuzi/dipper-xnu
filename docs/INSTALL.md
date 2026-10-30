@@ -4,7 +4,7 @@
 
 主机环境为 Ubuntu 26.04.1 LTS x86_64，设备代号为 `dipper`。分区及写入流程来自开发设备的历史实验；尚未使用本仓库从零构建的产物重新执行安装验证。
 
-先完成 [构建教程](BUILD.md)。公开包的用户空间打包与设备配置仍未闭环，因此本文是安装流程及命令模板，不是可以跳过前提直接执行的一键安装脚本。所有设备操作均由设备持有人执行。
+先完成 [构建教程](BUILD.md)。主机构建及已有分区上的桌面启动已验证；首次重新分区和刷写尚未在本轮重做。本文仍要求逐台核对固件、GPT 和源码配置。已有 darwin 分区可先按 [复用布局测试](EXISTING_INSTALL.md) 操作。所有设备操作均由设备持有人执行。
 
 ## 1. 哪些东西写入哪里
 
@@ -134,36 +134,16 @@ C 结构中的 GUID 必须按字段正确转换，不能把字符串直接粘进
 
 系统根卷来自对应 `096-04088-077.dmg` 展开后的 APFS 容器，两个 cryptex 分别对应 `096-04666-078.dmg` 与 `096-03536-083.dmg`。不要把 UDIF 压缩封装直接作为已展开根卷写入，也不要把 RAM 方案的 `system.apfs` 与此布局混用。
 
-本机合法取得并提取文件后，将它们整理为以下名称，再在主机组合：
+按 [用户空间教程](USERLAND.md) 先验证并提取 IPSW，再在仓库根目录执行：
 
 ```sh
-# 当前目录必须是自己的输入目录，内含下列三个文件。
-python3 - <<'PY'
-from pathlib import Path
-import shutil
-parts = [('rootfs.apfs', 5628755968),
-         ('os-cryptex.apfs', 2726297600),
-         ('app-cryptex.apfs', 10485760)]
-for name, size in parts:
-    p = Path(name)
-    if p.stat().st_size != size:
-        raise SystemExit(f'大小不匹配: {name}')
-    with p.open('rb') as f:
-        f.seek(32)
-        if f.read(4) != b'NXSB':
-            raise SystemExit(f'缺少 APFS NXSB: {name}')
-with Path('darwin.img').open('xb') as out:
-    for name, _ in parts:
-        with Path(name).open('rb') as src:
-            shutil.copyfileobj(src, out, length=1024 * 1024)
-print('darwin.img: 8365539328 bytes expected')
-PY
-sha256sum rootfs.apfs os-cryptex.apfs app-cryptex.apfs darwin.img
+python3 tools/pack-darwin.py
+sha256sum work/images/darwin.img
 ```
 
-这些大小与魔数检查不能证明输入版本正确，必须同时核对合法输入材料的来源、版本和摘要。历史实验的组合镜像 SHA256 为 `9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560`；仅当使用完全相同的输入和组合方式时才应一致。不同版本不得沿用这套偏移。
+该入口只取 UDIF 内的 `3.apfs` 分区，不包含 GPT 包装；校验输入来源、大小、魔数和完整输出摘要，拒绝覆盖已有输出。2026-10-30 新构建组合镜像的 SHA256 与历史值一致：`9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560`。不同版本不得沿用这套偏移。
 
-还需要从修改后的用户空间源码生成小启动卷和内核载荷（见 [构建教程第 6 节](BUILD.md#6-用户空间打包与启动)）；其从零构建命令仍待补齐。仓库不附带这里的任何系统镜像。
+`root.apfs` 与 `flashboot.apfs` 的源码构建命令已见 [用户空间教程](USERLAND.md)。完整内核载荷仍需本机设备配置和启动参数。仓库不附带任何系统镜像。
 
 ## 7. 写入系统并回读校验
 
@@ -194,9 +174,9 @@ adb shell 'dd if=/dev/block/by-name/darwin bs=4096 count=2042368 2>/dev/null | s
 
 ## 8. 日常启动
 
-前提：第 5 节的设备配置已匹配，darwin 回读通过，且已生成互相匹配的 UEFI、`flashboot.apfs` 和内核载荷。UEFI 必须按项目要求嵌入进入 USB 服务模式的引导载荷；现有公开 UEFI 构建脚本还未自动完成这一步。仅生成一个 UEFI 镜像，并不保证出现 xnuloader fastboot 服务。
+前提：第 5 节的设备配置已匹配，darwin 回读通过，且已生成互相匹配的 UEFI、`flashboot.apfs` 和内核载荷。UEFI 必须按项目要求嵌入进入 USB 服务模式的引导载荷；`tools/build-loader-uefi.sh` 已自动生成并嵌入该 USB 引导载荷，主机结构检查已通过，本轮已确认实机出现 xnuloader USB 服务。仅生成一个 UEFI 镜像，并不保证出现 xnuloader fastboot 服务。
 
-以下是开发启动脚本使用的协议顺序，不是当前公开包已验证的一键命令：
+以下协议顺序已在本轮已有分区设备上验证；执行前仍须核对本机配置和产物。新载荷用 `tools/build-payload.py` 从本工作树生成，详见 [已有分区测试](EXISTING_INSTALL.md)：
 
 ```sh
 # 临时加载自己构建且配置匹配的 UEFI。
@@ -221,4 +201,4 @@ fastboot oem run
 - GPT 或 userdata 异常时，使用**本机**改动前备份和已验证的恢复流程。恢复 GPT 不会恢复已格式化的 userdata；也不要在新文件系统仍挂载时改回旧表。
 - 无法进入 fastboot 时，需要设备持有人使用事先验证的 recovery/EDL 恢复手段，不能假定通用 9008 工具或授权条件成立。
 
-目前没有经过公开包复现验证的自动分区、恢复或完整启动脚本。本文把实际安装方式与未完成环节写明；完整复现安装仍需经过独立构建和设备验收。
+本轮已验证已有分区上的新构建启动，未验证首次自动分区、刷写或恢复。不能将已有布局启动成功当作完整首次安装验收。

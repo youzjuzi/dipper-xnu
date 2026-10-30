@@ -15,7 +15,7 @@
       },
       {
         "path": "bsd/dev/mi8_adreno.c",
-        "sha256": "321218a6dbc0212c6364eaf4cc92d5bf996fd6716288a8160ffcde05a3aedade",
+        "sha256": "437bd6b7bf030919a8eb8746c820f742a783309e5efb82accf5198a24492b014",
         "mode": "0o664"
       },
       {
@@ -50,7 +50,7 @@
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "4cdeab0eb3fd84e3df0ca2fe0bb2cf0c018539bcc24cf0d798bd93e58470d68d",
+        "sha256": "46e8f91014491e534db10f6b08d5393c92a03e5b56bafc2af47a6b3571c45c08",
         "mode": "0o664"
       },
       {
@@ -110,7 +110,7 @@
       },
       {
         "path": "bsd/dev/redwood_lx.c",
-        "sha256": "1afeaa103a64af7a8261e7d7b018b1e8be8f59ba2070e8c9ae9855046c4a041f",
+        "sha256": "41b02f616aba22c6257caad8206e543fb00c56fcd8ba82db27a5c49c5e399749",
         "mode": "0o664"
       },
       {
@@ -172,6 +172,11 @@
         "path": "osfmk/arm64/loader_return.c",
         "sha256": "267e2c8aeace17391daf38ca63c2544dae34713672b178de769b2faecb07f7d8",
         "mode": "0o664"
+      },
+      {
+        "path": "bsd/sys/redwood_lx.h",
+        "mode": "0o664",
+        "sha256": "ea95d98a326dead7651d386e0495186fcb195ec82ff4e966e2172aaa8caee391"
       }
     ]
   },
@@ -293,6 +298,11 @@
         "path": "xnuloader/loader.c",
         "sha256": "f108911bcd2378e2828fac4a9bc83a99de7488de1fa9b1ec15196f130827a5c2",
         "mode": "0o664"
+      },
+      {
+        "path": "wifi/lx/src/lx_base.c",
+        "mode": "0o664",
+        "sha256": "7dc8c996c5e684af4435831eb553274e85294668a5651c73a6993153a1073aca"
       }
     ]
   },
@@ -306,8 +316,13 @@
         "mode": "0o664"
       },
       {
+        "path": "tools/mk-mesa.sh",
+        "sha256": "e49e895350293e5c5fe24fe9a54a5841fb29a79b95db12b122d376c225c4064e",
+        "mode": "0o775"
+      },
+      {
         "path": "userland/build.sh",
-        "sha256": "d434907449bf49ee87978880c83fbd7906cd84af730194334093960a7eb73183",
+        "sha256": "08984454214525134adbb3b38460f0942600a69efbb43f9869b17840c3b701bb",
         "mode": "0o755"
       },
       {

@@ -1584,3 +1584,14 @@
  	}
  	reboot();
  	return 0;
+--- a/wifi/lx/src/lx_base.c
++++ b/wifi/lx/src/lx_base.c
+@@ -755,7 +755,7 @@
+  * or the other way round. The first part of it is handed out for good, a stretch at a time
+  * (rings); the rest is slots of one size, taken and given back (buffers).
+  */
+-#define POOL_SIZE	(44u << 20)
++#define POOL_SIZE	((unsigned)LX_RADIO_POOL_SIZE)
+ #define POOL_RINGS	(12u << 20)		/* (the data path's rings and link descriptors come to about 6 MB) */
+ #define POOL_SLOT	4096u
+ #define POOL_SLOTS	((POOL_SIZE - POOL_RINGS) / POOL_SLOT)

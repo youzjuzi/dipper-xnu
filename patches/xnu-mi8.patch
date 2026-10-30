@@ -482,7 +482,7 @@
 +}
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4712 @@
+@@ -0,0 +1,4718 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -3941,17 +3941,23 @@
 +	uint32_t status, intr;
 +
 +	if (dsi_packet == 0) {
-+		if (kmem_alloc_contig(kernel_map, &dsi_packet, PAGE_SIZE, PAGE_MASK, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
++		/* DMA_BASE is 32 bits. Ask VM for a low physical page rather than
++		 * rejecting an unconstrained allocation after userspace has started. */
++		if (kmem_alloc_contig(kernel_map, &dsi_packet, PAGE_SIZE, PAGE_MASK, (ppnum_t)(0xffffffffull >> PAGE_SHIFT), 0,
++		    KMA_KOBJECT | KMA_ZERO | KMA_DATA,
 +		    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 +			printf("mi8bl: no memory for the command\n");
 +			return false;
 +		}
 +		dsi_packet_pa = kvtophys(dsi_packet);
-+		if (dsi_packet_pa > 0xfffff000ull) {
++		if (dsi_packet_pa > 0x100000000ull - PAGE_SIZE) {
 +			printf("mi8bl: the command's memory is above 4 GB (%#llx): the DSI DMA address has 32 bits\n", dsi_packet_pa);
++			kmem_free(kernel_map, dsi_packet, PAGE_SIZE);
 +			dsi_packet = 0;
++			dsi_packet_pa = 0;
 +			return false;
 +		}
++		printf("mi8bl: command buffer at %#llx, %lu bytes within the 32-bit DMA range\n", dsi_packet_pa, (unsigned long)PAGE_SIZE);
 +	}
 +	memcpy((void *)dsi_packet, packet, len);
 +	to_memory(dsi_packet, 64);
@@ -8942,7 +8948,7 @@
 +#include "mi8_hostsvc.c"
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4001 @@
+@@ -0,0 +1,4011 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -9010,6 +9016,7 @@
 +#include "mi8_hostsvc.h"
 +#include "mi8_wlfw.h"
 +#include <sys/mi8_lx.h>
++#include <sys/redwood_lx.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
@@ -12903,6 +12910,15 @@
 +		}
 +	}
 +	if (PE_parse_boot_argn("mi8rp_mss", &mss, sizeof(mss)) && mss != 0) {
++		uint32_t lx = 0;
++
++		/* FW_READY arrives after launchd has fragmented physical memory.
++		 * Reserve the pool now; mapping still waits for the WLFW SMMU setup. */
++		if (mss == 6 && PE_parse_boot_argn("mi8rp_lx", &lx, sizeof(lx)) && lx != 0 &&
++		    lx_os_reserve_radio_memory(LX_RADIO_POOL_SIZE) != 0) {
++			say("mi8rp: no early radio memory; modem startup skipped\n");
++			return;
++		}
 +		say("mi8rp: mss steps up to %u\n", mss);
 +		if (mss == 5 || mss == 6) {
 +			thread_t thread;
@@ -18994,7 +19010,54 @@
  #include <sys/redwood_net.h>
  #include <sys/systm.h>
  #include <vm/memory_types.h>
-@@ -79,6 +80,14 @@
+@@ -60,18 +61,41 @@
+  * in between (as redwood_adreno.c does with what it shares with the GPU); the first, cached
+  * view is written out and never used again.
+  */
+-void *
+-lx_os_radio_memory(unsigned long size, unsigned long long *address)
+-{
+-	vm_offset_t cached = 0, uncached;
+-	uint64_t physical;
++static vm_offset_t radio_reserved;
++static vm_size_t radio_reserved_size;
++
++/* Called before the modem worker starts; defer DMA mapping until FW_READY. */
++int
++lx_os_reserve_radio_memory(unsigned long size)
++{
++	vm_offset_t cached = 0;
+ 
+ 	size = round_page(size);
++	if (radio_reserved != 0) {
++		return size == radio_reserved_size ? 0 : EINVAL;
++	}
+ 	if (kmem_alloc_contig(kernel_map, &cached, size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
+ 	    KERN_SUCCESS) {
+ 		say("lx: no %lu bytes of memory in one piece\n", size);
++		return ENOMEM;
++	}
++	radio_reserved = cached;
++	radio_reserved_size = size;
++	say("lx: reserved %lu bytes before radio startup\n", size);
++	return 0;
++}
++
++void *
++lx_os_radio_memory(unsigned long size, unsigned long long *address)
++{
++	vm_offset_t cached, uncached;
++	uint64_t physical;
++
++	size = round_page(size);
++	if (lx_os_reserve_radio_memory(size) != 0) {
+ 		return NULL;
+ 	}
++	cached = radio_reserved;
+ 	physical = kvtophys(cached);
+ 	bzero((void *)cached, size);
+ 	for (vm_offset_t line = cached; line < cached + size; line += 64) {
+@@ -79,6 +103,14 @@
  	}
  	__asm__ volatile ("dsb sy");
  	uncached = ml_io_map_unmappable(physical, size, VM_WIMG_WCOMB);
@@ -19009,7 +19072,7 @@
  	if (uncached == 0 || !redwood_wifi_radio_map(physical, size, address)) {
  		return NULL;
  	}
-@@ -215,7 +224,12 @@
+@@ -215,7 +247,12 @@
  lx_os_firmware(const char *name, const void **data, unsigned long *size)
  {
  	uint64_t length = 0;
@@ -19023,7 +19086,7 @@
  
  	if (file == NULL) {
  		return ENOENT;
-@@ -228,6 +242,9 @@
+@@ -228,6 +265,9 @@
  int
  lx_os_rproc_boot(void)
  {
@@ -19033,7 +19096,7 @@
  	return redwood_wifi_dsp_is_up() ? 0 : ENXIO;
  }
  
-@@ -444,6 +461,9 @@
+@@ -444,6 +484,9 @@
  {
  	kern_return_t kr;
  
@@ -19043,7 +19106,7 @@
  	if (vector >= LX_VECTORS || lx_irq_first == 0 || function == NULL) {
  		return EINVAL;
  	}
-@@ -461,7 +481,8 @@
+@@ -461,7 +504,8 @@
  	lx_vector[vector].argument = argument;
  	lx_vector[vector].attached = true;
  	lck_mtx_unlock(&lx_irq_lock);
@@ -21650,3 +21713,15 @@
  	/*
  	 * A panic's text is first collected in the panic buffer and only later
  	 * flushed to the console; if the console itself is what failed, that
+--- a/bsd/sys/redwood_lx.h
++++ b/bsd/sys/redwood_lx.h
+@@ -16,6 +16,9 @@
+ #include "redwood_sta.h"
+ 
+ /* ---- memory ---- */
++#define LX_RADIO_POOL_SIZE (44ul << 20)
++/* Boot-thread reservation only: no radio/SMMU access; consumed by radio_memory. */
++int lx_os_reserve_radio_memory(unsigned long size);
+ void	*lx_os_alloc(unsigned long size);			/* zeroed; NULL when there is none */
+ void	 lx_os_free(void *memory, unsigned long size);
+ /*
