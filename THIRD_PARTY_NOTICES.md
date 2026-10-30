@@ -18,6 +18,6 @@
 
 ## GPU 代码的许可范围
 
-Linux GPU 初始化表按 GPL-2.0-only 保留来源、版权及许可证全文，与 ISC ath10k 分开处理。该表由 APSL 内核驱动直接包含，组合分发条件尚未解决。Mesa/freedreno 与 Fuchsia 的宽松许可来源仅覆盖部分初始化；来源、差异和验证范围见 [GPU 许可说明](docs/GPU_LICENSE.md)。
+Linux GPU 初始化表按 GPL-2.0-only 保留来源、版权及许可证全文，与 ISC ath10k 分开处理。该表由 APSL 内核驱动直接包含，组合分发条件尚未解决。Mesa/freedreno 与 Fuchsia 的宽松许可来源仅覆盖部分初始化；来源、差异和验证范围见 [GPU 许可说明](docs/legal/GPU_LICENSE.md)。
 
 dipper 原创修改的作者为 yanei，其原创部分采用 MIT。第三方源文件声明及作者署名保留，不属于该 MIT 授权范围。

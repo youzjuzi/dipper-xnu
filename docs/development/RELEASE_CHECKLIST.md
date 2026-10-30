@@ -8,7 +8,7 @@
 - [ ] 取得完整的兼容 GPU 初始化来源或额外授权，解决与 APSL 内核组合的分发条件。
 - [ ] 补齐 APSL 文件级通知和修改日期。
 
-逐文件清单见 [license-inventory.json](../license-inventory.json)，具体问题见 [许可证说明](LICENSE_REVIEW.md)。
+逐文件清单见 [license-inventory.json](../../license-inventory.json)，具体问题见 [许可证说明](../legal/LICENSE_REVIEW.md)。
 
 ## 构建与安装
 
@@ -25,4 +25,4 @@
 - [ ] 验证持续运行、功耗、充电全过程、用户状态持久保存和退出恢复。
 - [ ] 独立验收音频输出、电话/移动数据及其他未覆盖硬件。
 
-当前功能状态见 [STATUS.md](STATUS.md)，验证范围见 [VALIDATION.md](VALIDATION.md)。
+当前功能状态见 [STATUS.md](../STATUS.md)，验证范围见 [VALIDATION.md](../validation/VALIDATION.md)。

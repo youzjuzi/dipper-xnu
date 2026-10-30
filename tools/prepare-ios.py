@@ -31,7 +31,7 @@ def prepare(ipsw):
         raise SystemExit('Prepare sources first: python3 tools/prepare.py --prepare')
     print('Checking the complete IPSW SHA256...', flush=True)
     if digest(ipsw) != IPSW_SHA256:
-        raise SystemExit('IPSW SHA256 mismatch; no inputs extracted. See docs/INPUTS.md.')
+        raise SystemExit('IPSW SHA256 mismatch; no inputs extracted. See docs/build/INPUTS.md.')
     records = []
     with zipfile.ZipFile(ipsw) as archive:
         manifest = plistlib.loads(archive.read('BuildManifest.plist'))

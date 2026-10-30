@@ -14,13 +14,7 @@ adb shell 'ls -l /dev/block/by-name/darwin /dev/block/by-name/userdata'
 
 设备必须明确为自己的 dipper。记录主、备份 GPT，核对两份 header/entry CRC、分区边界、类型、唯一 GUID、容量及挂载状态。Linux sysfs 的 `start` / `size` 单位是 512 字节，不能直接当成这里的 4096 字节 GPT LBA。
 
-系统区读取长度只针对本教程固定 iOS 输入：
-
-```sh
-adb shell "su -c 'dd if=/dev/block/by-name/darwin bs=4096 count=2042368 2>/dev/null | sha256sum'"
-```
-
-结果必须等于主机镜像的 `9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560`。失配不能忽略；按 [安装教程](INSTALL.md) 确认是否需要重写 darwin。摘要匹配只覆盖前 8,365,539,328 字节，不代表分区尾部历史用户状态相同。
+系统区回读采用[分区与写入教程第 6 节](INSTALL.md#6-写入系统并回读校验)的带失败检查流程，进入 Recovery 后执行，避免掩盖 dd 读取错误。固定输入的前 8365539328 字节必须与主机镜像摘要相同；匹配只覆盖系统镜像范围，不代表分区尾部历史用户状态相同。
 
 ## 2. 从对应手机准备 GPU 固件
 
@@ -39,7 +33,7 @@ adb shell "su -c 'dd if=/dev/block/by-name/darwin bs=4096 count=2042368 2>/dev/n
 
 ## 3. 匹配源码并重建
 
-按 [安装教程第 5 节](INSTALL.md#5-让源码匹配新分区) 将 loader/内核的边界和 GUID 与实际 GPT 对齐。私人配置、GPT 备份和修改前源码放在忽略目录 `local/`；不要把唯一 GUID 回写到公共补丁和清单。
+按 [启动教程配置章节](STARTUP.md#1-让源码匹配新分区) 将 loader/内核的边界和 GUID 与实际 GPT 对齐。私人配置、GPT 备份和修改前源码放在忽略目录 `local/`；不要把唯一 GUID 回写到公共补丁和清单。
 
 本轮实测边界已与公开源码相同，只需将 loader 的零 GUID 占位符替换成本机值，再重新编译 loader/UEFI；内核不需要因为 GUID 而改动。如果边界不同，必须修改内核并重编译。
 
@@ -55,7 +49,7 @@ python3 tools/build-payload.py --output work/runs/desktop-01 --seconds 300
 
 ## 4. 临时启动和取证
 
-先在新输出目录执行 `sha256sum -c SHA256SUMS`。确认设备身份后，使用 [安装教程第 8 节](INSTALL.md#8-日常启动) 的 RAM 启动顺序，文件全部取自该新目录。
+先在新输出目录执行 `sha256sum -c SHA256SUMS`。确认设备身份后，使用 [启动教程](STARTUP.md#3-临时启动) 的 RAM 启动顺序，文件全部取自该新目录。
 
 启动后可用 loader 的接口读取结果和日志：
 
@@ -70,7 +64,7 @@ fastboot get_staged kernel-log.txt
 
 ## 5. Wi-Fi 与网页测试
 
-在基础桌面测试通过、手机完整重启回 Android 后，先按 [外部材料](INPUTS.md#wcn3990-wi-fi-特性描述文件) 补齐 `firmware-5.bin` 并重建用户空间，再生成新载荷：
+在基础桌面测试通过、手机完整重启回 Android 后，先按 [外部材料](../build/INPUTS.md#wcn3990-wi-fi-特性描述文件) 补齐 `firmware-5.bin` 并重建用户空间，再生成新载荷：
 
 ```sh
 python3 tools/build-payload.py --wifi --seconds 900 --output work/runs/wifi-01
@@ -109,6 +103,6 @@ python3 tools/build-payload.py --wifi --peripherals --seconds 900 --output work/
 | 壁纸、小组件 | 桌面背景正常，日历等小组件有内容；本轮不保存旧 var_store，重启后的持久保存另测 |
 | Wi-Fi 回归 | 在同时启用外设时重新连接网络并打开、刷新网页 |
 
-2026-10-30 首次外设测试发现亮度调节无效：DSI 命令缓冲区分配到了 4 GiB 以上，而 DMA 地址寄存器只有 32 位。修复在 `kmem_alloc_contig` 中限制物理页号，并按实际 `PAGE_SIZE` 检查完整页范围；异常返回时释放缓冲区，避免每次拖动遗留一页。更新内核后须用实机验证，不能仅以编译通过为结论。结果见 [设备验收记录](device-validation-20261030.json)。
+2026-10-30 首次外设测试发现亮度调节无效：DSI 命令缓冲区分配到了 4 GiB 以上，而 DMA 地址寄存器只有 32 位。修复在 `kmem_alloc_contig` 中限制物理页号，并按实际 `PAGE_SIZE` 检查完整页范围；异常返回时释放缓冲区，避免每次拖动遗留一页。更新内核后须用实机验证，不能仅以编译通过为结论。结果见 [设备验收记录](../validation/device-validation-20261030.json)。
 
 手电筒分档调光历史上肉眼不明显，需单列结果。完整音频、电话/移动数据，以及未建立小米 8 验收基线的摄像头、蓝牙、定位与其他传感器，不因上述检查通过而记为可用。长期功耗、充电全过程和持久保存也需要独立测试。
