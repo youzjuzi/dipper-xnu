@@ -1,6 +1,6 @@
 # 创建 darwin 分区：通用工具
 
-[tools/partition-darwin.py](../../tools/partition-darwin.py) 将本次成功的分区步骤整理为可复用的离线方案生成器。它不连接 ADB，不执行手机命令；生成的 shell 脚本由持有人审查后执行。它只改 GPT，不写入 darwin.img、不格式化、不自动重启。
+[tools/partition/partition-darwin.py](../../tools/partition/partition-darwin.py) 将本次成功的分区步骤整理为可复用的离线方案生成器。它不连接 ADB，不执行手机命令；生成的 shell 脚本由持有人审查后执行。它只改 GPT，不写入 darwin.img、不格式化、不自动重启。
 
 本次实际流程已通过：当前 GPT 备份 → 写入分区 → 回读 → 重进 TWRP 核对容量 → Format Data → Android 初始化与容量验收。证据与未完成的首次安装项目见 [首次安装任务](../development/FIRST_INSTALL.md)。
 
@@ -8,7 +8,7 @@
 
 当前支持 dipper 的 `/dev/block/sda`、4096 字节扇区、末尾 userdata 且尚无 darwin 的布局。userdata 类型须为 Linux filesystem、属性为零、起点按 1 MiB 对齐，尾部空闲小于 1 MiB；至少保留 8 GiB userdata。不支持保留用户数据缩容，不是任意手机的通用分区程序。
 
-- 公共逻辑：`tools/partition-darwin.py`，共用 `tools/restore-android-layout.py` 的 GPT 校验和设备保护逻辑，两者都需保留。
+- 公共逻辑：`tools/partition/partition-darwin.py`，共用 `tools/partition/restore-android-layout.py` 的 GPT 校验和设备保护逻辑，两者都需保留。
 - 本机配置：`local/devices/<alias>/darwin-partition-<date>.json`。
 - 当前 GPT 备份：`local/backups/<run-id>/`，并登记 `local/index.json`。
 - 方案、实际脚本和回读记录：`work/runs/<run-id>/`，每轮新建，不覆盖。
@@ -48,10 +48,10 @@
 
 ```sh
 # 只输出方案，不创建文件或接触手机
-python3 tools/partition-darwin.py --config local/devices/<alias>/darwin-partition-<date>.json
+python3 tools/partition/partition-darwin.py --config local/devices/<alias>/darwin-partition-<date>.json
 
 # 保存到新的私有运行目录，拒绝覆盖已有目录
-python3 tools/partition-darwin.py --config local/devices/<alias>/darwin-partition-<date>.json --output-dir work/runs/<new-run-id>
+python3 tools/partition/partition-darwin.py --config local/devices/<alias>/darwin-partition-<date>.json --output-dir work/runs/<new-run-id>
 ```
 
 输出包含 `plan.json`、`create-darwin.sh`、`expected-gpt-entries.bin`、可用于后续校验的 `config.json`、工具来源摘要和 `SHA256SUMS`。expected 文件只是条目比对依据，**不能 dd 到磁盘**。配置中的输入路径会转换为绝对路径，不应直接迁移到另一台主机执行。
@@ -75,13 +75,13 @@ adb -s <serial> shell sh /tmp/create-darwin.sh CREATE-DARWIN
 先读取新的主备 GPT，校验它们是否与生成方案逐条一致：
 
 ```sh
-python3 tools/partition-darwin.py --config work/runs/<run-id>/config.json --verify-primary <写入后主GPT> --verify-backup <写入后备GPT>
+python3 tools/partition/partition-darwin.py --config work/runs/<run-id>/config.json --verify-primary <写入后主GPT> --verify-backup <写入后备GPT>
 ```
 
 通过后由持有人重进 Recovery，再读取主备 GPT 和两个新节点的字节容量，进行第二次校验：
 
 ```sh
-python3 tools/partition-darwin.py --config work/runs/<run-id>/config.json --verify-primary <重启后主GPT> --verify-backup <重启后备GPT> --kernel-userdata-bytes <实读字节数> --kernel-darwin-bytes <实读字节数>
+python3 tools/partition/partition-darwin.py --config work/runs/<run-id>/config.json --verify-primary <重启后主GPT> --verify-backup <重启后备GPT> --kernel-userdata-bytes <实读字节数> --kernel-darwin-bytes <实读字节数>
 ```
 
 工具不读取手机，必须提供同一轮的真实读数，不能把方案数字直接当作实读结果。旧容量、缺少一个节点容量或 GPT 条目不符都会被拒绝。
@@ -95,6 +95,6 @@ python3 tools/partition-darwin.py --config work/runs/<run-id>/config.json --veri
 本通用生成器输出的脚本尚未在真实手机重新执行；本机一次性脚本的实机成功与通用工具的离线通过分别记录。当前手机已经分区，不需要为了测试再次分区。测试命令：
 
 ```sh
-python3 tools/test-restore-android-layout.py
-python3 tools/test-partition-darwin.py
+python3 tools/tests/test-restore-android-layout.py
+python3 tools/tests/test-partition-darwin.py
 ```

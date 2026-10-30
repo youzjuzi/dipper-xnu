@@ -10,7 +10,7 @@ import unittest
 import uuid
 import zlib
 
-spec = importlib.util.spec_from_file_location('restore_layout', Path(__file__).with_name('restore-android-layout.py'))
+spec = importlib.util.spec_from_file_location('restore_layout', Path(__file__).resolve().parents[1] / 'partition/restore-android-layout.py')
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 S = 4096
 N = 10000

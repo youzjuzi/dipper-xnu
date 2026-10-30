@@ -11,6 +11,8 @@
 | 验证证据 validation/ | [验证记录](validation/VALIDATION.md)、[复现过程](validation/REPRODUCTION.md)、[设备验收数据](validation/device-validation-20261030.json) |
 | 来源与许可 legal/ | [许可审查](legal/LICENSE_REVIEW.md)、[GPU 许可](legal/GPU_LICENSE.md)、[GPU 来源数据](legal/gpu-source-audit.json) |
 
+工具分类与入口见[工具导航](../tools/README.md)。
+
 images/ 放公开文档图片。任务计划说明要做什么，安装教程说明如何操作，验证记录说明实际做过什么，三者不要混写。原始私人日志和备份继续留在 work/runs/、local/，不搬进 docs。
 
 新增文档归入已有类别并更新本导航；不为每轮实验新增公开文档，实验结论归并到对应任务和验证记录。

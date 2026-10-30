@@ -101,7 +101,7 @@ adb -s "$ANDROID_SERIAL" shell 'getprop sys.boot_completed; df -k /data'
 按 [用户空间教程](../build/USERLAND.md) 先验证并提取 IPSW，再在仓库根目录执行：
 
 ```sh
-python3 tools/pack-darwin.py
+python3 tools/build/pack-darwin.py
 sha256sum work/images/darwin.img
 ```
 
@@ -144,11 +144,11 @@ adb -s "$ANDROID_SERIAL" exec-out 'set -o pipefail; dd if=/dev/block/by-name/dar
 
 回退会删除 darwin 并重建 Android 数据区，不恢复旧个人数据，也不等于刷全套原厂固件。临时启动失败通常先完整重启、保存证据，不必因此重分区。只有明确需要撤销双系统布局时才执行本节。
 
-入口：[tools/restore-android-layout.py](../../tools/restore-android-layout.py)。这是 Linux 主机上的离线方案生成器，不连接 ADB、不执行设备命令。通用的是恢复逻辑，本机身份、输入摘要和 GPT 备份在 `local/`。目前只支持 dipper、sda、4096 字节扇区，以及尾部相邻 userdata/darwin 恢复为原 userdata 的布局；不是任意手机的分区修复工具。
+入口：[tools/partition/restore-android-layout.py](../../tools/partition/restore-android-layout.py)。这是 Linux 主机上的离线方案生成器，不连接 ADB、不执行设备命令。通用的是恢复逻辑，本机身份、输入摘要和 GPT 备份在 `local/`。目前只支持 dipper、sda、4096 字节扇区，以及尾部相邻 userdata/darwin 恢复为原 userdata 的布局；不是任意手机的分区修复工具。
 
 ### 目录与输入
 
-- `tools/restore-android-layout.py`：公共工具，纳入 Git。
+- `tools/partition/restore-android-layout.py`：公共工具，纳入 Git。
 - `local/devices/<alias>/android-restore-<date>.json`：本机配置，不提交。
 - `local/backups/<run-id>/`：恢复前主备 GPT 与已核验的原始 GPT，不提交。
 - `work/runs/<run-id>/`：每次方案、生成脚本、回读结果与日志，不提交。
@@ -180,8 +180,8 @@ adb -s "$ANDROID_SERIAL" exec-out 'set -o pipefail; dd if=/dev/block/by-name/dar
 在仓库根目录执行，替换本机配置和新运行目录：
 
 ```sh
-python3 tools/restore-android-layout.py --config local/devices/<alias>/android-restore-<date>.json
-python3 tools/restore-android-layout.py --config local/devices/<alias>/android-restore-<date>.json --output-dir work/runs/<new-run-id>
+python3 tools/partition/restore-android-layout.py --config local/devices/<alias>/android-restore-<date>.json
+python3 tools/partition/restore-android-layout.py --config local/devices/<alias>/android-restore-<date>.json --output-dir work/runs/<new-run-id>
 ```
 
 默认只显示方案；`--output-dir` 创建新目录，保存 `plan.json`、`inputs.json`、`restore-android-layout.sh`、来源记录 `provenance.json` 与摘要。已有目录被拒绝，避免覆盖。`inputs.json` 是配置审计副本，其中相对路径仍按原配置目录解释，不要将它当作新位置下可直接运行的配置。方案与脚本包含私人 GUID，禁止提交。
@@ -201,7 +201,7 @@ adb -s <serial> shell sh /tmp/restore-android-layout.sh RESTORE-ANDROID-GPT
 完成后先回读并校验主备 GPT，再由持有人重进 Recovery，重新捕获 GPT 和内核 userdata 字节容量。用新读数验收：
 
 ```sh
-python3 tools/restore-android-layout.py --config local/devices/<alias>/android-restore-<date>.json --verify-primary <重启后主GPT> --verify-backup <重启后备GPT> --kernel-userdata-bytes <重启后容量整数>
+python3 tools/partition/restore-android-layout.py --config local/devices/<alias>/android-restore-<date>.json --verify-primary <重启后主GPT> --verify-backup <重启后备GPT> --kernel-userdata-bytes <重启后容量整数>
 ```
 
 旧内核容量会被拒绝。此命令只核验提供的证据，不能证明文件来源或采集时间；调用者必须保证文件和容量属于同一轮设备读取。通过后仍需单独重建数据文件系统、验证 Android 启动与容量，不能把 GPT 恢复当作系统恢复完成。
@@ -210,6 +210,6 @@ python3 tools/restore-android-layout.py --config local/devices/<alias>/android-r
 
 2026-10-30：17 项合成 GPT/CLI 测试通过；使用本机恢复前及重启后 GPT、已记录内核容量的离线回放通过。原一次性 v2 脚本已由持有人执行并回读通过；本通用生成器新增身份、挂载/holder 等保护后的生成脚本尚未在手机执行，不继承 v2 的全部真机验证结论。本机后来已重新分区并进入 iOS；本次保存的恢复配置仅对应当时状态，只供历史回放。再次回退必须重新采集当前 GPT，生成新方案。
 
-测试入口：`python3 tools/test-restore-android-layout.py`。任务进度见 [首次安装任务](../development/FIRST_INSTALL.md)。
+测试入口：`python3 tools/tests/test-restore-android-layout.py`。任务进度见 [首次安装任务](../development/FIRST_INSTALL.md)。
 
 恢复 GPT 和重启后容量核验通过之后，持有人仍须 Format Data、初始化 Android，再检查 `sys.boot_completed` 和 `df -k /data`。本轮先恢复 GPT 未格式化时，文件系统仍只有旧容量；格式化后才完成恢复验收。无法进入 Recovery/fastboot 时，使用事先验证的本机恢复手段，不能猜测 EDL 参数。

@@ -50,7 +50,7 @@ SUMS
 ```sh
 tar -xJf "$DIPPER_INPUTS/iOSToolchain-x86_64.tar.xz" -C "$THEOS/toolchain"
 tar -xJf "$DIPPER_INPUTS/iPhoneOS16.5.sdk.tar.xz" -C "$THEOS/sdks"
-python3 "$DIPPER_PROJECT_ROOT/tools/check-sdk.py" "$THEOS/sdks/iPhoneOS16.5.sdk"
+python3 "$DIPPER_PROJECT_ROOT/tools/prepare/check-sdk.py" "$THEOS/sdks/iPhoneOS16.5.sdk"
 "$THEOS/toolchain/linux/iphone/bin/clang" --version
 ```
 
@@ -58,7 +58,7 @@ python3 "$DIPPER_PROJECT_ROOT/tools/check-sdk.py" "$THEOS/sdks/iPhoneOS16.5.sdk"
 
 ## 让构建脚本使用已校验的原包
 
-完成 `tools/prepare.py --prepare` 后执行：
+完成 `tools/prepare/prepare.py --prepare` 后执行：
 
 ```sh
 K="$DIPPER_PROJECT_ROOT/work/hackios"
@@ -81,4 +81,4 @@ fef6539e0127579536bc977be57a90d018b83f2931fedc3a8870fbe38d6c4127
 
 文件描述 ath10k 的特性与 WMI/HTT 接口版本，不包含可执行 DSP 固件，不能代替本机 modem、wlanmdsp 或板级数据。下载或复用已有副本时核对以上摘要，不一致即停止；文件本身不提交本仓库。
 
-核对后放入 `work/hackios/fw-wifi/firmware-5.bin`，再运行 `tools/build-userland.sh`。构建脚本将它装入 root.apfs 的 `/fw/firmware-5.bin`；`tools/build-payload.py --wifi` 会回读并核对摘要，缺少文件则拒绝打包。此输入不依赖其他设备的 `wpss.mdt`。
+核对后放入 `work/hackios/fw-wifi/firmware-5.bin`，再运行 `tools/build/build-userland.sh`。构建脚本将它装入 root.apfs 的 `/fw/firmware-5.bin`；`tools/build/build-payload.py --wifi` 会回读并核对摘要，缺少文件则拒绝打包。此输入不依赖其他设备的 `wpss.mdt`。

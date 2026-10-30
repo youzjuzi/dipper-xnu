@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Build the UFS route's host artifacts; no device operations.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 K="$ROOT/work/hackios"
 : "${THEOS:?Set THEOS to the verified local SDK/toolchain directory}"
 [ -z "${PREBUILT:-}" ] || { echo 'PREBUILT is not allowed for source reproduction.' >&2; exit 1; }
@@ -10,7 +10,7 @@ K="$ROOT/work/hackios"
 [ -x "$K/xnu-deps/host/bin/ld64" ] || { echo 'Run xnu-deps/setup.sh first.' >&2; exit 1; }
 for input in ios165/rootfs.slt ios165/system.manifest ios165/var.skel \
     ios165/20F66__iPhone10,3_6/dyld_shared_cache_arm64 ios165/cryptex-app.dmg; do
-    [ -f "$K/$input" ] || { echo "Missing $input; run tools/prepare-ios.py first." >&2; exit 1; }
+    [ -f "$K/$input" ] || { echo "Missing $input; run tools/prepare/prepare-ios.py first." >&2; exit 1; }
 done
 export LDID="$THEOS/toolchain/linux/iphone/bin/ldid"
 [ -x "$LDID" ] || { echo "Missing $LDID" >&2; exit 1; }

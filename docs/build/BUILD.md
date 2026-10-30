@@ -53,7 +53,7 @@ export DIPPER_PROJECT_ROOT="$PWD"
 从仓库根目录执行：
 
 ```sh
-python3 tools/prepare.py
+python3 tools/prepare/prepare.py
 ```
 
 这一步只显示上游仓库和固定 commit，不联网、不创建构建树。
@@ -61,7 +61,7 @@ python3 tools/prepare.py
 确认后获取源码并应用补丁：
 
 ```sh
-python3 tools/prepare.py --prepare
+python3 tools/prepare/prepare.py --prepare
 ```
 
 脚本会下载锁定版本及相关子模块，合并内核与用户空间目录，基于 Apple XNU 应用 HackiOS 基线和 dipper 补丁，再检查修改文件的 SHA256。`xnu-mi8.patch` 基于 HackiOS 基线，不能直接应用到原版 XNU。上游树可能包含 prebuilt，本流程不把这些产物作为已重建的 dipper 产物使用。
@@ -128,7 +128,7 @@ sha256sum xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.develo
 
 ```sh
 cd "$DIPPER_PROJECT_ROOT"
-bash tools/build-loader-uefi.sh
+bash tools/build/build-loader-uefi.sh
 ```
 
 脚本先编译 xnuloader，再生成含 `usb` 条目的 XNUP 引导载荷，经 `XNU_PAYLOAD` 嵌入 BootShim/UEFI，最后调用上游 dipper 构建入口。它拒绝 `-b` / `--boot`，不会连接设备。
@@ -148,9 +148,9 @@ bash tools/build-loader-uefi.sh
 
 按 [用户空间构建与主机打包](USERLAND.md) 继续：
 
-1. `tools/prepare-ios.py` 校验 IPSW 并在本工作树提取系统材料。
-2. `tools/build-userland.sh` 从源码生成 `root.apfs` 和 `flashboot.apfs`。
-3. `tools/pack-darwin.py` 生成并校验 `darwin.img`。
+1. `tools/prepare/prepare-ios.py` 校验 IPSW 并在本工作树提取系统材料。
+2. `tools/build/build-userland.sh` 从源码生成 `root.apfs` 和 `flashboot.apfs`。
+3. `tools/build/pack-darwin.py` 生成并校验 `darwin.img`。
 
 这些主机步骤已实际完成。进入设备测试前还必须准备经核查的本设备固件、分区配置及内核启动载荷；本轮的 [已有分区路线](../install/EXISTING_INSTALL.md) 已完成桌面启动验证。公开 loader 的分区 GUID 是零占位符，边界来自历史实验，必须对照本机 GPT 修改并重编译；不能删除校验强行启动。主机产物检查完成后，先补齐 [设备输入](USERLAND.md#4-设备输入与实机测试)，再进入设备测试。
 

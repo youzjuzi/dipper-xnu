@@ -13,6 +13,10 @@
 - 新分区 GUID 已匹配到本机 loader，并按仓库教程重建 loader/UEFI；内核边界未变，沿用摘要已核验的内核与用户态产物。
 - darwin 镜像前 8365539328 字节回读 SHA256 与主机一致；代理确认 xnuloader 身份，持有人确认成功进入 iOS。
 
+### 工具目录整理
+
+- tools 按 prepare、build、partition、tests 分类，同步仓库根路径解析、测试模块引用及当前教程。使用新路径运行；历史轮次原始命令与摘要不变。入口见[工具导航](tools/README.md)。
+
 ### 文档与交接
 
 - 主教程拆分为[分区、写入与回退](docs/install/INSTALL.md)和[配置、重建与启动](docs/install/STARTUP.md)。原独立恢复说明合并为回退章节；分区工具参数和外设测试保留为参考页。
