@@ -19,6 +19,8 @@
 
 ## 2. 安装前准备
 
+设备版本、TWRP 官方下载与核验、GPU 固件提取见[设备准备教程](DEVICE_PREPARATION.md)。
+
 - Bootloader 已解锁，能够进入厂商 bootloader 的 fastboot。
 - 有适配 dipper 且经过验证的 recovery，可访问 root adb、GPT 工具和块设备；历史实验使用 TWRP 3.3.1；本轮分区与恢复使用 TWRP 3.7.0_9-0，不随仓库提供。
 - 已备份个人文件及设备分区，并在电脑或外置介质验证哈希。GPT 主表、备份表，以及 boot、modem、persist、modemst1/2、fsg 等恢复材料均需保留。

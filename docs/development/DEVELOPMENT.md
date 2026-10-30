@@ -123,15 +123,16 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-10-31，接手时重新核对）
 
-- 工具维护成果：chore/tools-layout 从 main 的 3cf9246 创建，工具分类提交为 7b944e9；本次合入本地 main，保留维护分支，尚未推送。工具按四类迁移，同步脚本根路径、测试导入和教程，本机源码与产物未移动。首次安装记录见下述已合入成果。
+- 当前文档任务：在 main 补充 DEVICE_PREPARATION.md，统一设备版本、TWRP 来源和固件提取；教程与实测结论随本次文档提交保存；已获持有人授权推送 main，远端同步状态以 git 查询为准。已按授权只读提取固件。工具分类主线 96b8155 与维护分支 e668be5 已推送并核对。
+- 固件提取实测：work/runs/20261031-firmware-01/，Android 10 / MIUI V12.5.2.0.QEACNXM、启动完成和 su root 已实时核对。教程 MODE=root 提取 4 个文件、手机端前后与主机摘要、固定摘要及既有输入字节比较全部通过；没有覆盖输入或操作分区。其他提取模式未复测。
 
 - 当前任务：[首次安装完整验收](FIRST_INSTALL.md)，成果从 test/first-install（基线 f784c8e）合入本地 main，后续开发从 main 新建对应任务分支。恢复 Android、重新分区、镜像回读及本机新 loader/UEFI 启动链已走通，持有人确认进入 iOS；阶段 07 的逐项回归与退出收尾待验。未建立第二套源码；本次合并不改动忽略的 work/ 和 local/。
-- 本地主线纳入目录规范、docs 分类迁移、分区/恢复工具及首次安装记录，保留 test/first-install 历史分支。main 的 3cf9246 与 test/first-install 的 8d80fc5 已按持有人授权推送并核对；工具整理现已纳入本地主线，尚未推送。当前提交号以 git log -1 为准，远端状态需按查询时点理解。
+- 本地主线纳入目录规范、docs 分类迁移、分区/恢复工具及首次安装记录，保留 test/first-install 历史分支。main 的 3cf9246 与 test/first-install 的 8d80fc5 已按持有人授权推送并核对；工具整理已纳入主线并推送。当前提交号以 git log -1 为准，远端状态需按查询时点理解。
 - 日常源码固定在 work/；第 08 轮仅修改本机 loader 的 darwin 唯一 GUID。74 项适配清单中 73 项匹配公共摘要，loader 一项匹配更新后的本机配置；清单外源码树未完整审计。公共补丁继续保留零 GUID，不导出设备身份值。
 - 私人配置见 local/README.md 和 local/index.json；恢复备份在 local/backups/20261030-first-install-01/。原始设备信息不得提交。
 - 本次证据在 work/runs/20261030-first-install-01/ 至 03/；第 03 轮确认恢复后的主备 GPT 字节未变、内核识别完整 userdata 容量。旧的 iOS 启动证据不能代替本次首次安装验收。
 - 工具新增：tools/partition/restore-android-layout.py 和测试、安装说明已随首次安装成果推送；本次仅迁移路径；本机历史配置在 local/devices/mi8/android-restore-20261030.json，回放在 work/runs/20261030-restore-tool-01/。配置对应恢复前历史状态，禁止直接在已恢复手机重跑；通用脚本真机执行待验。
-- 恢复阶段完成：持有人已 Format Data 并完成 Android 初始化，提供 sys.boot_completed=1 与 /data 总量 116193656 KiB 的 ADB 输出；证据在 work/runs/20261030-first-install-04/。root 未核验，不能沿用格式化前的授权/可用性假设。
+- 恢复阶段完成：持有人已 Format Data 并完成 Android 初始化，提供 sys.boot_completed=1 与 /data 总量 116193656 KiB 的 ADB 输出；证据在 work/runs/20261030-first-install-04/。当时 root 未核验；2026-10-31 已重新确认 su uid=0，见固件提取轮次。
 - 第 05 轮已准备约 24 GiB darwin 分区方案、当前 GPT 备份及私有脚本，见 work/runs/20261030-first-install-05/。持有人已执行分区脚本；实时回读主备 GPT 与 expected-gpt-entries.bin 一致，前 20 项未变。旧脚本已完成，不得重复执行。
 - 第 06/07 轮：Recovery 重启后的 GPT 与 userdata/darwin 节点容量核验通过；持有人完成 Format Data，提供 Android 启动完成及 /data 总量 91422752 KiB 的 ADB 输出，阶段 04 通过。证据在 work/runs/20261030-first-install-06/、07/。
 - 通用分区工具：tools/partition/partition-darwin.py、测试和 docs/install/PARTITION_DARWIN.md 已随首次安装成果推送；本次仅迁移路径；复用恢复工具保护逻辑，14 项新测试及 17 项恢复回归通过。本机历史配置在 local/devices/mi8/darwin-partition-20261030.json，离线回放在 work/runs/20261030-partition-tool-01/，完整条目匹配实机成功结果。当前手机不得重复执行分区，新生成脚本未单独实机执行。

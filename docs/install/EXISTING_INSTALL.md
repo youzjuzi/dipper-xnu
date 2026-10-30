@@ -18,18 +18,9 @@ adb shell 'ls -l /dev/block/by-name/darwin /dev/block/by-name/userdata'
 
 ## 2. 从对应手机准备 GPU 固件
 
-本次手机系统版本为 MIUI `V12.5.2.0.QEACNXM`，对应[小米原厂包](https://bn.d.miui.com/V12.5.2.0.QEACNXM/miui_MI8_V12.5.2.0.QEACNXM_f5ec813d1c_10.0.zip)，链接也由 [LineageOS 的 dipper 设备记录](https://github.com/LineageOS/lineage_wiki/blob/main/_data/devices/dipper.yml)列出。
+统一按[设备版本、TWRP 与固件准备](DEVICE_PREPARATION.md)核对 Android/MIUI 版本，提取 4 个 GPU 固件并进行手机端与主机端 SHA256 校验，保存到 `work/hackios/fw-gpu/`。该页也列出 TWRP 官方来源及 Wi-Fi 输入区别，避免维护多份提取流程。
 
-可从自己的对应手机只读提取以下文件，逐个核对手机端与主机端 SHA256，放入 `work/hackios/fw-gpu/`：
-
-| 手机路径 | 本轮 SHA256 |
-| --- | --- |
-| `/vendor/firmware/a630_gmu.bin` | `b07f90299ff2ae33948fcfd6ed67f53fbd287b5bf85ff2d43db11d4d32c1621f` |
-| `/vendor/firmware/a630_sqe.fw` | `34edacb6fdedfbfc07ed5cd1d29b0b57a3543ef5be6ab34a43bd64686826fa1e` |
-| `/vendor/firmware/a630_zap.mdt` | `f369d5614503a516a6443887f04dd8497cc7127b1ff3429c492666b26a9ab34b` |
-| `/vendor/firmware/a630_zap.b02` | `519b5538809f54ee566246b0520746a8ea82ca9384ea6bddb0b0e0d3c2de520c` |
-
-这些是手机实际文件的摘要；本轮未下载原厂 ZIP 做逐字节对照，不把手机端校验称为厂商签名验证。固件不提交到仓库。
+本轮基线为 Android 10 / MIUI V12.5.2.0.QEACNXM；不是要求所有设备强行降级。本次未下载原厂 ZIP 做逐字节对照，手机端文件摘要不称为厂商签名验证。固件不提交仓库。
 
 ## 3. 匹配源码并重建
 

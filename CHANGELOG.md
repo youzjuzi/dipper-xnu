@@ -19,6 +19,8 @@
 
 ### 文档与交接
 
+- 新增设备准备教程：记录 Android 10 / MIUI V12.5.2.0.QEACNXM 与 TWRP 3.7.0_9-0 基线，提供官方 Recovery 来源、GPU 固件提取及双端摘要核验示例，区分 Wi-Fi 输入来源；Android root 提取路线已实测，4 个固件双端及固定摘要一致，TWRP 提取路线未复测。
+
 - 主教程拆分为[分区、写入与回退](docs/install/INSTALL.md)和[配置、重建与启动](docs/install/STARTUP.md)。原独立恢复说明合并为回退章节；分区工具参数和外设测试保留为参考页。
 - 同步首页、功能状态、首次安装阶段和开发现场交接；私人 GUID、备份及原始日志仍在忽略目录。
 - 明确两个操作顺序：GPT 变更后重进 Recovery 核验容量再格式化；新 GUID 必须匹配 loader 并重建内嵌它的 UEFI。

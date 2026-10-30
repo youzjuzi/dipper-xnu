@@ -50,7 +50,7 @@ python3 tools/build/pack-darwin.py
 
 ## 4. 设备输入与实机测试
 
-单独完成主机构建后，还需以下设备输入。复用已安装手机的核对、固件提取及启动步骤见 [已有分区测试](../install/EXISTING_INSTALL.md)：
+单独完成主机构建后，还需以下设备输入。设备版本、TWRP 获取及固件提取见[设备准备](../install/DEVICE_PREPARATION.md)，启动测试见[已有分区测试](../install/EXISTING_INSTALL.md)：
 
 - GPU 固件：在 `work/hackios/fw-gpu/` 放置与 dipper 匹配的 `a630_gmu.bin`、`a630_sqe.fw`、`a630_zap.mdt`、`a630_zap.b02`，记录获取链接/来源、版本和 SHA-256 后重建启动卷。
 - Wi-Fi：内核通过本机 Android modem 分区读取基带与板级数据；另需 [WCN3990 特性描述文件](INPUTS.md#wcn3990-wi-fi-特性描述文件) `firmware-5.bin`，经校验后装入 root.apfs。需核对本机 modem 布局。上游 `wpss` / `qca6750` 示例属于另一设备，不能当作 WCN3990 的通用输入。

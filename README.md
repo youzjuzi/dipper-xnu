@@ -20,6 +20,7 @@
 
 - 分区前后均完成 Format Data、Android 启动和数据容量验收；系统镜像准确范围回读 SHA256 与主机一致。
 - 教程整理为[分区、写入与回退](docs/install/INSTALL.md)和[配置、重建与启动](docs/install/STARTUP.md)，Android 恢复作为回退章节保留。
+- **固件提取已实测**：Android 10 / MIUI V12.5.2.0.QEACNXM 下，使用已有 root 提取 4 个 GPU 固件，双端及固定 SHA256 全部一致；步骤见[设备准备教程](docs/install/DEVICE_PREPARATION.md)。
 - **工具目录整理**：11 个脚本归入 `tools/prepare/`、`build/`、`partition/`、`tests/`，脚本引用与教程命令已同步，31 项回归测试通过。后续按[工具导航](tools/README.md)使用新路径。
 - 本轮逐项外设回归与退出后重启 Android 仍待验；先前 Wi-Fi、亮度等测试结果单独保留，不视作本轮复测。
 
@@ -65,6 +66,8 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 ## 构建与安装
 
 构建使用 **Linux x86_64**，开发环境为 **Ubuntu 26.04.1 LTS**。本仓库通过固定上游版本和 dipper 适配补丁组织源码。
+
+开始前先看[设备版本、TWRP 与固件准备](docs/install/DEVICE_PREPARATION.md)，确认本机版本和输入来源。
 
 1. [构建教程](docs/build/BUILD.md)与[输入材料](docs/build/INPUTS.md)：固定来源、校验、编译内核和 UEFI。
 2. [用户空间与打包](docs/build/USERLAND.md)：提取 IPSW、编译适配程序、生成启动卷和系统镜像。

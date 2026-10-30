@@ -90,3 +90,11 @@
 维护分支 chore/tools-layout 将 11 个工具移至 prepare/build/partition/tests，未改变分区算法、设备保护或构建参数。旧历史记录中的 tools 根路径代表当时实际执行命令；当前入口见[工具导航](../../tools/README.md)。
 
 17 项恢复测试和 14 项分区测试通过；Python AST 与 Bash 语法、6 个仓库根目录解析、6 个 CLI 帮助入口、从 /tmp 执行只读源码准备计划通过。UEFI 非法参数和用户态 PREBUILT 拒绝检查通过，11 个迁移文件逐项对照仅含预期路径变化。170 个本地文档链接及锚点检查通过。未运行完整编译、未改动已有源码/镜像或历史轮次、未操作设备；这些结果不新增实机功能结论。
+
+## 2026-10-31 设备准备教程
+
+从第 01/02 轮记录确认 Android 10、MIUI V12.5.2.0.QEACNXM 和 Recovery 3.7.0_9-0；未将历史读取标为实时版本。核对 Team Win dipper 设备及下载页面，补 GPU 固件双端校验示例和输入归档说明。新增命令仅做 Bash 语法检查，未在手机复测；当时刷入的 TWRP 文件摘要、来源和实际目标仍待核验。
+
+## 2026-10-31 Android root 固件提取实测
+
+持有人授权后，代理实时确认 dipper、sys.boot_completed=1、Android 10、MIUI V12.5.2.0.QEACNXM，以及 su uid=0。直接使用设备准备教程的提取命令块，选择 MODE=root；4 个 A630 固件均提取成功，手机端前后与主机 SHA256 一致，固定摘要全部通过，与既有 work/hackios/fw-gpu/ 文件逐字节相同。新文件仅保存在 work/runs/20261031-firmware-01/gpu/，命令、版本、输出、比对 JSON 和摘要随轮次保存。未覆盖既有输入、未写块设备、未重新构建。TWRP 与普通无 root 提取路线本轮未执行；TWRP 镜像来源/刷写证据的待补项不变。
