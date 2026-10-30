@@ -2,7 +2,7 @@
 
 本教程面向 Linux x86_64 主机，开发环境为 **Ubuntu 26.04.1 LTS**。目标是从固定上游源码重建 dipper 的适配代码，逐步生成内核、加载器和 UEFI。
 
-2026-10-30 已在独立源码目录完成内核编译/链接、ath10k、Mesa、用户空间启动卷、加载器、UEFI 和 darwin 系统镜像的主机构建。主机已装有依赖，尚未验证全新 Ubuntu 的软件包安装；随后在已有分区上完成桌面启动，未重新分区或刷写系统。具体证据及未通过项见 [复现记录](REPRODUCTION.md)；当前实机功能见 [功能状态](STATUS.md)。
+2026-10-30 已在独立源码目录完成内核编译/链接、ath10k、Mesa、用户空间启动卷、加载器、UEFI 和 darwin 系统镜像的主机构建。主机已装有依赖，尚未验证全新 Ubuntu 的软件包安装；随后在已有分区上完成桌面启动，未重新分区或刷写系统。具体证据及未通过项见 [复现记录](../validation/REPRODUCTION.md)；当前实机功能见 [功能状态](../STATUS.md)。
 
 ## 1. 准备环境
 
@@ -140,7 +140,7 @@ bash tools/build-loader-uefi.sh
 
 ## 6. 用户空间、打包与启动
 
-设备端步骤单独见 **[分区、写入与启动教程](INSTALL.md)**。当前实机路线需要 darwin 分区，首次重建 userdata 会清空 Android 数据；系统写入 UFS，之后临时加载 UEFI 启动。
+设备端步骤单独见 **[分区、写入与启动教程](../install/INSTALL.md)**。当前实机路线需要 darwin 分区，首次重建 userdata 会清空 Android 数据；系统写入 UFS，之后临时加载 UEFI 启动。
 
 按 [用户空间构建与主机打包](USERLAND.md) 继续：
 
@@ -148,7 +148,7 @@ bash tools/build-loader-uefi.sh
 2. `tools/build-userland.sh` 从源码生成 `root.apfs` 和 `flashboot.apfs`。
 3. `tools/pack-darwin.py` 生成并校验 `darwin.img`。
 
-这些主机步骤已实际完成。进入设备测试前还必须准备经核查的本设备固件、分区配置及内核启动载荷；本轮的 [已有分区路线](EXISTING_INSTALL.md) 已完成桌面启动验证。公开 loader 的分区 GUID 是零占位符，边界来自历史实验，必须对照本机 GPT 修改并重编译；不能删除校验强行启动。主机产物检查完成后，先补齐 [设备输入](USERLAND.md#4-设备输入与实机测试)，再进入设备测试。
+这些主机步骤已实际完成。进入设备测试前还必须准备经核查的本设备固件、分区配置及内核启动载荷；本轮的 [已有分区路线](../install/EXISTING_INSTALL.md) 已完成桌面启动验证。公开 loader 的分区 GUID 是零占位符，边界来自历史实验，必须对照本机 GPT 修改并重编译；不能删除校验强行启动。主机产物检查完成后，先补齐 [设备输入](USERLAND.md#4-设备输入与实机测试)，再进入设备测试。
 
 ## 7. 常见问题
 
@@ -162,4 +162,4 @@ bash tools/build-loader-uefi.sh
 | 内核构建非零退出但存在文件 | 检查完整日志及退出码，确认是否本轮完成链接，记录所有未通过检查 |
 | 已生成内核和 UEFI，但不能启动桌面 | 尚需第 6 节的用户空间、载荷与设备配置，不能仅用这两个产物代替 |
 
-报告问题时附上本项目 commit、Ubuntu 版本、失败命令和经过脱敏的日志。贡献要求见 [贡献指南](../CONTRIBUTING.md)。
+报告问题时附上本项目 commit、Ubuntu 版本、失败命令和经过脱敏的日志。贡献要求见 [贡献指南](../../CONTRIBUTING.md)。

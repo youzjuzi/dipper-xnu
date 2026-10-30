@@ -2,7 +2,7 @@
 
 更新日期：2026-10-30。
 
-现有 GPU 功能保留。`mi8_a630_hw_init.inc` 按其 Linux 派生来源标注 GPL-2.0-only，并附原作者通知及 [GPL 2.0 全文](../LICENSES/GPL-2.0-only.txt)。这项来源声明**不构成将它与 APSL 内核组合分发的许可确认**。
+现有 GPU 功能保留。`mi8_a630_hw_init.inc` 按其 Linux 派生来源标注 GPL-2.0-only，并附原作者通知及 [GPL 2.0 全文](../../LICENSES/GPL-2.0-only.txt)。这项来源声明**不构成将它与 APSL 内核组合分发的许可确认**。
 
 ## 已确认的来源
 

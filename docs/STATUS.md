@@ -8,7 +8,7 @@
 
 ## 最近一次实验
 
-外设第二轮只更换内核及载荷，验证亮度 DMA 缓冲区修复。持有人确认设置/控制中心调光、锁屏唤醒及其他外设和 Wi-Fi 网页回归正常；退出后已完整重启回 Android。过程见 [复现记录](REPRODUCTION.md)，产物摘要与证据来源见 [设备验收记录](device-validation-20261030.json)。
+外设第二轮只更换内核及载荷，验证亮度 DMA 缓冲区修复。持有人确认设置/控制中心调光、锁屏唤醒及其他外设和 Wi-Fi 网页回归正常；退出后已完整重启回 Android。过程见 [复现记录](validation/REPRODUCTION.md)，产物摘要与证据来源见 [设备验收记录](validation/device-validation-20261030.json)。
 
 ## 已验证的事实
 
@@ -25,7 +25,7 @@
 - 首次分区/刷写、通用设备配置、充电全过程和用户状态持久保存未验收。
 - 桌面卡顿、功耗及 GPU SMMU/基带退出恢复仍需处理；各轮之间要求完整重启，不能直接连续 rerun。
 - 电话、移动数据、完整音频、摄像头、蓝牙、定位及其他未覆盖硬件不列为可用。
-- GPU 初始化表与 APSL 内核组合的分发条件仍未解决，见 [GPU 许可说明](GPU_LICENSE.md)。
+- GPU 初始化表与 APSL 内核组合的分发条件仍未解决，见 [GPU 许可说明](legal/GPU_LICENSE.md)。
 
 ## 下一步
 
@@ -33,4 +33,8 @@
 2. 将人工设备参数核对改为可审查的配置输入，再单独验证首次安装。
 3. 分别测试手电筒档位、持续运行/功耗、音频等未通过项目；不以界面正常代替硬件验收。
 
-详见 [验证记录](VALIDATION.md)与[开发待办](RELEASE_CHECKLIST.md)。
+详见 [验证记录](validation/VALIDATION.md)与[开发待办](development/RELEASE_CHECKLIST.md)。
+
+## 当前分支任务
+
+`test/first-install` 的[首次安装验收计划](development/FIRST_INSTALL.md)已建立：先核对当前分区，恢复 Android 布局并验收，再重新分区、写入回读和启动。持有人已恢复 Android GPT；重进 TWRP 后主备 GPT 与核验过的原始布局一致，内核 userdata 容量约 113.09 GiB，darwin 已移除。尚未重建数据文件系统或验证 Android 启动，首次安装未完成。上述已验证功能范围不变。

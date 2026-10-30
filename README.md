@@ -65,13 +65,13 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 
 构建使用 **Linux x86_64**，开发环境为 **Ubuntu 26.04.1 LTS**。本仓库通过固定上游版本和 dipper 适配补丁组织源码。
 
-1. [构建教程](docs/BUILD.md)与[输入材料](docs/INPUTS.md)：固定来源、校验、编译内核和 UEFI。
-2. [用户空间与打包](docs/USERLAND.md)：提取 IPSW、编译适配程序、生成启动卷和系统镜像。
-3. [安装与启动教程](docs/INSTALL.md)：备份、分区、写入系统、回读校验和启动；已有 darwin 分区见 [复用布局测试](docs/EXISTING_INSTALL.md)。
+1. [构建教程](docs/build/BUILD.md)与[输入材料](docs/build/INPUTS.md)：固定来源、校验、编译内核和 UEFI。
+2. [用户空间与打包](docs/build/USERLAND.md)：提取 IPSW、编译适配程序、生成启动卷和系统镜像。
+3. [安装与启动教程](docs/install/INSTALL.md)：备份、分区、写入系统、回读校验和启动；已有 darwin 分区见 [复用布局测试](docs/install/EXISTING_INSTALL.md)。
 
 **首次安装需要划出独立的 `darwin` 分区，会清空 Android 用户数据。** 系统持久写入该分区，之后通过临时加载 UEFI 启动。
 
-仓库仅提供源码、补丁和构建工具。系统镜像、专有 SDK、设备固件与备份需自行合法获取。构建及实机测试的详细依据见 [验证记录](docs/VALIDATION.md)。
+仓库仅提供源码、补丁和构建工具。系统镜像、专有 SDK、设备固件与备份需自行合法获取。构建及实机测试的详细依据见 [验证记录](docs/validation/VALIDATION.md)。
 
 ## 已知问题
 
@@ -103,6 +103,8 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 
 ## 许可证
 
-各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围见 [许可说明](LICENSE.md) 和 [LICENSES](LICENSES/)。其他文件的许可范围见 [许可证说明](docs/LICENSE_REVIEW.md)。
+各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围见 [许可说明](LICENSE.md) 和 [LICENSES](LICENSES)。其他文件的许可范围见 [许可证说明](docs/legal/LICENSE_REVIEW.md)。
 
 本项目为独立研究项目，与设备厂商、系统厂商及所参考项目不存在官方隶属关系。
+
+全部文档按用途分类，见 [文档导航](docs/README.md)。

@@ -2,7 +2,7 @@
 
 更新日期：2026-10-30。
 
-本页说明 `source-manifest.json` 中 74 个目标源文件及仓库附带代码/配置的许可依据。判断依据包括固定上游提交、文件级声明和代码来源。逐文件清单见 [license-inventory.json](../license-inventory.json)。
+本页说明 `source-manifest.json` 中 74 个目标源文件及仓库附带代码/配置的许可依据。判断依据包括固定上游提交、文件级声明和代码来源。逐文件清单见 [license-inventory.json](../../license-inventory.json)。
 
 ## 已有许可声明
 

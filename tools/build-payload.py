@@ -70,7 +70,7 @@ def main():
         source = k / 'fw-wifi' / name
         expected = 'fef6539e0127579536bc977be57a90d018b83f2931fedc3a8870fbe38d6c4127'
         if not source.is_file() or sha256(source) != expected:
-            raise SystemExit('Missing or incorrect WCN3990 firmware-5.bin; see docs/INPUTS.md')
+            raise SystemExit('Missing or incorrect WCN3990 firmware-5.bin; see docs/build/INPUTS.md')
         data = subprocess.check_output([str(reader), 'cat', str(inputs['root.apfs']), '/fw/' + name])
         if hashlib.sha256(data).hexdigest() != expected:
             raise SystemExit('WCN3990 firmware-5.bin missing or stale in root.apfs; rebuild userland')

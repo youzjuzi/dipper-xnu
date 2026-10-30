@@ -70,7 +70,7 @@ fastboot get_staged kernel-log.txt
 
 ## 5. Wi-Fi 与网页测试
 
-在基础桌面测试通过、手机完整重启回 Android 后，先按 [外部材料](INPUTS.md#wcn3990-wi-fi-特性描述文件) 补齐 `firmware-5.bin` 并重建用户空间，再生成新载荷：
+在基础桌面测试通过、手机完整重启回 Android 后，先按 [外部材料](../build/INPUTS.md#wcn3990-wi-fi-特性描述文件) 补齐 `firmware-5.bin` 并重建用户空间，再生成新载荷：
 
 ```sh
 python3 tools/build-payload.py --wifi --seconds 900 --output work/runs/wifi-01
@@ -109,6 +109,6 @@ python3 tools/build-payload.py --wifi --peripherals --seconds 900 --output work/
 | 壁纸、小组件 | 桌面背景正常，日历等小组件有内容；本轮不保存旧 var_store，重启后的持久保存另测 |
 | Wi-Fi 回归 | 在同时启用外设时重新连接网络并打开、刷新网页 |
 
-2026-10-30 首次外设测试发现亮度调节无效：DSI 命令缓冲区分配到了 4 GiB 以上，而 DMA 地址寄存器只有 32 位。修复在 `kmem_alloc_contig` 中限制物理页号，并按实际 `PAGE_SIZE` 检查完整页范围；异常返回时释放缓冲区，避免每次拖动遗留一页。更新内核后须用实机验证，不能仅以编译通过为结论。结果见 [设备验收记录](device-validation-20261030.json)。
+2026-10-30 首次外设测试发现亮度调节无效：DSI 命令缓冲区分配到了 4 GiB 以上，而 DMA 地址寄存器只有 32 位。修复在 `kmem_alloc_contig` 中限制物理页号，并按实际 `PAGE_SIZE` 检查完整页范围；异常返回时释放缓冲区，避免每次拖动遗留一页。更新内核后须用实机验证，不能仅以编译通过为结论。结果见 [设备验收记录](../validation/device-validation-20261030.json)。
 
 手电筒分档调光历史上肉眼不明显，需单列结果。完整音频、电话/移动数据，以及未建立小米 8 验收基线的摄像头、蓝牙、定位与其他传感器，不因上述检查通过而记为可用。长期功耗、充电全过程和持久保存也需要独立测试。
