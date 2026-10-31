@@ -37,7 +37,9 @@ sha256sum -c SHA256SUMS
 5. 更新状态、验证记录和适用的更新日志，审查差异；最后更新文件摘要并校验。
 6. 只暂存审查过的文件，在任务分支提交。确认验证与风险边界后合入 `main`；push 和发布按持有人授权执行。
 
-**补丁导出目前仍需人工审查，没有统一的安全导出工具。** 不要把工作区历史 `archive/20261030/reproduction-logs/` 中的脚本直接作为通用导出命令：它们有固定路径、历史白名单和快照同步行为。把安全导出和干净重放工具化，是近期维护任务。
+补丁导出使用 `python3 tools/prepare/patchtool.py export --out work/runs/<run-id>/export`，默认只读日常源码，将补丁、清单和差异报告写入新目录。逐项审查清单外文件，新增用 `--add COMPONENT:PATH` 登记；删除自动记录。工具从锁定 Git 对象重建正确基线，共用准备工具的 XNU 叠加逻辑，并恢复已知 loader 身份占位字段；无法确认的隐私内容会阻止导出。只有明确使用 `--write` 才更新仓库补丁和清单，采纳后仍须复核许可与摘要。
+
+干净验证使用 `prepare.py --prepare --dest ../experiments/patchtool/clean`，再运行 `patchtool.py replay --tree ../experiments/patchtool/clean`，核对补丁检查/应用、摘要、模式和清单外差异。提交前运行 `patchtool.py scan` 与离线自测 `tools/tests/test-patchtool.py`；隐私 error 必须处理，历史 warning 逐项审查。完整用法见[工具导航](../../tools/README.md#补丁导出与重放)。历史归档脚本仍不是通用导出入口。
 
 ## 补丁与实际源码的对应关系
 

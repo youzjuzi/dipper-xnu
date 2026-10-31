@@ -4,10 +4,10 @@
 
 | 目录 | 用途 | 入口 |
 | --- | --- | --- |
-| prepare/ | 固定源码准备、SDK 校验、IPSW 提取 | [prepare.py](prepare/prepare.py)、[check-sdk.py](prepare/check-sdk.py)、[prepare-ios.py](prepare/prepare-ios.py) |
+| prepare/ | 固定源码准备、补丁维护、SDK 校验、IPSW 提取 | [prepare.py](prepare/prepare.py)、[patchtool.py](prepare/patchtool.py)、[check-sdk.py](prepare/check-sdk.py)、[prepare-ios.py](prepare/prepare-ios.py) |
 | build/ | loader/UEFI、用户态编译及镜像/载荷打包 | [build-loader-uefi.sh](build/build-loader-uefi.sh)、[build-userland.sh](build/build-userland.sh)、[build-payload.py](build/build-payload.py)、[pack-darwin.py](build/pack-darwin.py) |
 | partition/ | 离线生成分区/恢复方案，核验回读 | [partition-darwin.py](partition/partition-darwin.py)、[restore-android-layout.py](partition/restore-android-layout.py) |
-| tests/ | 合成 GPT、CLI 与假设备保护测试 | [test-partition-darwin.py](tests/test-partition-darwin.py)、[test-restore-android-layout.py](tests/test-restore-android-layout.py) |
+| tests/ | 合成 GPT、CLI 与假设备保护测试 | [test-patchtool.py](tests/test-patchtool.py)、[test-partition-darwin.py](tests/test-partition-darwin.py)、[test-restore-android-layout.py](tests/test-restore-android-layout.py) |
 
 `build/cc-gnu17/cc` 是构建兼容包装器，保留原位置，由 UEFI 构建入口使用。分区工具只在主机生成方案；生成的设备脚本由持有人核对后执行，不会自动操作手机。
 
@@ -18,9 +18,29 @@
 - 回归测试：
 
 ```sh
+PYTHONDONTWRITEBYTECODE=1 python3 tools/tests/test-patchtool.py
 PYTHONDONTWRITEBYTECODE=1 python3 tools/tests/test-restore-android-layout.py
 PYTHONDONTWRITEBYTECODE=1 python3 tools/tests/test-partition-darwin.py
 ```
+
+## 补丁导出与重放
+
+工具仅依赖 Python 标准库和 Git。`export` 只读 `work/`，从其本地 Git 对象读取锁定提交，在临时目录复用准备工具的叠加流程；不联网。XNU 基线是 Apple 加 HackiOS，不是内层仓库 HEAD。共享目录按源码清单分属组件。
+
+```sh
+python3 tools/prepare/patchtool.py export --out work/runs/<run-id>/export
+python3 tools/prepare/prepare.py --prepare --dest ../experiments/patchtool/clean
+python3 tools/prepare/patchtool.py replay --tree ../experiments/patchtool/clean
+python3 tools/prepare/patchtool.py scan
+```
+
+导出目录必须不存在，包含各组件补丁、`source-manifest.json` 和 `report.json`。报告列出清单外差异、删除和显式新增，也检查已初始化子模块的改动及 gitlink 版本；辅助子模块缺少锁定对象时明确报告，保持离线且不纳入其文件；未登记文件不会自动进入补丁。`--component NAME` 可重复；新增使用 `--add COMPONENT:PATH`，只选一个组件时也可使用 `--add PATH`。删除项以空摘要和模式登记。已知 loader 身份字段恢复为现有公开补丁的占位值；其他隐私命中或无法确认的二进制源码会阻止导出。补丁保留原始文件字节，元数据使用 LF，无时间戳或绝对路径；文件按路径排序，逐文件生成固定 Git diff。
+
+`--write` 明确要求将已检查的导出补丁及所选组件清单写回仓库，默认不启用。采纳前审查报告和差异，同时复核许可清单；随后更新摘要。构建垃圾排除规则不代表其他未登记文件可以删除。
+
+`replay` 的输入是 `prepare.py` 已应用发布补丁的独立干净树。它先核对输入树的清单摘要和完整模式，再从锁定对象重建基线，逐个执行 `git apply --check` 和应用，核对重放摘要、模式与清单外差异，不重复修改输入树。旧式 unified 补丁不携带模式，以现有清单恢复权限；新导出格式还会核对补丁编码的可执行位。`--patch-dir DIR` 可验证完整导出目录中的补丁与清单，输入树须与该清单一致。失败摘录最多 50 行。准备工具默认仍使用 `work/`，`--dest` 指定的路径已存在时也会拒绝覆盖。
+
+`scan [PATH ...]` 默认检查 Git 跟踪文件及补丁，仅打印文件、行号和分级类别，不回显命中值。私人路径、非允许 GUID、非零 MAC 和序列号属于 error；历史过程编号与署名字样属于 warning。允许表只包含公开协议/类型、固定上游示例和测试占位标识，并在脚本中注明来源。扫描属于格式检查，不能替代人工隐私与许可审查。
 
 ## 路径迁移说明（2026-10-31）
 

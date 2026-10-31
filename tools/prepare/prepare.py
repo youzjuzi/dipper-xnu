@@ -35,9 +35,31 @@ def prepare_submodules(edk2, unixnu):
     # are not part of this HackiOS firmware build.
     run(*args, '--', 'drivers/DarwinBoot', cwd=unixnu)
 
+def assemble_baseline(trees):
+    """Overlay the pinned userland and HackiOS XNU baseline, before port patches."""
+    k = trees['hackios']
+    # Separate checkout retained for provenance; overlay only tracked userland files.
+    names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=trees['userland']).decode().split('\0')
+    for name in filter(None, names):
+        if name in {'README.md', 'LICENSE', '.gitignore'} or name.startswith('prebuilt/'):
+            continue
+        src, dst = trees['userland'] / name, k / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst, follow_symlinks=False)
+    x = k / 'xnu-src/xnu-8796.121.2'
+    x.parent.mkdir(parents=True)
+    shutil.move(str(trees['xnu']), str(x))
+    run('git', 'apply', '--check', str(k / 'xnu/redwood.patch'), cwd=x)
+    run('git', 'apply', str(k / 'xnu/redwood.patch'), cwd=x)
+    shutil.copytree(k / 'xnu/files', x, dirs_exist_ok=True)
+    return {'xnu-mi8': x, 'hackios-kernel': k, 'hackios-userland': k,
+               'edk2-sdm845': trees['edk2'], 'unixnu': trees['unixnu'],
+               'simpleinit': trees['edk2'] / 'GPLDrivers/Library/SimpleInit'}
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare', action='store_true', help='fetch sources into a new work/ directory')
+    parser.add_argument('--dest', type=Path, help='new source directory (default: work/)')
     args = parser.parse_args()
     sources = json.loads((ROOT / 'upstream.lock.json').read_text())
     if not args.prepare:
@@ -45,12 +67,13 @@ def main():
             print(source['name'], source['commit'], source['url'])
         print('Plan only. Use --prepare to fetch into work/.')
         return
-    work = ROOT / 'work'
-    if work.exists():
-        raise SystemExit('work/ already exists; refusing to overwrite. Preserve/move it before retrying.')
+    work = args.dest if args.dest is not None else ROOT / 'work'
+    if work.exists() or work.is_symlink():
+        raise SystemExit('Destination already exists; refusing to overwrite.')
+    work = work.resolve()
     # Verify the release itself before consuming its patches.
     run('sha256sum', '-c', 'SHA256SUMS', cwd=ROOT)
-    work.mkdir()
+    work.mkdir(parents=True)
     trees = {}
     for source in sources:
         dest = work / source['name']
@@ -62,24 +85,8 @@ def main():
             raise SystemExit('Commit mismatch: ' + source['name'])
         trees[source['name']] = dest
     k = trees['hackios']
-    # Separate checkout retained for provenance; overlay only tracked userland files.
-    names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=trees['userland']).decode().split('\0')
-    for name in filter(None, names):
-        if name in {'README.md', 'LICENSE', '.gitignore'} or name.startswith('prebuilt/'):
-            continue
-        src, dst = trees['userland'] / name, k / name
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst, follow_symlinks=False)
     prepare_submodules(trees['edk2'], trees['unixnu'])
-    x = k / 'xnu-src/xnu-8796.121.2'
-    x.parent.mkdir(parents=True)
-    shutil.move(str(trees['xnu']), str(x))
-    run('git', 'apply', '--check', str(k / 'xnu/redwood.patch'), cwd=x)
-    run('git', 'apply', str(k / 'xnu/redwood.patch'), cwd=x)
-    shutil.copytree(k / 'xnu/files', x, dirs_exist_ok=True)
-    targets = {'xnu-mi8': x, 'hackios-kernel': k, 'hackios-userland': k,
-               'edk2-sdm845': trees['edk2'], 'unixnu': trees['unixnu'],
-               'simpleinit': trees['edk2'] / 'GPLDrivers/Library/SimpleInit'}
+    targets = assemble_baseline(trees)
     for name, target in targets.items():
         patch(name, target)
     for group in json.loads((ROOT / 'source-manifest.json').read_text()):
