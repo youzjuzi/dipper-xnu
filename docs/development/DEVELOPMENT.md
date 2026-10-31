@@ -126,11 +126,13 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 ### 当前开发现场交接（2026-10-31，覆盖更新，接手时重新核对）
 
 - **任务/基线**：[首次安装验收](FIRST_INSTALL.md) 已合入 `main`；日常开发从 `main` 新建任务分支。未建立第二套源码。
+- **当前任务**：桌面卡顿研究，分支 `perf/cpu-load`（基于 `main` `ba6d298`）。已测得：重载时 CPU 大小核整簇被降到正好半速（调频请求不变，原因待查），渲染线程被挤到小核时掉帧最多，GPU 忙碌与掉帧不相关；CPU 每帧还承担 GL 翻译、IOSurface 缓存写回、整帧拷贝上屏等工作。方向：查清降频原因，测量并削减这些 CPU 搬运开销，调整渲染线程的核心分配。`fix/wifi` 已搁置，未合入。
+- **本任务的未导出修改**：`work/` 的 XNU 里多了默认关闭的剖析仪表（boot-arg `perfprof=1` 才启用），涉及 `bsd/dev/redwood_cpufreq.c`、`bsd/dev/redwood_adreno.c`、`bsd/dev/mi8_adreno.c`、`iokit/Kernel/RedwoodGPU.cpp`、`osfmk/kern/sched_prim.c`；尚未写入 `patches/`，候选导出与重放记录在 `work/runs/20261031-perf-04/`。设备证据在 `work/runs/20261031-perf-dev-01`、`20261031-perf-03`、`20261031-perf-04`。
 - **源码现场**：日常源码只在 `work/`（被 Git 忽略）。`xnu-8796.121.2` 内层仓库 HEAD 为 Apple 原版 `c54f35c`，HackiOS 基线与 dipper 修改都以未提交形式叠加在其上（74 个已改文件、86 个未跟踪项，`BUILD/` 为构建产物），无内层提交保护；公共补丁继续保留零 GUID，不导出设备身份值。
 - **设备现状**：新 darwin 分区已进入 iOS（持有人确认）。分区、恢复、固件提取、本机 loader/UEFI 重编译均有实测；证据索引见 [FIRST_INSTALL](FIRST_INSTALL.md) 与 [VALIDATION](../validation/VALIDATION.md)，原始记录在 `work/runs/20261030-first-install-*`、`20261031-firmware-01`。当前手机不得重复执行分区或旧恢复脚本。
 - **私人配置**：`local/README.md`、`local/index.json`。原始设备信息不得提交。
 - **未完成**：首次安装阶段 07 的逐项外设回归与退出后完整重启 Android；完整 XNU `all` 构建失败；未在干净环境从零构建；补丁导出工具 `tools/prepare/patchtool.py` 已合入，但现有补丁尚未用它重新导出，新旧补丁格式不同，采纳须单独审查；GPU/基带退出恢复未闭合，设备轮次之间必须完整重启。
-- **下一步**：修复 XNU `all` → 干净环境从零构建，之后再做功能开发。补丁导出一律用 `patchtool`，先 `export` 到 `work/runs/` 审查，不直接 `--write`。
+- **下一步**：本分支先查清降频原因（温度、电池、限流状态可视化，只读，不改保护阈值），再逐项测量帧缓冲拷贝、IOSurface 导入与缓存写回的开销。修复 XNU `all` 与干净环境从零构建仍待做。补丁导出一律用 `patchtool`，先 `export` 到 `work/runs/` 审查，不直接 `--write`。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 
