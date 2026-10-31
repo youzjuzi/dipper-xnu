@@ -121,26 +121,14 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 接手顺序固定为：AGENTS → docs/README（文档导航）→ STATUS（功能与设备边界）→ 本文（开发流程和现场交接）。每项任务结束更新下面的现场交接，不另建多个 current/latest 状态文件。设备标识、原始日志和私人配置只引用本机位置，不复制到公共文档。
 
-### 当前开发现场交接（2026-10-31，接手时重新核对）
+### 当前开发现场交接（2026-10-31，覆盖更新，接手时重新核对）
 
-- 当前文档任务：固件提取教程与实测记录已在 main 的 eafedf9 推送；继续补 TWRP 致谢、官方首次安装和进入 Recovery 的说明。本次补充随文档提交保存，已获授权推送 main，远端状态以 Git 查询为准；未操作手机；已全局检查公开文档，将启动/构建教程的内部轮次和状态页冗长过程改为通用说明，私人证据索引仅保留在维护/验证文档；公开设备教程已去除固定实验目录与对话叙述，证据位置保留在交接/验证记录。工具分类提交记录保持不变。
-- 固件提取实测：work/runs/20261031-firmware-01/，Android 10 / MIUI V12.5.2.0.QEACNXM、启动完成和 su root 已实时核对。教程 MODE=root 提取 4 个文件、手机端前后与主机摘要、固定摘要及既有输入字节比较全部通过；没有覆盖输入或操作分区。其他提取模式未复测。
-
-- 当前任务：[首次安装完整验收](FIRST_INSTALL.md)，成果从 test/first-install（基线 f784c8e）合入本地 main，后续开发从 main 新建对应任务分支。恢复 Android、重新分区、镜像回读及本机新 loader/UEFI 启动链已走通，持有人确认进入 iOS；阶段 07 的逐项回归与退出收尾待验。未建立第二套源码；本次合并不改动忽略的 work/ 和 local/。
-- 本地主线纳入目录规范、docs 分类迁移、分区/恢复工具及首次安装记录，保留 test/first-install 历史分支。main 的 3cf9246 与 test/first-install 的 8d80fc5 已按持有人授权推送并核对；工具整理已纳入主线并推送。当前提交号以 git log -1 为准，远端状态需按查询时点理解。
-- 日常源码固定在 work/；第 08 轮仅修改本机 loader 的 darwin 唯一 GUID。74 项适配清单中 73 项匹配公共摘要，loader 一项匹配更新后的本机配置；清单外源码树未完整审计。公共补丁继续保留零 GUID，不导出设备身份值。
-- 私人配置见 local/README.md 和 local/index.json；恢复备份在 local/backups/20261030-first-install-01/。原始设备信息不得提交。
-- 本次证据在 work/runs/20261030-first-install-01/ 至 03/；第 03 轮确认恢复后的主备 GPT 字节未变、内核识别完整 userdata 容量。旧的 iOS 启动证据不能代替本次首次安装验收。
-- 工具新增：tools/partition/restore-android-layout.py 和测试、安装说明已随首次安装成果推送；本次仅迁移路径；本机历史配置在 local/devices/mi8/android-restore-20261030.json，回放在 work/runs/20261030-restore-tool-01/。配置对应恢复前历史状态，禁止直接在已恢复手机重跑；通用脚本真机执行待验。
-- 恢复阶段完成：持有人已 Format Data 并完成 Android 初始化，提供 sys.boot_completed=1 与 /data 总量 116193656 KiB 的 ADB 输出；证据在 work/runs/20261030-first-install-04/。当时 root 未核验；2026-10-31 已重新确认 su uid=0，见固件提取轮次。
-- 第 05 轮已准备约 24 GiB darwin 分区方案、当前 GPT 备份及私有脚本，见 work/runs/20261030-first-install-05/。持有人已执行分区脚本；实时回读主备 GPT 与 expected-gpt-entries.bin 一致，前 20 项未变。旧脚本已完成，不得重复执行。
-- 第 06/07 轮：Recovery 重启后的 GPT 与 userdata/darwin 节点容量核验通过；持有人完成 Format Data，提供 Android 启动完成及 /data 总量 91422752 KiB 的 ADB 输出，阶段 04 通过。证据在 work/runs/20261030-first-install-06/、07/。
-- 通用分区工具：tools/partition/partition-darwin.py、测试和 docs/install/PARTITION_DARWIN.md 已随首次安装成果推送；本次仅迁移路径；复用恢复工具保护逻辑，14 项新测试及 17 项恢复回归通过。本机历史配置在 local/devices/mi8/darwin-partition-20261030.json，离线回放在 work/runs/20261030-partition-tool-01/，完整条目匹配实机成功结果。当前手机不得重复执行分区，新生成脚本未单独实机执行。
-- 第 08 轮已按教程重编译 loader/UEFI 并验证新 GUID、UEFI 内嵌 loader 与 boot 镜像结构，候选在 work/runs/20261030-first-install-08/candidate/。内核边界未变，内核与用户态沿用已核验产物；系统镜像完整摘要通过。local/device-layout.json 与 device-source-config.json 已同步新布局，并撤销旧系统区回读匹配标记。旧源码/启动产物在 local/backups/20261030-first-install-08/。
-- 第 09 轮回读通过：新 darwin 前 8365539328 字节 SHA256 与主机镜像一致，主备 GPT 未变，local/device-layout.json 已记为新布局系统区回读匹配。原始证据在 work/runs/20261030-first-install-09/；没有 fastboot 操作日志，验收基于代理实时回读。
-- 第 10 轮：代理确认 xnuloader，持有人确认新分区成功进入 iOS；boot.log 仅为命令确认，不冒充详细内核日志。证据在 work/runs/20261030-first-install-10/。安装教程拆为 INSTALL（分区/写入/回退）与 STARTUP（配置/重建/启动），恢复说明已合并。
-- 文档维护（2026-10-31）：首页与 CHANGELOG 已汇总首次安装进展，详细证据仍在 FIRST_INSTALL 与 VALIDATION；未新增平行开发日志，未重跑设备操作。
-- 下一步：阶段 07 补逐项外设回归和退出后的完整 Android 重启；教程与第 08–10 轮记录已随首次安装合并纳入主线并推送。完整 XNU all 与补丁导出工具化仍待完成。
+- **任务/基线**：[首次安装验收](FIRST_INSTALL.md) 已合入 `main`；日常开发从 `main` 新建任务分支。未建立第二套源码。
+- **源码现场**：日常源码只在 `work/`（被 Git 忽略）。`xnu-8796.121.2` 内层仓库 HEAD 为 Apple 原版 `c54f35c`，HackiOS 基线与 dipper 修改都以未提交形式叠加在其上（74 个已改文件、86 个未跟踪项，`BUILD/` 为构建产物），无内层提交保护；公共补丁继续保留零 GUID，不导出设备身份值。
+- **设备现状**：新 darwin 分区已进入 iOS（持有人确认）。分区、恢复、固件提取、本机 loader/UEFI 重编译均有实测；证据索引见 [FIRST_INSTALL](FIRST_INSTALL.md) 与 [VALIDATION](../validation/VALIDATION.md)，原始记录在 `work/runs/20261030-first-install-*`、`20261031-firmware-01`。当前手机不得重复执行分区或旧恢复脚本。
+- **私人配置**：`local/README.md`、`local/index.json`。原始设备信息不得提交。
+- **未完成**：首次安装阶段 07 的逐项外设回归与退出后完整重启 Android；完整 XNU `all` 构建失败；补丁导出/重放尚无工具；未在干净环境从零构建；GPU/基带退出恢复未闭合，设备轮次之间必须完整重启。
+- **下一步**：补丁导出/重放工具 → 修复 XNU `all` → 干净环境从零构建，之后再做功能开发。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 
