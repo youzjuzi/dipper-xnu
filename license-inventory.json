@@ -1,5 +1,5 @@
 {
-  "review_date": "2026-10-30",
+  "review_date": "2026-11-05",
   "original_code_authorization": "Maintainer confirmed original human/AI-authored portions may use MIT; excludes third-party derivatives.",
   "files": [
     {
@@ -24,7 +24,7 @@
       "upstream_file_exists": false,
       "license": "UNRESOLVED",
       "basis": "Direct #include and execution of GPL-derived table established; no MIT relicense or combination compatibility claim",
-      "sha256": "437bd6b7bf030919a8eb8746c820f742a783309e5efb82accf5198a24492b014"
+      "sha256": "e38cad7ac3ad71d97cd686414044862e13a3023bf9f24d26b25fad0d727b6d02"
     },
     {
       "component": "xnu-mi8",
@@ -128,7 +128,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "298fc8c4cfc217bdd9b8da8ebce7d4c137a9fea918eabcc82cccc0e54597eaad"
+      "sha256": "37f205855b3356c9577f17fa41e4f590316198486d9a67c261e1787c4ca537cd"
     },
     {
       "component": "xnu-mi8",
@@ -152,7 +152,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "21d46c2cf751d49de89d1f4e0cc8198b97bb82b01d9af0d4b4a67c5b4fc5c8ec"
+      "sha256": "f475b52cc21cbfd8edf6a06db16189e0101e216e49e2abdbed3497c370fe9fbd"
     },
     {
       "component": "xnu-mi8",
@@ -232,7 +232,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "87550be4076d18459f40396026bf84f95b8db86bb56cd261a0340d17c1170ce2"
+      "sha256": "56b802fce93fe24d5bba05f23c34de62cd49429ab50fa168af0ad94babb3cbe3"
     },
     {
       "component": "xnu-mi8",
@@ -248,7 +248,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "3bfca8e4dda50427a1d3367c53884fbfe995d4a1e2dc29198bdf1cd1af7db8a0"
+      "sha256": "08771e80db344bc06378afb1efbbae43a3202e11f79ddafa23b9b3b7d9571cb2"
     },
     {
       "component": "xnu-mi8",
@@ -272,7 +272,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "267e2c8aeace17391daf38ca63c2544dae34713672b178de769b2faecb07f7d8"
+      "sha256": "0c4afb6079abba3df73ef8cb38f85a28d33a75447fcc06ba6e362a92d103370c"
     },
     {
       "component": "hackios-kernel",
@@ -487,8 +487,8 @@
       "path": "userland/src/eagl.c",
       "upstream_file_exists": true,
       "license": "MIT",
-      "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "a07fce664c957e3ed622c9e0e4db72885f86200ae6a86b7bbf1a036686eaaa58"
+      "basis": "Pinned userland root MIT license; original additions follow existing maintainer authorization",
+      "sha256": "8e437dff78effaa3127cef7d1386d4d259fb7e871c6a615515ca446382f774d6"
     },
     {
       "component": "hackios-userland",
@@ -593,6 +593,46 @@
       "license": "APSL-2.0",
       "basis": "Pinned HackiOS kernel repository license; existing source modifications",
       "sha256": "7dc8c996c5e684af4435831eb553274e85294668a5651c73a6993153a1073aca"
+    },
+    {
+      "component": "hackios-userland",
+      "path": "userland/src/gl_osmesa.c",
+      "upstream_file_exists": true,
+      "license": "MIT",
+      "basis": "Pinned userland root MIT license at 906425b75e02b4f99eb5d7bb1ef7c9583472d772; original additions follow existing maintainer authorization",
+      "sha256": "0008cd5aee469683522f7a4615e7e8536f84bda37f8460cf3315e7daa4a31b9a"
+    },
+    {
+      "component": "hackios-userland",
+      "path": "userland/src/redwood_gl.h",
+      "upstream_file_exists": true,
+      "license": "MIT",
+      "basis": "Pinned userland root MIT license at 906425b75e02b4f99eb5d7bb1ef7c9583472d772; original additions follow existing maintainer authorization",
+      "sha256": "70f0296fb551260a6d602dd4b7b7d279e476424539d2bd623c7f4b4a238c52bb"
+    },
+    {
+      "component": "hackios-userland",
+      "path": "userland/src/rwtouch.c",
+      "upstream_file_exists": true,
+      "license": "MIT",
+      "basis": "Pinned userland root MIT license at 906425b75e02b4f99eb5d7bb1ef7c9583472d772; original additions follow existing maintainer authorization",
+      "sha256": "092f011f0674b73b23c46a38a3df895314ab1ef1fa777c0e816887d6aacf8e25"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/dev/redwood_battery.c",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "HackiOS battery monitor supplied in pinned xnu/files overlay; HackiOS root APSL-2.0 applies",
+      "sha256": "1afe42ea3773546dd691c3cde939a86a2681b8d6c8db7352d73dd0cb4a404ccb"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "osfmk/kern/sched_prim.c",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0 AND LicenseRef-CMU",
+      "basis": "Apple APSL and CMU notices retained in pinned XNU sched_prim.c",
+      "sha256": "0dfbdd8a0256e7c4040e8648bc0f61e316779d272b0ea5c244f3d6e8d78c23eb"
     }
   ]
 }

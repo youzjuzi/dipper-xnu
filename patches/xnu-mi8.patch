@@ -1,6 +1,8 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..e68991b4ab42f6bdbfbab776a32d863226a0ce34 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -113,6 +113,13 @@
+@@ -113,6 +113,13 @@ bsd/dev/redwood_input.c		standard
  bsd/dev/redwood_virtio_input.c	standard
  bsd/dev/redwood_goodix.c	standard
  bsd/dev/redwood_buttons.c	standard
@@ -14,6 +16,9 @@
  bsd/dev/redwood_battery.c	standard
  bsd/dev/redwood_ufs.c	standard
  bsd/dev/redwood_ufshc.c	standard
+diff --git a/bsd/dev/mi8_a630_hw_init.inc b/bsd/dev/mi8_a630_hw_init.inc
+new file mode 100644
+index 0000000000000000000000000000000000000000..f571c1cc1ddd8f9708d4c7da3fc8841e41cbe724
 --- /dev/null
 +++ b/bsd/dev/mi8_a630_hw_init.inc
 @@ -0,0 +1,463 @@
@@ -480,9 +485,12 @@
 +	/* Static replay only: caller must use ranges where the GMU/security/IRQ steps interleave. */
 +	return a630_hw_init_range(gpu_base, 0, A630_INIT_COUNT);
 +}
+diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5e5597ac6
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,4718 @@
+@@ -0,0 +1,5071 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -526,6 +534,8 @@
 +#include <sys/systm.h>
 +#include <sys/sysctl.h>
 +#include <kern/locks.h>
++#include <kern/cpu_data.h>
++#include <os/atomic_private.h>
 +#include <vm/vm_kern.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -533,6 +543,8 @@
 +extern uint64_t kvtophys(vm_offset_t va);
 +extern kern_return_t thread_terminate(thread_t thread);
 +extern void loader_log_putc(char c);
++extern void redwood_tl(const char *format, ...) __printflike(1, 2);
++extern boolean_t ml_set_interrupts_enabled(boolean_t enable);
 +
 +static int say(const char *format, ...) __printflike(1, 2);
 +
@@ -3126,6 +3138,14 @@
 +#define KEEP_VA_SIZE            0xb0000000ull
 +#define KEEP_GRANULE            0x10000ull
 +#define KEEP_FENCE_AT           0x40u           /* in the memptrs page: where the core writes the finished submission */
++/* In the already mapped 4 KiB memptrs page, away from the fence/cache line. */
++#define KEEP_PROFILE_AT         0x400u
++#define KEEP_PROFILE_SLOTS      64u
++#define KEEP_PROFILE_BYTES      (16u * KEEP_PROFILE_SLOTS)
++#define CP_PROFILE_REG_TO_MEM   0x3eu
++#define CP_PROFILE_ALWAYS_ON    0x0980u
++_Static_assert(KEEP_PROFILE_AT >= KEEP_FENCE_AT + 0x40u, "timestamp/fence overlap");
++_Static_assert(KEEP_PROFILE_AT + KEEP_PROFILE_BYTES <= 0x1000u, "timestamp page overflow");
 +#define KEEP_RING_WORDS         8192u
 +#define CP_INDIRECT_BUFFER_OP   0x3fu
 +#define CP_EVENT_WRITE_OP       0x46u
@@ -3257,6 +3277,70 @@
 +	keep_ring_sent = keep_ring_at;
 +	wr(gpu3d + 4 * 0x0807, keep_ring_at);
 +	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++/* The GPU writes both ends; CPU reads only normal mapped memory after the existing
++ * completion fence. No idle wait: this is the CP interval, not a pipeline-drained timer. */
++extern uint32_t perfprof_enabled;
++extern void perfprof_gpu_mi8_busy(uint64_t ticks, uint64_t timed, uint64_t dropped, uint64_t invalid);
++static uint32_t keep_profile_timed;
++static uint32_t keep_profile_tags[KEEP_PROFILE_SLOTS];
++
++static bool
++keep_profile_on(void)
++{
++	return __atomic_load_n(&perfprof_enabled, __ATOMIC_RELAXED) != 0;
++}
++
++/* Same packet/payload as redwood_adreno.c:ring_time(), with this path's mapped IOVA. */
++static void
++keep_profile_time(uint32_t fence, uint32_t end)
++{
++	uint64_t address = g3d_regions[2].address + KEEP_PROFILE_AT + 16u * (fence % KEEP_PROFILE_SLOTS) + 8u * end;
++	keep_ring_cmd(CP_PROFILE_REG_TO_MEM, 3);
++	keep_ring(CP_PROFILE_ALWAYS_ON | 2u << 18 | 1u << 30);
++	keep_ring((uint32_t)address);
++	keep_ring((uint32_t)(address >> 32));
++}
++
++/* Called under the same serialization as keep_fence/submit; no new device-register read.
++ * Tags reject slots already assigned to a newer, possibly still in-flight submission. */
++static void
++keep_profile_times(uint32_t done)
++{
++	if (!keep_profile_on() || (int32_t)(done - keep_profile_timed) <= 0) {
++		return;
++	}
++	volatile uint64_t *times = (volatile uint64_t *)(g3d_regions[2].memory + KEEP_PROFILE_AT);
++	uint32_t distance = done - keep_profile_timed;
++	uint64_t ticks = 0, timed = 0, dropped = 0, invalid = 0;
++	if (distance > KEEP_PROFILE_SLOTS) {
++		uint32_t cutoff = done - KEEP_PROFILE_SLOTS;
++		dropped = distance - KEEP_PROFILE_SLOTS - (cutoff < keep_profile_timed ? 1u : 0u);
++		keep_profile_timed = cutoff; /* At most 64 entries, including a skipped fence zero at wrap. */
++	}
++	to_memory((vm_offset_t)times, KEEP_PROFILE_BYTES);
++	while (keep_profile_timed != done) {
++		uint32_t fence = ++keep_profile_timed;
++		if (fence == 0) {
++			continue;
++		}
++		unsigned slot = fence % KEEP_PROFILE_SLOTS;
++		if (keep_profile_tags[slot] != fence) {
++			dropped++;
++			continue;
++		}
++		uint64_t begin = times[2 * slot], end = times[2 * slot + 1];
++		uint64_t delta = end - begin; /* Unsigned subtraction also handles the 64-bit counter wrap. */
++		keep_profile_tags[slot] = 0;
++		if (delta != 0 && delta < (1ull << 63)) {
++			ticks += delta;
++			timed++;
++		} else {
++			invalid++; /* Missing/zero/reset/backward timestamps are not measured idle. */
++		}
++	}
++	perfprof_gpu_mi8_busy(ticks, timed, dropped, invalid);
 +}
 +
 +bool
@@ -3408,6 +3492,9 @@
 +	keep_tlb();
 +}
 +
++extern void perfprof_gpu_submit(uint32_t fence);
++extern void perfprof_gpu_done(uint32_t done);
++
 +static uint64_t keep_flush_ticks, keep_flush_bytes, keep_flush_calls, keep_submit_ticks;
 +
 +void
@@ -3427,7 +3514,10 @@
 +	volatile uint32_t *word = (volatile uint32_t *)(g3d_regions[2].memory + KEEP_FENCE_AT);
 +
 +	to_memory((vm_offset_t)word, 4);
-+	return (int32_t)(*word - fence) >= 0;
++	uint32_t done = *word;
++	perfprof_gpu_done(done);
++	keep_profile_times(done);
++	return (int32_t)(done - fence) >= 0;
 +}
 +
 +uint32_t
@@ -3467,6 +3557,8 @@
 +	return ml_phys_read_word((e & PTE_ADDRESS) + (va & 0xfff));
 +}
 +
++extern void perfprof_submit_mi8(unsigned segment, uint64_t ticks);
++
 +static uint32_t mi8_gpu_submit_inner(const uint64_t *addresses, const uint32_t *words, uint32_t count);
 +
 +uint32_t
@@ -3482,7 +3574,9 @@
 +static uint32_t
 +mi8_gpu_submit_inner(const uint64_t *addresses, const uint32_t *words, uint32_t count)
 +{
-+	uint32_t wanted = 16 + 4 * count, room = 0;
++	bool profiling = keep_profile_on();
++	uint32_t wanted = 16 + 4 * count + (profiling ? 8u : 0u), room = 0;
++	uint64_t profileMark = profiling ? mach_absolute_time() : 0;
 +	uint64_t fence_iova = g3d_regions[2].address + KEEP_FENCE_AT;
 +
 +	for (int i = 0; i < 20000; i++) {
@@ -3492,11 +3586,23 @@
 +		}
 +		sleep_us(100);
 +	}
++	if (profiling) {
++		uint64_t now = mach_absolute_time();
++		perfprof_submit_mi8(0, now - profileMark);
++		profileMark = now;
++	}
 +	if (room < wanted) {
 +		return 0;
 +	}
++	if (profiling) {
++		(void)mi8_gpu_done(keep_fence); /* Retire completed slots before assigning a new tag. */
++	}
 +	if (++keep_fence == 0) {
 +		keep_fence = 1;
++	}
++	if (profiling) {
++		keep_profile_tags[keep_fence % KEEP_PROFILE_SLOTS] = keep_fence;
++		keep_profile_time(keep_fence, 0);
 +	}
 +	keep_ring_cmd(CP_EVENT_WRITE_OP, 1);
 +	keep_ring(EVENT_PC_CCU_INV_DEPTH);
@@ -3508,12 +3614,17 @@
 +		keep_ring((uint32_t)(addresses[i] >> 32));
 +		keep_ring(words[i]);
 +	}
++	if (profiling) {
++		keep_profile_time(keep_fence, 1);
++	}
 +	keep_ring_cmd(CP_EVENT_WRITE_OP, 4);
 +	keep_ring(EVENT_CACHE_FLUSH_TS);
 +	keep_ring((uint32_t)fence_iova);
 +	keep_ring((uint32_t)(fence_iova >> 32));
 +	keep_ring(keep_fence);
++	perfprof_gpu_submit(keep_fence);
 +	keep_ring_send();
++	if (profiling) perfprof_submit_mi8(1, mach_absolute_time() - profileMark);
 +	keep_submissions++;
 +	keep_ibs += count;
 +	for (uint32_t i = 0; i < count; i++) {
@@ -3603,6 +3714,22 @@
 +static uint32_t cpufreq_original[2];
 +static bool cpufreq_changed[2];
 +
++static vm_offset_t cpufreq_observed_base[2];
++static uint32_t cpufreq_mhz[2][40], cpufreq_rows[2], cpufreq_seen_state[2];
++static bool cpufreq_lut_seen;
++#define TG_STOP 1u
++#define TG_BUSY 2u
++#define TG_RESTORE 4u
++#define TG_DONE 8u
++static struct {
++	uint32_t gate, armed;
++	unsigned target, lower, upper, row, hot, cool, invalid_streak;
++	uint64_t down, up, invalid;
++	int temperature;
++	bool valid;
++} thermgov;
++extern bool redwood_cpu_temperature(int *maximum_mc);
++
 +#define CPUFREQ_BIG_DEFAULT_ROW 22
 +
 +static void
@@ -3612,8 +3739,14 @@
 +		if (cpufreq_changed[d] && cpufreq_base[d] != 0) {
 +			wr(cpufreq_base[d] + 0x920, cpufreq_original[d]);
 +			__asm__ volatile ("dsb sy" ::: "memory");
-+			printf("mi8gpu: cpufreq domain %d: PERF_STATE put back to %u (now %u)\n", d, cpufreq_original[d],
-+			    rd(cpufreq_base[d] + 0x920));
++			if (os_atomic_load(&thermgov.armed, relaxed)) {
++				/* The governor's final return may have IRQs off: loader log only. */
++				redwood_tl("mi8gpu: cpufreq domain %d: PERF_STATE put back to %u (now %u)\n", d,
++				    cpufreq_original[d], rd(cpufreq_base[d] + 0x920));
++			} else {
++				printf("mi8gpu: cpufreq domain %d: PERF_STATE put back to %u (now %u)\n", d, cpufreq_original[d],
++				    rd(cpufreq_base[d] + 0x920));
++			}
 +			cpufreq_changed[d] = false;
 +		}
 +	}
@@ -3623,6 +3756,7 @@
 +mi8_cpufreq(uint32_t want, uint32_t want_big)
 +{
 +	static const uint64_t bases[2] = { 0x17d43000ull, 0x17d45800ull };
++	cpufreq_lut_seen = true;
 +
 +	for (int d = 0; d < 2; d++) {
 +		vm_offset_t base = (vm_offset_t)ml_io_map(bases[d], 0x1400);
@@ -3632,7 +3766,9 @@
 +			printf("mi8gpu: cpufreq domain %d: no mapping\n", d);
 +			continue;
 +		}
-+		printf("mi8gpu: cpufreq domain %d: ENABLE %#x, PERF_STATE %#x\n", d, rd(base + 0x0), rd(base + 0x920));
++		cpufreq_observed_base[d] = base;
++		cpufreq_seen_state[d] = rd(base + 0x920);
++		printf("mi8gpu: cpufreq domain %d: ENABLE %#x, PERF_STATE %#x\n", d, rd(base + 0x0), cpufreq_seen_state[d]);
 +		for (uint32_t row = 0; row < 40; row++) {
 +			uint32_t lut = rd(base + 0x110 + 32 * row), volt = rd(base + 0x114 + 32 * row);
 +
@@ -3640,6 +3776,8 @@
 +				break;
 +			}
 +			rows = row + 1;
++			cpufreq_mhz[d][row] = (lut >> 30) ? (uint32_t)((lut & 0xff) * 192 / 10) : 300;
++			cpufreq_rows[d] = rows;
 +			/* LUT row: bits 31:30 clock source, 7:0 L value (multiples of the 19.2 MHz XO), 18:16 cores; source 0: GPLL0/2 */
 +			printf("mi8gpu: cpufreq domain %d row %u: lut %#010x -> %u MHz, volt %#x\n", d, row, lut,
 +			    (lut >> 30) ? (uint32_t)((lut & 0xff) * 192 / 10) : 300, volt);
@@ -3661,6 +3799,220 @@
 +			state = rd(base + 0x920);
 +			printf("mi8gpu: cpufreq domain %d: row %u asked for, PERF_STATE now %#x\n", d, row, state);
 +		}
++	}
++}
++
++/* Thermgov prototype: only our big-cluster PERF_STATE request is adjusted.
++ * Hysteresis is a software policy; no protection/threshold/firmware writes. */
++static uint64_t
++tg_us(uint64_t ticks)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(ticks, &ns);
++	return ns / 1000;
++}
++
++static void
++tg_note(uint64_t at, int temperature, bool valid, unsigned row, const char *reason)
++{
++	char text[16];
++	strlcpy(text, "NA", sizeof(text));
++	if (valid) { snprintf(text, sizeof(text), "%d", temperature); }
++	redwood_tl("gov: at %llu T=%s row=%u mhz=%u reason=%s\n", at, text, row, cpufreq_mhz[1][row], reason);
++}
++
++static bool
++mi8_thermgov_requested(void)
++{
++	unsigned target = 0, ignored;
++	if (!PE_parse_boot_argn("thermgov", &target, sizeof(target)) || target == 0) { return false; }
++	if (target < 55 || target > 69) {
++		redwood_tl("gov: disabled reason=target_range\n");
++		return false;
++	}
++	if (PE_parse_boot_argn("mi8_cpufreq", &ignored, sizeof(ignored)) ||
++	    PE_parse_boot_argn("mi8_cpufreq_big", &ignored, sizeof(ignored))) {
++		redwood_tl("gov: disabled reason=explicit_cpufreq\n");
++		return false;
++	}
++	thermgov.target = target;
++	return true;
++}
++
++static bool
++tg_limits(void)
++{
++	if (!cpufreq_observed_base[1]) { return false; }
++	unsigned upper = cpufreq_seen_state[1];
++	if (rd(cpufreq_observed_base[1] + 0x920) != upper) { return false; }
++	if (upper >= cpufreq_rows[1] || upper >= 40) { return false; }
++	unsigned lower = 0;
++	while (lower <= upper && cpufreq_mhz[1][lower] < 1600) { lower++; }
++	if (lower >= upper) { return false; }
++	for (unsigned row = lower + 1; row <= upper; row++) {
++		if (cpufreq_mhz[1][row] <= cpufreq_mhz[1][row - 1]) { return false; }
++	}
++	thermgov.lower = lower;
++	thermgov.upper = thermgov.row = upper;
++	return true;
++}
++
++/* Only called with TG_BUSY owned, IRQs and preemption off. The restore record
++ * precedes the first store. Every requested row stays within the observed LUT. */
++static void
++tg_set(unsigned row)
++{
++	if (row < thermgov.lower || row > thermgov.upper || row == thermgov.row) { return; }
++	if (!cpufreq_changed[1]) {
++		cpufreq_base[1] = cpufreq_observed_base[1];
++		cpufreq_original[1] = thermgov.upper;
++		cpufreq_changed[1] = true;
++	}
++	wr(cpufreq_base[1] + 0x920, row);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	thermgov.row = row;
++}
++
++struct tg_report { unsigned row; uint64_t down, up, invalid; };
++
++static bool
++tg_tick(int temperature, bool valid, uint64_t now, struct tg_report *snapshot)
++{
++	unsigned row;
++	const char *reason = NULL;
++	bool running = true;
++	disable_preemption();
++	boolean_t interrupts = ml_set_interrupts_enabled(FALSE);
++	if (!os_atomic_cmpxchg(&thermgov.gate, 0, TG_BUSY, acq_rel)) {
++		ml_set_interrupts_enabled(interrupts);
++		enable_preemption();
++		return false;
++	}
++	thermgov.temperature = temperature;
++	thermgov.valid = valid;
++	if (valid) { thermgov.invalid_streak = 0; }
++	if (!valid) {
++		thermgov.hot = thermgov.cool = 0;
++		thermgov.invalid++;
++		if (++thermgov.invalid_streak >= 10) {
++			tg_set(thermgov.upper);
++			os_atomic_or(&thermgov.gate, TG_STOP, relaxed);
++			reason = "invalid";
++			running = false;
++		}
++	} else if (temperature >= (int)thermgov.target * 1000) {
++		thermgov.cool = 0;
++		if (++thermgov.hot >= 2) {
++			thermgov.hot = 0;
++			if (thermgov.row > thermgov.lower) {
++				tg_set(thermgov.row - 1); thermgov.down++; reason = "down";
++			}
++		}
++	} else if (temperature <= ((int)thermgov.target - 4) * 1000) {
++		thermgov.hot = 0;
++		if (++thermgov.cool >= 10) {
++			thermgov.cool = 0;
++			if (thermgov.row < thermgov.upper) {
++				tg_set(thermgov.row + 1); thermgov.up++; reason = "up";
++			}
++		}
++	} else { thermgov.hot = thermgov.cool = 0; }
++	row = thermgov.row;
++	if (snapshot) { snapshot->row = row; snapshot->down = thermgov.down; snapshot->up = thermgov.up; snapshot->invalid = thermgov.invalid; }
++	os_atomic_andnot(&thermgov.gate, TG_BUSY, release); /* preserves concurrent STOP */
++	ml_set_interrupts_enabled(interrupts);
++	enable_preemption();
++	if (reason) { tg_note(tg_us(now), temperature, valid, row, reason); }
++	return running;
++}
++
++void
++mi8_thermgov_stop(void)
++{
++	/* Close even before startup publishes armed: a late start can never reopen it.
++	 * With thermgov=0 this is only a BSS flag, no I/O, thread or log. */
++	os_atomic_or(&thermgov.gate, TG_STOP, acq_rel);
++	if (!os_atomic_load(&thermgov.armed, acquire)) { return; }
++	disable_preemption();
++	boolean_t interrupts = ml_set_interrupts_enabled(FALSE);
++	os_atomic_or(&thermgov.gate, TG_STOP, acq_rel);
++	/* The bounded write section cannot be preempted or interrupted by the stop
++	 * SGI. This runs BEFORE psci_smp_stop_others(), never after parking its owner.
++	 * No thread join/sleep or console I/O is permitted in this context. */
++	for (;;) {
++		uint32_t state = os_atomic_load(&thermgov.gate, acquire);
++		if (state & TG_DONE) { break; }
++		if (!(state & (TG_BUSY | TG_RESTORE)) &&
++		    os_atomic_cmpxchg(&thermgov.gate, state, state | TG_RESTORE, acq_rel)) {
++			mi8_cpufreq_restore();
++			thermgov.row = thermgov.upper;
++			tg_note(tg_us(mach_absolute_time()), thermgov.temperature, thermgov.valid, thermgov.row, "stop");
++			os_atomic_store(&thermgov.gate, TG_STOP | TG_DONE, release);
++			os_atomic_store(&thermgov.armed, 0, release);
++			break;
++		}
++		__asm__ volatile ("yield" ::: "memory");
++	}
++	ml_set_interrupts_enabled(interrupts);
++	enable_preemption();
++}
++
++static void
++tg_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	uint64_t report = mach_absolute_time(), invalid = 0;
++	unsigned profile = 0;
++	PE_parse_boot_argn("perfprof", &profile, sizeof(profile));
++	for (;;) {
++		delay_for_interval(100, NSEC_PER_MSEC);
++		if (os_atomic_load(&thermgov.gate, acquire) & TG_STOP) { break; }
++		int temperature = 0;
++		bool valid = redwood_cpu_temperature(&temperature);
++		uint64_t now = mach_absolute_time();
++		struct tg_report sample;
++		if (!tg_tick(temperature, valid, now, &sample)) { break; }
++		if (profile == 1 && tg_us(now - report) >= 1000000) {
++			char text[16];
++			strlcpy(text, "NA", sizeof(text));
++			if (valid) { snprintf(text, sizeof(text), "%d", temperature); }
++			redwood_tl("pf: gov at %llu T=%s row=%u mhz=%u target=%u down=%llu up=%llu inv=%llu\n", tg_us(now),
++			    text, sample.row, cpufreq_mhz[1][sample.row], thermgov.target, sample.down, sample.up, sample.invalid - invalid);
++			invalid = sample.invalid;
++			report = now;
++		}
++	}
++	thread_terminate(current_thread());
++}
++
++static void
++mi8_thermgov_start(bool wanted)
++{
++	unsigned profile = 0;
++	PE_parse_boot_argn("perfprof", &profile, sizeof(profile));
++	if (!wanted && profile != 1) { return; }
++	if (!cpufreq_lut_seen) { mi8_cpufreq(0xffff, 0xffff); } /* reuse its read-only LUT walk */
++	if (!wanted) { return; }
++	if (!tg_limits()) {
++		redwood_tl("gov: disabled reason=lut_or_startup_row\n"); return;
++	}
++	thermgov.valid = redwood_cpu_temperature(&thermgov.temperature);
++	disable_preemption();
++	boolean_t interrupts = ml_set_interrupts_enabled(FALSE);
++	bool opened = os_atomic_cmpxchg(&thermgov.gate, 0, TG_BUSY, acq_rel);
++	if (opened) {
++		os_atomic_store(&thermgov.armed, 1, release);
++		os_atomic_andnot(&thermgov.gate, TG_BUSY, release);
++	}
++	ml_set_interrupts_enabled(interrupts);
++	enable_preemption();
++	if (!opened) { return; }
++	if (!thermgov.valid) { (void)tg_tick(0, false, mach_absolute_time(), NULL); }
++	tg_note(tg_us(mach_absolute_time()), thermgov.temperature, thermgov.valid, thermgov.row, "start");
++	thread_t thread;
++	if (kernel_thread_start(tg_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		redwood_tl("gov: disabled reason=thread_start\n"); mi8_thermgov_stop();
 +	}
 +}
 +
@@ -4285,6 +4637,7 @@
 +		}
 +		{
 +			uint32_t big = 0xffff;
++			bool governor = mi8_thermgov_requested();
 +			bool have_big = PE_parse_boot_argn("mi8_cpufreq_big", &big, sizeof(big));
 +
 +			if (!PE_parse_boot_argn("mi8_cpufreq", &freq, sizeof(freq))) {
@@ -4292,7 +4645,7 @@
 +			}
 +			if (freq != 0xffff || have_big) {
 +				mi8_cpufreq(freq, have_big ? big : 0xffff);
-+			} else {
++			} else if (!governor) {
 +				/* nothing asked for: the big cluster where the firmware leaves it, if a run before moved it (see above) */
 +				vm_offset_t base = (vm_offset_t)ml_io_map(0x17d45800ull, 0x1400);
 +
@@ -4303,6 +4656,7 @@
 +					__asm__ volatile ("dsb sy" ::: "memory");
 +				}
 +			}
++			mi8_thermgov_start(governor);
 +		}
 +		{
 +			uint32_t dpu = 0;
@@ -4346,6 +4700,11 @@
 +			keep_attr_index = attr & 7;
 +			printf("mi8gpu: the pages of the system's buffers get memory attribute %u\n", attr & 7);
 +		}
++	}
++	if (keep_profile_on()) {
++		keep_profile_timed = 0;
++		bzero(keep_profile_tags, sizeof(keep_profile_tags));
++		bzero((void *)(g3d_regions[2].memory + KEEP_PROFILE_AT), KEEP_PROFILE_BYTES);
 +	}
 +	keep_ring_at = keep_ring_sent = cp_wptr & (KEEP_RING_WORDS - 1);
 +	bzero((void *)(g3d_regions[2].memory + KEEP_FENCE_AT), 4);
@@ -4993,6 +5352,8 @@
 +	uint32_t waited = 0;
 +	bool slumber_ok, halted, rsc_ok;
 +
++	mi8_thermgov_stop();
++
 +	if (!gpu_kept) {
 +		return;
 +	}
@@ -5201,6 +5562,9 @@
 +	}
 +	thread_terminate(current_thread());
 +}
+diff --git a/bsd/dev/mi8_fts.c b/bsd/dev/mi8_fts.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..f860b0c6c5f0ec72ee9ddbeef1191daff46a27bf
 --- /dev/null
 +++ b/bsd/dev/mi8_fts.c
 @@ -0,0 +1,1882 @@
@@ -7086,6 +7450,9 @@
 +		thread_deallocate(thread);
 +	}
 +}
+diff --git a/bsd/dev/mi8_glink.c b/bsd/dev/mi8_glink.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8ede0de3b8
 --- /dev/null
 +++ b/bsd/dev/mi8_glink.c
 @@ -0,0 +1,979 @@
@@ -8068,6 +8435,9 @@
 +	leave(g);
 +	return (int)count;
 +}
+diff --git a/bsd/dev/mi8_glink.h b/bsd/dev/mi8_glink.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..69bb59573a328ee2407dd04e61c74fd489ff49fc
 --- /dev/null
 +++ b/bsd/dev/mi8_glink.h
 @@ -0,0 +1,60 @@
@@ -8131,6 +8501,9 @@
 + * SMEM callbacks must implement ordered device-memory access; see NOTES.md.
 + */
 +#endif
+diff --git a/bsd/dev/mi8_hostsvc.c b/bsd/dev/mi8_hostsvc.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..526c3dddc3fb0cfe500769a5cc5f3e46b6694f25
 --- /dev/null
 +++ b/bsd/dev/mi8_hostsvc.c
 @@ -0,0 +1,738 @@
@@ -8872,6 +9245,9 @@
 +{
 +	if (h) { mi8_hostsvc_stop(h); MI8_FREE(h, sizeof(*h)); }
 +}
+diff --git a/bsd/dev/mi8_hostsvc.h b/bsd/dev/mi8_hostsvc.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..befa7a3e5e756e19fde48eec9ee7360622cc4cd8
 --- /dev/null
 +++ b/bsd/dev/mi8_hostsvc.h
 @@ -0,0 +1,48 @@
@@ -8923,6 +9299,9 @@
 + * zero only after filling the complete requested byte range. No write API.
 + */
 +#endif
+diff --git a/bsd/dev/mi8_hostsvc_k.c b/bsd/dev/mi8_hostsvc_k.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2afe9152f
 --- /dev/null
 +++ b/bsd/dev/mi8_hostsvc_k.c
 @@ -0,0 +1,20 @@
@@ -8946,6 +9325,9 @@
 +}
 +#define memchr mi8_memchr
 +#include "mi8_hostsvc.c"
+diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18bf361858
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
 @@ -0,0 +1,4011 @@
@@ -12960,6 +13342,9 @@
 +		}
 +	}
 +}
+diff --git a/bsd/dev/mi8_wlfw.c b/bsd/dev/mi8_wlfw.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9fc4a5fccfecc97bddc4c5d1c227d29070e4690
 --- /dev/null
 +++ b/bsd/dev/mi8_wlfw.c
 @@ -0,0 +1,569 @@
@@ -13532,6 +13917,9 @@
 +	COUNT(default_ce), COUNT(default_svc), COUNT(default_shadow), default_ce, default_svc, default_shadow
 +};
 +const struct mi8_wlfw_wlan_cfg *mi8_wlfw_wcn3990_default_cfg(void) { return &defaults; }
+diff --git a/bsd/dev/mi8_wlfw.h b/bsd/dev/mi8_wlfw.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d53853be36fae24bfd6fdfac1847b8e81282c3fd
 --- /dev/null
 +++ b/bsd/dev/mi8_wlfw.h
 @@ -0,0 +1,51 @@
@@ -13586,6 +13974,9 @@
 +int mi8_wlfw_stop(struct mi8_wlfw *);
 +int mi8_wlfw_destroy(struct mi8_wlfw *);
 +#endif
+diff --git a/bsd/dev/mi8_wlfw_k.c b/bsd/dev/mi8_wlfw_k.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2940617f39c126ed20f5b3f6ecd5ed330093eae1
 --- /dev/null
 +++ b/bsd/dev/mi8_wlfw_k.c
 @@ -0,0 +1,6 @@
@@ -13595,6 +13986,9 @@
 +#define MI8_ALLOC(n)    kalloc_data((n), Z_WAITOK | Z_ZERO)
 +#define MI8_FREE(p, n)  kfree_data((p), (n))
 +#include "mi8_wlfw.c"
+diff --git a/bsd/dev/mi8_wlfw_v01.c b/bsd/dev/mi8_wlfw_v01.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..23ed52da63195f04b35f2a52be84d4984a9dea20
 --- /dev/null
 +++ b/bsd/dev/mi8_wlfw_v01.c
 @@ -0,0 +1,2307 @@
@@ -15905,6 +16299,9 @@
 +	},
 +	{ .data_type = QMI_EOTI }
 +};
+diff --git a/bsd/dev/mi8_wlfw_v01.h b/bsd/dev/mi8_wlfw_v01.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e6394fc291cc837efbf341b5fd1a0fb287d1ccd8
 --- /dev/null
 +++ b/bsd/dev/mi8_wlfw_v01.h
 @@ -0,0 +1,695 @@
@@ -16603,9 +17000,19 @@
 +extern const struct qmi_elem_info mi8_wlfw_xo_cal_ind_msg_v01_ei[];
 +
 +#endif
+diff --git a/bsd/dev/redwood_adreno.c b/bsd/dev/redwood_adreno.c
+index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d952313613b 100644
 --- a/bsd/dev/redwood_adreno.c
 +++ b/bsd/dev/redwood_adreno.c
-@@ -3295,6 +3295,10 @@
+@@ -3196,6 +3196,7 @@ redwood_adreno_quiesce(void)
+ static bool gpu_kept;
+ static uint32_t gpu_fence;              /* the number of the last submission */
+ static uint32_t gpu_timed;              /* ... of the last whose times have been added up */
++extern void perfprof_gpu_ticks(uint64_t ticks);
+ static uint64_t gpu_ticks;              /* how long the core has worked on the submissions added up */
+ static uint32_t gpu_timed_count;
+ static uint32_t gpu_timed_by[7];        /* ... how many of them under 0.1, 0.25, 0.5, 1, 2, 4 ms, and longer */
+@@ -3295,6 +3296,10 @@ static void gpu_block_stop(void);
  void
  redwood_gpu_stop(void)
  {
@@ -16616,7 +17023,7 @@
  	if (gpu_kept) {
  		uint32_t waited = 0;
  
-@@ -3321,7 +3325,7 @@
+@@ -3321,7 +3326,7 @@ redwood_adreno_stop(void)
  {
  	uint32_t dirty = 0;
  
@@ -16625,7 +17032,7 @@
  		RedwoodGPUStop();
  	}
  }
-@@ -3329,6 +3333,9 @@
+@@ -3329,6 +3334,9 @@ redwood_adreno_stop(void)
  bool
  redwood_gpu_ready(void)
  {
@@ -16635,7 +17042,7 @@
  	return gpu_kept;
  }
  
-@@ -3336,6 +3343,9 @@
+@@ -3336,6 +3344,9 @@ redwood_gpu_ready(void)
  bool
  redwood_gpu_parameter(uint32_t which, uint64_t *value)
  {
@@ -16645,7 +17052,7 @@
  	switch (which) {
  	case 0x01:                              /* GPU_ID: none, the chip ID says it */
  	case 0x06:                              /* GMEM_BASE */
-@@ -3394,6 +3404,9 @@
+@@ -3394,6 +3405,9 @@ redwood_gpu_parameter(uint32_t which, uint64_t *value)
  uint64_t
  redwood_gpu_address(uint64_t size)
  {
@@ -16655,7 +17062,7 @@
  	size = gpu_address_span(size);
  	for (unsigned i = 0; i < gpu_free_count; i++) {
  		if (gpu_free[i].size >= size) {
-@@ -3416,6 +3429,10 @@
+@@ -3416,6 +3430,10 @@ redwood_gpu_address(uint64_t size)
  void
  redwood_gpu_address_free(uint64_t address, uint64_t size)
  {
@@ -16666,7 +17073,7 @@
  	unsigned at;
  
  	size = gpu_address_span(size);
-@@ -3461,6 +3478,10 @@
+@@ -3461,6 +3479,10 @@ void
  redwood_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest, unsigned *holes, unsigned *most, uint64_t *lost,
      uint32_t *refused)
  {
@@ -16677,7 +17084,7 @@
  	*largest = 0;
  	for (unsigned i = 0; i < gpu_free_count; i++) {
  		if (gpu_free[i].size > *largest) {
-@@ -3479,18 +3500,29 @@
+@@ -3479,18 +3501,29 @@ redwood_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest, unsigned *h
  bool
  redwood_gpu_map(uint64_t address, uint64_t phys, bool read_only)
  {
@@ -16707,7 +17114,7 @@
  	uint32_t context = smmu_context(&core_space);
  
  	for (uint64_t offset = 0; offset < size; offset += 4096) {
-@@ -3507,6 +3539,10 @@
+@@ -3507,6 +3540,10 @@ redwood_gpu_unmap(uint64_t address, uint64_t size)
  void
  redwood_gpu_to_memory(void *start, uint64_t size)
  {
@@ -16718,7 +17125,7 @@
  	to_memory((vm_offset_t)start, size);
  }
  
-@@ -3514,6 +3550,9 @@
+@@ -3514,6 +3551,9 @@ redwood_gpu_to_memory(void *start, uint64_t size)
  bool
  redwood_gpu_done(uint32_t fence)
  {
@@ -16728,7 +17135,7 @@
  	volatile uint32_t *word = (volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT);
  
  	to_memory((vm_offset_t)word, 4);
-@@ -3523,6 +3562,9 @@
+@@ -3523,6 +3563,9 @@ redwood_gpu_done(uint32_t fence)
  uint32_t
  redwood_gpu_last(void)
  {
@@ -16738,7 +17145,15 @@
  	return gpu_fence;
  }
  
-@@ -3578,6 +3620,10 @@
+@@ -3566,6 +3609,7 @@ gpu_times(void)
+ 			}
+ 			gpu_timed_by[by]++;
+ 			gpu_ticks += ticks;
++			perfprof_gpu_ticks(ticks);
+ 			gpu_timed_count++;
+ 		}
+ 	}
+@@ -3578,6 +3622,10 @@ gpu_times(void)
  void
  redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7])
  {
@@ -16749,7 +17164,7 @@
  	gpu_times();
  	*microseconds = gpu_ticks * 10 / 192;
  	*submissions = gpu_timed_count;
-@@ -3595,6 +3641,9 @@
+@@ -3595,6 +3643,9 @@ redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7]
  uint32_t
  redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
  {
@@ -16759,7 +17174,7 @@
  	uint32_t wanted = 26 + 4 * count, room = 0;
  
  	for (int i = 0; i < 20000; i++) {
-@@ -3640,6 +3689,10 @@
+@@ -3640,6 +3691,10 @@ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t co
  void
  redwood_gpu_report(const char *why)
  {
@@ -16770,7 +17185,7 @@
  	uint32_t context = smmu_context(&core_space);
  
  	printf("adreno: gpu: %s: submission %u is the last, the core has done %u; ring: read up to %u, written up to %u; status "
-@@ -3712,6 +3765,9 @@
+@@ -3712,6 +3767,9 @@ redwood_gpu_report(const char *why)
  bool
  redwood_gpu_recover(void)
  {
@@ -16780,6 +17195,8 @@
  	uint32_t fence_status;
  
  	if (!gpu_kept || !gpu_recover) {
+diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
+index e2674ee51149d523c6e5054a5a6fd28a91947562..aeb538db4138a58b1a3010c90fb1da0d0cf5ff93 100644
 --- a/bsd/dev/redwood_apple80211.c
 +++ b/bsd/dev/redwood_apple80211.c
 @@ -33,6 +33,8 @@
@@ -16791,7 +17208,7 @@
  #include <libkern/libkern.h>
  #include <sys/errno.h>
  #include <sys/kern_event.h>
-@@ -193,7 +195,7 @@
+@@ -193,7 +195,7 @@ _Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct
  
  /* Apple80211's events (APPLE80211_M_...) */
  enum { EVENT_POWER_CHANGED = 1, EVENT_SSID_CHANGED = 2, EVENT_BSSID_CHANGED = 3, EVENT_LINK_CHANGED = 4, EVENT_ASSOC_DONE = 9,
@@ -16800,7 +17217,7 @@
  
  static const char interface_name[16] = "en0";   /* (bsd/dev/redwood_net.c makes one interface, and that is its name) */
  
-@@ -433,6 +435,47 @@
+@@ -433,6 +435,47 @@ get(struct apple80211req *request)
  		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
  		break;
  	}
@@ -16848,7 +17265,7 @@
  	case 103:                               /* all of it, as a scan's result */
  		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give_network(request, &state->bss);
  		break;
-@@ -596,6 +639,82 @@
+@@ -596,6 +639,82 @@ set(const struct apple80211req *request, char *said, size_t said_size)
  
  /* ---- events -------------------------------------------------------------------------------------------- */
  
@@ -16931,7 +17348,7 @@
  static void
  post(uint32_t code, const void *data, uint32_t length)
  {
-@@ -653,6 +772,10 @@
+@@ -653,6 +772,10 @@ redwood_apple80211_event(enum redwood_sta_event event, int status)
  		post(EVENT_SSID_CHANGED, NULL, 0);
  		post(EVENT_BSSID_CHANGED, NULL, 0);
  		post(EVENT_LINK_CHANGED, &link, sizeof(link));
@@ -16942,9 +17359,37 @@
  		break;
  	}
  	}
+diff --git a/bsd/dev/redwood_battery.c b/bsd/dev/redwood_battery.c
+index 6e80b4d7cf5ad037b081f7127c0627a4d6c3edc3..4125c230c84fae50c29bfe89809abfd00fdce6bc 100644
+--- a/bsd/dev/redwood_battery.c
++++ b/bsd/dev/redwood_battery.c
+@@ -156,6 +156,21 @@ redwood_battery_report(const struct redwood_battery_state *b)
+ 	RedwoodBatteryReport(b, sizeof(*b));
+ }
+ 
++/* Profile-only reader of already published software cache; never starts a battery
++ * channel or calls firmware. Scalars are best effort, not one coherent fuel-gauge
++ * transaction. No changes to either existing producer or the default-off path. */
++unsigned
++redwood_battery_profile(int values[4], uint64_t *updates)
++{
++	*updates = battery_updates;
++	if (!*updates) { return 0; }
++	values[0] = battery_temperature_c;
++	values[1] = battery_voltage_mv;
++	values[2] = battery_current_ma;
++	values[3] = battery_soc_percent;
++	return battery_source_dsp ? 2 : 1;
++}
++
+ static void
+ battery_thread(__unused void *parameter, __unused wait_result_t result)
+ {
+diff --git a/bsd/dev/redwood_buttons.c b/bsd/dev/redwood_buttons.c
+index 0bb455553658f161486427e8059b3067fcab5250..014474aed0843144b9166bbce8f5da6de5882364 100644
 --- a/bsd/dev/redwood_buttons.c
 +++ b/bsd/dev/redwood_buttons.c
-@@ -131,6 +131,23 @@
+@@ -131,6 +131,23 @@ static vm_offset_t arb_core, arb_cnfg, arb_observer;
  static LCK_GRP_DECLARE(spmi_lck_grp, "redwood-spmi");
  static LCK_SPIN_DECLARE(spmi_lock, &spmi_lck_grp);
  
@@ -16968,7 +17413,7 @@
  void
  redwood_spmi_lock(void)
  {
-@@ -149,8 +166,22 @@
+@@ -149,8 +166,22 @@ struct peripheral {
  	uint16_t        channel;
  	bool            found;
  };
@@ -16993,7 +17438,7 @@
  
  /* How the reads have gone: said once a minute. */
  static struct {
-@@ -248,8 +279,9 @@
+@@ -248,8 +279,9 @@ find_channel(struct peripheral *p, uint32_t channels)
  /* the power-on block, of the kind that is split in two ("generation 3"): this is its half for the operating system */
  #define PON_TYPE                0x01
  #define PON_SUBTYPE_HLOS        0x09
@@ -17005,7 +17450,7 @@
  
  /* a GPIO of the low or medium voltage kind */
  #define GPIO_TYPE               0x10
-@@ -330,12 +362,17 @@
+@@ -330,12 +362,17 @@ static void
  buttons_poll(void)
  {
  	static unsigned said;
@@ -17023,7 +17468,7 @@
  			button_look(&power, status & PON_KPDPWR);
  			button_look(&volume_down, status & PON_RESIN);
  		} else if (said < 8) {
-@@ -346,6 +383,10 @@
+@@ -346,6 +383,10 @@ buttons_poll(void)
  	if (volume_up.usable) {
  		problem = spmi_read(&pin, REG_RT_STATUS, &status, 1);
  		if (problem == NULL) {
@@ -17034,12 +17479,10 @@
  			button_look(&volume_up, !(status & GPIO_LEVEL));
  		} else if (said < 8) {
  			said++;
-@@ -435,6 +476,70 @@
- 	}
- 	volume_up.usable = true;
+@@ -437,6 +478,70 @@ pin_input(void)
  	volume_up.last = !(status & GPIO_LEVEL);
-+}
-+
+ }
+ 
 +static const char *
 +read2(const struct peripheral *p, uint8_t reg, uint16_t *value)
 +{
@@ -17102,10 +17545,12 @@
 +	    states[status[0] & 7], usb, (usb & 0x10) ? "plugged in" : "nothing", e1 || e2 || e3 || e4 || e5 || e6 ? "; problems:" : "",
 +	    e1 ? " soc" : "", e2 ? " voltage" : "", e3 ? " current" : "", e4 ? " temperature" : "", e5 ? " charger" : "",
 +	    e6 ? " usb" : "");
- }
- 
++}
++
  static void
-@@ -480,8 +585,29 @@
+ say_summary(void)
+ {
+@@ -480,8 +585,29 @@ buttons_thread(void *parameter, __unused wait_result_t result)
  	}
  
  	printf("buttons: step 3: the first transfers on the SPMI bus\n");
@@ -17136,11 +17581,10 @@
  	if (steps < 4) {
  		goto out;
  	}
-@@ -517,6 +643,20 @@
- 		/* once early on as well: a short run is to say what the reads cost too */
+@@ -518,6 +644,20 @@ buttons_thread(void *parameter, __unused wait_result_t result)
  		if (tick % MINUTE_TICKS == 0 || tick == 10 * 1000 / POLL_MS) {
  			say_summary();
-+		}
+ 		}
 +		if (battery_on && tick % (5 * 1000 / POLL_MS) == 0) {
 +			battery_look(tick % (30 * 1000 / POLL_MS) < 5 * 1000 / POLL_MS);
 +		} else if (battery_on && tick % (500 / POLL_MS) == 0) {
@@ -17154,29 +17598,43 @@
 +				}
 +				was = usb;
 +			}
- 		}
++		}
  		if (bus.failed >= 1000 && bus.failed * 2 > bus.reads) {
  			printf("buttons: more than half of %llu reads have failed: giving up\n", bus.reads);
+ 			break;
+diff --git a/bsd/dev/redwood_cpufreq.c b/bsd/dev/redwood_cpufreq.c
+index b95b76f47c34ec217fcf86fdf850d5c2c0403dc2..4ba1a3aab27484fef9b618955c841f855875306c 100644
 --- a/bsd/dev/redwood_cpufreq.c
 +++ b/bsd/dev/redwood_cpufreq.c
-@@ -12,7 +12,9 @@
+@@ -12,7 +12,14 @@
   * Register layout: Linux drivers/cpufreq/qcom-cpufreq-hw.c ("epss" variant).
   */
  #include <kern/clock.h>
 +#include <kern/task.h>
  #include <kern/thread.h>
++#include <kern/processor.h>
++#include <kern/sched_prim.h>
++#include <kern/cpu_data.h>
++#include <kern/locks.h>
++#include <kern/cpu_number.h>
 +#include <sys/proc_internal.h>
  #include <os/atomic_private.h>
  #include <libkern/libkern.h>
  #include <mach/mach_types.h>
-@@ -297,6 +299,110 @@
- 		return;
- 	}
- 	if (kernel_thread_start(load_thread, NULL, &thread) == KERN_SUCCESS) {
-+		thread_deallocate(thread);
-+	}
-+}
+@@ -26,6 +33,9 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+ extern void loader_log_putc(char c);
+ extern void redwood_tl(const char *format, ...) __printflike(1, 2);
++static void perfprof_start(void);
++static void perfprof_task_stamp(uint64_t now);
 +
+ extern bool ml_cpu_idle_time(int cpu_id, uint64_t *idle);
+ 
+ /*
+@@ -301,6 +311,839 @@ load_start(void)
+ 	}
+ }
+ 
 +
 +/*
 + * Boot-arg taskload=MS: every MS milliseconds, which processes used the processors meanwhile (EXP-0177):
@@ -17231,6 +17689,7 @@
 +		delay_for_interval(task_every_ms, NSEC_PER_MSEC);
 +		proc_iterate(PROC_ALLPROCLIST, taskload_look, NULL, NULL, NULL);
 +		now = mach_absolute_time();
++		perfprof_task_stamp(now);
 +		span = now - then;
 +		absolutetime_to_nanoseconds(now, &us);
 +		for (unsigned i = 0; i < task_seen_count; i++) {
@@ -17277,17 +17736,753 @@
 +		return;
 +	}
 +	if (kernel_thread_start(taskload_thread, NULL, &thread) == KERN_SUCCESS) {
- 		thread_deallocate(thread);
- 	}
- }
-@@ -561,6 +667,7 @@
++		thread_deallocate(thread);
++	}
++}
++
++/* Optional profiling. Remote readers see scalar identities, never thread/task pointers.
++ * The scheduler publishes while the incoming thread is locked and still referenced. */
++#define PF_CPUS 8
++#define PF_THREADS 2048
++#define PF_REQUESTS 129
++uint32_t perfprof_enabled;
++static uint32_t perfprof_hz = 1000;
++extern kern_return_t thread_terminate(thread_t thread);
++extern processor_t thread_bind(processor_t processor);
++extern bool perfprof_cpu_online(unsigned cpu);
++/* OSFMK returns processor_state_t as a scalar; no remote processor/thread pointers. */
++extern int perfprof_cpu_state(unsigned cpu);
++extern kern_return_t perfprof_clock_start(thread_continue_t function, void *arg, thread_t *thread);
++static uint64_t pf_task_stamp;
++/* Monotonic across report windows. Only the sampler writes progress/phase/deadline. */
++static uint64_t pf_progress, pf_deadline;
++static uint32_t pf_phase; /* 0 starting, 1 waiting, 2 sampling, 3 thread report */
++static void pf_task_report(uint64_t now);
++static void pf_telemetry(uint64_t now);
++static struct pf_name_entry { int pid; char name[17]; } pf_names[TASKLOAD_MAX], pf_report_names[TASKLOAD_MAX];
++static unsigned pf_name_count, pf_report_name_count;
++static struct {
++	uint32_t sequence, idle;
++	uint64_t tid;
++	int pid, priority;
++} pf_running[PF_CPUS];
++static struct {
++	uint64_t tid;
++	int pid, priority;
++	uint32_t hits[PF_CPUS];
++	char name[17];
++} pf_threads[PF_THREADS];
++static uint64_t pf_polls, pf_skipped, pf_overflow, pf_late, pf_work_ns, pf_report_ns;
++static LCK_GRP_DECLARE(pf_group, "perfprof");
++static LCK_SPIN_DECLARE(pf_lock, &pf_group);
++static lck_spin_t pf_name_lock; /* Initialized only after the perfprof=1 gate. */
++static struct {
++	uint64_t idle, offline, transition, absent, unready, raced;
++	int state;
++} pf_cpu[PF_CPUS];
++static struct { uint64_t n, ticks, max; } pf_requests[PF_REQUESTS], pf_request_report[PF_REQUESTS];
++static struct {
++	uint64_t ticks, completed, lat_ticks, lat_n, lat_max, lost;
++	uint64_t busy_timed, busy_dropped, busy_invalid;
++	int source; /* 0 unknown, 1 GPU-written timestamps, 2 fence observation only */
++	uint32_t done;
++	struct { uint32_t fence; uint64_t began; } pending[256];
++} pf_gpu;
++
++void
++perfprof_switch(unsigned cpu, uint64_t tid, int pid, bool idle, int priority)
++{
++	if (cpu >= PF_CPUS) {
++		return;
++	}
++	/* One writer per CPU, with interrupts disabled by thread_invoke(). */
++	os_atomic_inc(&pf_running[cpu].sequence, seq_cst);
++	os_atomic_store(&pf_running[cpu].tid, tid, relaxed);
++	os_atomic_store(&pf_running[cpu].pid, pid, relaxed);
++	os_atomic_store(&pf_running[cpu].idle, idle, relaxed);
++	os_atomic_store(&pf_running[cpu].priority, priority, relaxed);
++	os_atomic_inc(&pf_running[cpu].sequence, release);
++}
++
++static void
++perfprof_task_stamp(uint64_t now)
++{
++	if (os_atomic_load(&perfprof_enabled, relaxed)) {
++		pf_task_report(now);
++		/* Names are best effort. Never wait for a stopped sampler's name lock. */
++		if (lck_spin_try_lock(&pf_name_lock)) {
++			pf_name_count = task_seen_count;
++			for (unsigned i = 0; i < pf_name_count; i++) {
++				pf_names[i].pid = task_seen[i].pid;
++				strlcpy(pf_names[i].name, task_seen[i].name, sizeof(pf_names[i].name));
++			}
++			lck_spin_unlock(&pf_name_lock);
++		}
++		os_atomic_store(&pf_task_stamp, now, release);
++	}
++}
++
++void
++perfprof_request(unsigned selector, uint64_t ticks)
++{
++	if (!os_atomic_load(&perfprof_enabled, relaxed)) {
++		return;
++	}
++	unsigned i = selector < 128 ? selector : 128;
++	lck_spin_lock(&pf_lock);
++	pf_requests[i].n++;
++	pf_requests[i].ticks += ticks;
++	pf_requests[i].max = MAX(pf_requests[i].max, ticks);
++	lck_spin_unlock(&pf_lock);
++}
++
++/* Called only where gpu_times() has already read and accepted its existing timestamps.
++ * These are separate cumulative shadow counters; the user client's reset cannot consume them. */
++void
++perfprof_gpu_ticks(uint64_t ticks)
++{
++	if (!os_atomic_load(&perfprof_enabled, relaxed)) {
++		return;
++	}
++	lck_spin_lock(&pf_lock);
++	pf_gpu.source = 1;
++	pf_gpu.ticks += ticks;
++	pf_gpu.completed++;
++	lck_spin_unlock(&pf_lock);
++}
++
++/* Mi 8 completion counts/latency are maintained by the fence observer below; do not
++ * count them again while adding independently harvested GPU timestamp differences. */
++void
++perfprof_gpu_mi8_busy(uint64_t ticks, uint64_t timed, uint64_t dropped, uint64_t invalid)
++{
++	if (!os_atomic_load(&perfprof_enabled, relaxed)) {
++		return;
++	}
++	lck_spin_lock(&pf_lock);
++	pf_gpu.ticks += ticks;
++	pf_gpu.busy_timed += timed;
++	pf_gpu.busy_dropped += dropped;
++	pf_gpu.busy_invalid += invalid;
++	if (timed) {
++		pf_gpu.source = 1;
++	}
++	lck_spin_unlock(&pf_lock);
++}
++
++/* Observe the existing fence read for submission -> first observation latency.
++ * This upper bound is distinct from the GPU-written CP interval. */
++void
++perfprof_gpu_submit(uint32_t fence)
++{
++	if (!os_atomic_load(&perfprof_enabled, relaxed)) {
++		return;
++	}
++	uint64_t now = mach_absolute_time();
++	unsigned slot = fence % 256;
++	lck_spin_lock(&pf_lock);
++	if (pf_gpu.source != 1) {
++		pf_gpu.source = 2;
++	}
++	if (pf_gpu.pending[slot].fence) {
++		pf_gpu.lost++;
++	}
++	pf_gpu.pending[slot].fence = fence;
++	pf_gpu.pending[slot].began = now;
++	lck_spin_unlock(&pf_lock);
++}
++
++void
++perfprof_gpu_done(uint32_t done)
++{
++	if (!os_atomic_load(&perfprof_enabled, relaxed)) {
++		return;
++	}
++	uint64_t now = mach_absolute_time();
++	lck_spin_lock(&pf_lock);
++	if (pf_gpu.source != 1) {
++		pf_gpu.source = 2;
++	}
++	if ((int32_t)(done - pf_gpu.done) > 0) {
++		uint32_t n = done - pf_gpu.done;
++		pf_gpu.completed += n - (done < pf_gpu.done ? 1 : 0);
++		/* Bounded even if the driver has not observed completion for a long time. */
++		uint32_t first = n > 256 ? done - 255 : pf_gpu.done + 1;
++		for (uint32_t f = first;; f++) {
++			unsigned slot = f % 256;
++			if (f != 0 && pf_gpu.pending[slot].fence == f) {
++				uint64_t dt = now - pf_gpu.pending[slot].began;
++				pf_gpu.lat_ticks += dt;
++				pf_gpu.lat_n++;
++				pf_gpu.lat_max = MAX(pf_gpu.lat_max, dt);
++				pf_gpu.pending[slot].fence = 0;
++			}
++			if (f == done) {
++				break;
++			}
++		}
++		pf_gpu.done = done;
++	}
++	lck_spin_unlock(&pf_lock);
++}
++
++static uint64_t
++pf_us(uint64_t ticks)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(ticks, &ns);
++	return ns / 1000;
++}
++
++static const char *
++pf_request_name(unsigned i)
++{
++	switch (i) {
++	case 0x09: return "gem_close";
++	case 0x40: return "get_param";
++	case 0x41: return "set_param";
++	case 0x42: return "gem_new";
++	case 0x43: return "gem_info";
++	case 0x44: return "cpu_prep";
++	case 0x45: return "cpu_fini";
++	case 0x46: return "submit";
++	case 0x47: return "wait_fence";
++	case 0x48: return "madvise";
++	case 0x4a: return "queue_new";
++	case 0x4b: return "queue_close";
++	case 0x4c: return "queue_query";
++	case 0x7b: return "scan";
++	case 0x7c: return "damage";
++	case 0x7d: return "worked";
++	case 0x7e: return "surface";
++	case 0x7f: return "show";
++	default: return "unknown";
++	}
++}
++
++static void
++pf_driver_report(uint64_t at, uint64_t span)
++{
++	static uint64_t last_ticks, last_n, last_lat, last_lat_n;
++	static uint64_t last_busy_timed, last_busy_dropped, last_busy_invalid;
++	uint64_t ticks, n, lat, lat_n, max, lost, busy_timed, busy_dropped, busy_invalid;
++	uint32_t fence;
++	int source;
++	lck_spin_lock(&pf_lock);
++	ticks = pf_gpu.ticks;
++	n = pf_gpu.completed;
++	lat = pf_gpu.lat_ticks;
++	lat_n = pf_gpu.lat_n;
++	max = pf_gpu.lat_max;
++	lost = pf_gpu.lost;
++	source = pf_gpu.source;
++	busy_timed = pf_gpu.busy_timed;
++	busy_dropped = pf_gpu.busy_dropped;
++	busy_invalid = pf_gpu.busy_invalid;
++	fence = pf_gpu.done;
++	pf_gpu.lat_max = 0;
++	memcpy(pf_request_report, pf_requests, sizeof(pf_requests));
++	bzero(pf_requests, sizeof(pf_requests));
++	lck_spin_unlock(&pf_lock);
++	char busy[32], avg[32], peak[32];
++	if (source == 1 && busy_dropped == last_busy_dropped && busy_invalid == last_busy_invalid) {
++		snprintf(busy, sizeof(busy), "%llu", (ticks - last_ticks) * 10 / 192);
++	} else {
++		strlcpy(busy, "NA", sizeof(busy));
++	}
++	if (lat_n != last_lat_n) {
++		snprintf(avg, sizeof(avg), "%llu", pf_us((lat - last_lat) / (lat_n - last_lat_n)));
++		snprintf(peak, sizeof(peak), "%llu", pf_us(max));
++	} else {
++		strlcpy(avg, "NA", sizeof(avg));
++		strlcpy(peak, "NA", sizeof(peak));
++	}
++	redwood_tl("pf: gpu at %llu busy=%s n=%llu span=%llu lat_avg=%s lat_max=%s source=%d lat_n=%llu lost=%llu\n",
++	    at, busy, n - last_n, span, avg, peak, source, lat_n - last_lat_n, lost);
++	redwood_tl("pf: gpu_timing at %llu timed=%llu dropped=%llu invalid=%llu mode=cp_interval fence=%u\n", at,
++	    busy_timed - last_busy_timed, busy_dropped - last_busy_dropped, busy_invalid - last_busy_invalid, fence);
++	last_busy_timed = busy_timed;
++	last_busy_dropped = busy_dropped;
++	last_busy_invalid = busy_invalid;
++	last_ticks = ticks;
++	last_n = n;
++	last_lat = lat;
++	last_lat_n = lat_n;
++	for (unsigned i = 0; i < PF_REQUESTS; i++) {
++		if (pf_request_report[i].n) {
++			redwood_tl("pf: req %s n=%llu us=%llu max=%llu at=%llu span=%llu sel=%u\n", pf_request_name(i),
++			    pf_request_report[i].n, pf_us(pf_request_report[i].ticks), pf_us(pf_request_report[i].max), at, span, i);
++		}
++	}
++}
++
++/* Called only by taskload, never by the sampler. Report before the name-cache
++ * lock: even a sampler stuck in name copying cannot suppress this diagnostic. */
++static void
++pf_task_report(uint64_t now)
++{
++	static uint64_t last_progress, since, driver_then;
++	static bool started, warned;
++	uint64_t progress = os_atomic_load(&pf_progress, acquire);
++	if (!started || progress != last_progress) {
++		started = true;
++		last_progress = progress;
++		since = now;
++		warned = false;
++	} else if (!warned && pf_us(now - since) > 2ULL * task_every_ms * 1000) {
++		redwood_tl("pf: status sampler_stalled polls=%llu since=%llu phase=%u deadline=%llu at=%llu\n",
++		    progress, pf_us(since), os_atomic_load(&pf_phase, relaxed),
++		    pf_us(os_atomic_load(&pf_deadline, relaxed)), pf_us(now));
++		warned = true;
++	}
++	if (!driver_then) {
++		driver_then = now;
++	} else if (pf_us(now - driver_then) >= 1000000) {
++		pf_driver_report(pf_us(now), pf_us(now - driver_then));
++		pf_telemetry(now);
++		driver_then = now;
++	}
++}
++
++static void
++pf_sample(void)
++{
++	unsigned cpus = MIN(ml_get_topology_info()->num_cpus, PF_CPUS);
++	pf_polls++;
++	for (unsigned cpu = 0; cpu < cpus; cpu++) {
++		/* State numbers are the fixed processor_state_t ABI, checked in OSFMK.
++		 * IDLE is available, including CPUs that have not published a first switch.
++		 * DISPATCHING is a transition, not an offline/power-off observation. */
++		int state = perfprof_cpu_state(cpu);
++		pf_cpu[cpu].state = state;
++		if (state == 4) {
++			pf_cpu[cpu].idle++;
++			continue;
++		}
++		if (state != 6) {
++			if (state == 0) { pf_cpu[cpu].offline++; }
++			else if (state < 0) { pf_cpu[cpu].absent++; }
++			else { pf_cpu[cpu].transition++; }
++			pf_skipped++;
++			continue;
++		}
++		uint32_t a = os_atomic_load(&pf_running[cpu].sequence, acquire);
++		uint64_t tid = os_atomic_load(&pf_running[cpu].tid, relaxed);
++		int pid = os_atomic_load(&pf_running[cpu].pid, relaxed);
++		uint32_t idle = os_atomic_load(&pf_running[cpu].idle, relaxed);
++		int priority = os_atomic_load(&pf_running[cpu].priority, relaxed);
++		os_atomic_thread_fence(acquire);
++		uint32_t b = os_atomic_load(&pf_running[cpu].sequence, relaxed);
++		if ((a & 1) || a != b || perfprof_cpu_state(cpu) != state) {
++			pf_cpu[cpu].raced++;
++			pf_skipped++;
++			continue;
++		}
++		if (!a || !tid) {
++			pf_cpu[cpu].unready++;
++			pf_skipped++;
++			continue;
++		}
++		if (idle) {
++			pf_cpu[cpu].idle++;
++			continue;
++		}
++		unsigned slot = (unsigned)((tid ^ (tid >> 32)) * 2654435761u) % PF_THREADS;
++		unsigned tries;
++		for (tries = 0; tries < 16; tries++, slot = (slot + 1) % PF_THREADS) {
++			if (!pf_threads[slot].tid || (pf_threads[slot].tid == tid && pf_threads[slot].pid == pid)) {
++				pf_threads[slot].tid = tid;
++				pf_threads[slot].pid = pid;
++				pf_threads[slot].priority = MAX(pf_threads[slot].priority, priority);
++				pf_threads[slot].hits[cpu]++;
++				break;
++			}
++		}
++		if (tries == 16) {
++			pf_overflow++;
++		}
++	}
++}
++
++static void
++pf_thread_report(uint64_t stamp, uint64_t end, uint64_t span)
++{
++	const ml_topology_info_t *t = ml_get_topology_info();
++	lck_spin_lock(&pf_name_lock);
++	pf_report_name_count = pf_name_count;
++	memcpy(pf_report_names, pf_names, sizeof(pf_names));
++	lck_spin_unlock(&pf_name_lock);
++	for (unsigned i = 0; i < PF_THREADS; i++) {
++		if (!pf_threads[i].tid) {
++			continue;
++		}
++		uint64_t big = 0, little = 0;
++		for (unsigned cpu = 0; cpu < t->num_cpus && cpu < PF_CPUS; cpu++) {
++			/* SDM845's MPIDR Aff1: 0..3 Silver, 4..7 Gold (loader small_cores=0x0f).
++			 * Use DT reg, not logical CPU numbering, which depends on the boot core. */
++			if (((t->cpus[cpu].phys_id >> 8) & 0xff) < 4) {
++				little += pf_threads[i].hits[cpu];
++			} else {
++				big += pf_threads[i].hits[cpu];
++			}
++		}
++		for (unsigned j = 0; j < pf_report_name_count; j++) {
++			if (pf_report_names[j].pid == pf_threads[i].pid) {
++				strlcpy(pf_threads[i].name, pf_report_names[j].name, sizeof(pf_threads[i].name));
++				break;
++			}
++		}
++		char *name = pf_threads[i].name;
++		if (!name[0]) {
++			strlcpy(name, pf_threads[i].pid ? "unknown" : "kernel_task", sizeof(pf_threads[i].name));
++		}
++		for (char *c = name; *c; c++) {
++			if (!((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '_' || *c == '.' || *c == '-')) {
++				*c = '_';
++			}
++		}
++		big = big * 1000 / MAX(pf_polls, 1);
++		little = little * 1000 / MAX(pf_polls, 1);
++		redwood_tl("pf: t at %llu %s:%d:%llu:%llu.%llu:%llu.%llu:%d\n", stamp, name, pf_threads[i].pid, pf_threads[i].tid,
++		    big / 10, big % 10, little / 10, little % 10, pf_threads[i].priority);
++	}
++	redwood_tl("pf: sample at %llu end=%llu span=%llu polls=%llu skipped=%llu overflow=%llu late=%llu work_us=%llu report_us=%llu\n",
++	    stamp, end, span, pf_polls, pf_skipped, pf_overflow, pf_late, pf_work_ns / 1000, pf_report_ns / 1000);
++	for (unsigned cpu = 0; cpu < t->num_cpus && cpu < PF_CPUS; cpu++) {
++		redwood_tl("pf: cpu_sample at %llu cpu=%u state=%d idle=%llu offline=%llu transition=%llu absent=%llu unready=%llu raced=%llu\n",
++		    stamp, cpu, pf_cpu[cpu].state, pf_cpu[cpu].idle, pf_cpu[cpu].offline,
++		    pf_cpu[cpu].transition, pf_cpu[cpu].absent, pf_cpu[cpu].unready, pf_cpu[cpu].raced);
++	}
++	bzero(pf_cpu, sizeof(pf_cpu));
++	bzero(pf_threads, sizeof(pf_threads));
++	pf_polls = pf_skipped = pf_overflow = pf_late = pf_work_ns = 0;
++}
++
++static void
++pf_sampler(void *arg __unused, wait_result_t wr __unused)
++{
++	uint64_t period, half, second;
++	nanoseconds_to_absolutetime(NSEC_PER_SEC / perfprof_hz, &period);
++	nanoseconds_to_absolutetime(NSEC_PER_SEC / 2, &half);
++	nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
++	uint64_t now = mach_absolute_time(), next = now + period, then = now;
++	uint64_t seen_stamp = os_atomic_load(&pf_task_stamp, acquire);
++	for (;;) {
++		os_atomic_store(&pf_deadline, next, relaxed);
++		os_atomic_store(&pf_phase, 1, release);
++		/* Always sleep, rather than delay_for_interval()'s short-interval busy wait. */
++		if (assert_wait_deadline((event_t)&perfprof_hz, THREAD_UNINT, next) == THREAD_WAITING) {
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++		uint64_t began = mach_absolute_time(), ns;
++		os_atomic_store(&pf_phase, 2, release);
++		pf_sample();
++		os_atomic_inc(&pf_progress, release);
++		now = mach_absolute_time();
++		absolutetime_to_nanoseconds(now - began, &ns);
++		pf_work_ns += ns;
++		uint64_t stamp = os_atomic_load(&pf_task_stamp, acquire);
++		bool aligned = stamp != seen_stamp && stamp >= then && stamp <= now;
++		if (aligned || (now - then >= half && task_every_ms != 500) || now - then >= second) {
++			uint64_t report_began = mach_absolute_time();
++			os_atomic_store(&pf_phase, 3, release);
++			pf_thread_report(pf_us(aligned ? stamp : now), pf_us(now), pf_us(now - then));
++			seen_stamp = stamp;
++			then = now;
++			pf_report_ns = 0;
++			absolutetime_to_nanoseconds(mach_absolute_time() - report_began, &pf_report_ns);
++		}
++
++		now = mach_absolute_time();
++		next += period;
++		if (next <= now) {
++			pf_late += (now - next) / period + 1;
++			next = now + period; /* No burst of synthetic samples after a delay. */
++		}
++	}
++}
++
++/* Read-only Mi 8 telemetry. Linux 7.0.14 sdm845.dtsi: TSENS0 TM at
++ * 0x0c263000 (resource 0x1ff), CPU sensors 1..4 and 7..10. tsens-v2.c
++ * Sn_STATUS=0xa0+4*n, VALID bit21, signed 12-bit deci-Celsius. Only these
++ * eight status words are read: no SROT, IRQ/threshold, LMh, PMIC or GPU access.
++ * OSM reads are a subset of the existing mi8_cpuclk_thread ranges. */
++extern unsigned redwood_battery_profile(int values[4], uint64_t *updates);
++
++static uint32_t
++pf_observe_read(vm_offset_t base, unsigned offset)
++{
++	uint32_t value;
++	/* Match mi8_adreno.c rd(): a firmware MMIO trap need not emulate writeback loads. */
++	__asm__ volatile ("ldr %w0, [%1]" : "=r" (value) : "r" (base + offset) : "memory");
++	return value;
++}
++
++static bool
++pf_temperature(uint32_t status, int *mc)
++{
++	if (!(status & (1u << 21))) { return false; }
++	int value = (int)(status & 0xfff);
++	if (value & 0x800) { value -= 0x1000; }
++	*mc = value * 100;
++	return true;
++}
++
++/* Governor-only reader, using the same status offsets, decoder and address-only
++ * load as pf_telemetry. A single caller initializes it before its thread starts.
++ * No mapping/read occurs unless thermgov has passed its startup gates. */
++bool
++redwood_cpu_temperature(int *maximum_mc)
++{
++	static vm_offset_t tm;
++	static bool attempted;
++	static const unsigned sensors[8] = { 1, 2, 3, 4, 7, 8, 9, 10 };
++	if (!attempted) {
++		tm = ml_io_map(0x0c263000, 0x1ff);
++		attempted = true;
++	}
++	if (!tm) { return false; }
++	int maximum = -2147483647;
++	for (unsigned cpu = 0; cpu < 8; cpu++) {
++		int mc;
++		if (!pf_temperature(pf_observe_read(tm, 0xa0 + 4 * sensors[cpu]), &mc)) {
++			return false; /* Any invalid CPU sensor closes the governor. */
++		}
++		maximum = MAX(maximum, mc);
++	}
++	*maximum_mc = maximum;
++	return true;
++}
++
++static void
++pf_telemetry(uint64_t now)
++{
++	static bool mapped;
++	static vm_offset_t osm[2], tm;
++	if (!os_atomic_load(&perfprof_enabled, relaxed)) { return; }
++	if (!mapped) {
++		osm[0] = ml_io_map(0x17d43000, 0x1000);
++		osm[1] = ml_io_map(0x17d45800, 0x1000);
++		tm = ml_io_map(0x0c263000, 0x1ff);
++		mapped = true; /* A failed mapping remains NA; never retry or initialize HW. */
++	}
++	uint64_t began = mach_absolute_time(), at = pf_us(now);
++	uint32_t vote[2] = { 0 }, state[2] = { 0 }, enable[2] = { 0 }, dcvs[2] = { 0 }, domains = 0;
++	for (unsigned d = 0; d < 2; d++) {
++		if (!osm[d]) { continue; }
++		vote[d] = pf_observe_read(osm[d], 0x704);
++		state[d] = pf_observe_read(osm[d], 0x920);
++		enable[d] = pf_observe_read(osm[d], 0x0);
++		dcvs[d] = pf_observe_read(osm[d], 0xbc);
++		domains |= 1u << d;
++	}
++	redwood_tl("pf: osm at %llu d0=%08x d1=%08x s0=%u s1=%u en0=%x en1=%x dc0=%x dc1=%x valid=%x lmh=NA bcl=NA\n",
++	    at, vote[0], vote[1], state[0], state[1], enable[0], enable[1], dcvs[0], dcvs[1], domains);
++	static const unsigned sensors[8] = { 1, 2, 3, 4, 7, 8, 9, 10 };
++	char temperatures[8][16];
++	uint32_t valid = 0, upper = 0, critical = 0;
++	for (unsigned cpu = 0; cpu < 8; cpu++) {
++		int mc;
++		strlcpy(temperatures[cpu], "NA", sizeof(temperatures[cpu]));
++		if (!tm) { continue; }
++		uint32_t raw = pf_observe_read(tm, 0xa0 + 4 * sensors[cpu]);
++		if (pf_temperature(raw, &mc)) {
++			snprintf(temperatures[cpu], sizeof(temperatures[cpu]), "%d", mc);
++			valid |= 1u << cpu;
++			if (raw & (1u << 18)) { upper |= 1u << cpu; }
++			if (raw & (1u << 19)) { critical |= 1u << cpu; }
++		}
++	}
++	/* cN is physical CPU Aff1, not the sampler's logical CPU numbering. */
++	redwood_tl("pf: therm at %llu c0=%s c1=%s c2=%s c3=%s c4=%s c5=%s c6=%s c7=%s valid=%x upper=%x critical=%x source=tsens0_mc\n",
++	    at, temperatures[0], temperatures[1], temperatures[2], temperatures[3], temperatures[4], temperatures[5],
++	    temperatures[6], temperatures[7], valid, upper, critical);
++	int battery[4] = { -273, -1, 0, -1 };
++	uint64_t updates = 0;
++	unsigned source = redwood_battery_profile(battery, &updates);
++	char temp[16], voltage[16], current[16], soc[16];
++	strlcpy(temp, "NA", sizeof(temp)); strlcpy(voltage, "NA", sizeof(voltage));
++	strlcpy(current, "NA", sizeof(current)); strlcpy(soc, "NA", sizeof(soc));
++	if (source) {
++		if (battery[0] != -273) { snprintf(temp, sizeof(temp), "%d", battery[0]); }
++		if (battery[1] > 0) { snprintf(voltage, sizeof(voltage), "%d", battery[1]); }
++		/* UEFI voltage-only fallback has no separate current-valid flag. */
++		if (source == 2 || battery[0] != -273) { snprintf(current, sizeof(current), "%d", battery[2]); }
++		if (battery[3] >= 0 && battery[3] <= 100) { snprintf(soc, sizeof(soc), "%d", battery[3]); }
++	}
++	redwood_tl("pf: batt at %llu temp_c=%s voltage_mv=%s current_ma=%s soc=%s source=%u updates=%llu cache=best_effort\n",
++	    at, temp, voltage, current, soc, source, updates);
++	redwood_tl("pf: observe at %llu work_us=%llu\n", at, pf_us(mach_absolute_time() - began));
++}
++
++/* Same eight dependent additions as mi8clk; no PMU or MMIO. Split the five million
++ * additions into short windows, and check the monotonic timer every 4096 additions.
++ * Interrupts remain enabled. Abort a trial at 200 us; never log/sleep while preemption is off. */
++static void
++pf_clk2(void *arg, wait_result_t wr __unused)
++{
++	uint32_t period = (uint32_t)(uintptr_t)arg;
++	delay_for_interval(30000, NSEC_PER_MSEC);
++	for (unsigned round = 0; round < 60; round++) {
++		char line[512];
++		uint64_t at = pf_us(mach_absolute_time());
++		int used = snprintf(line, sizeof(line), "pf: clk2 round %u t=%llu", round, at / 1000000);
++		for (unsigned cpu = 0; cpu < ml_get_topology_info()->num_cpus && cpu < PF_CPUS; cpu++) {
++			processor_t p = cpu_to_processor(cpu);
++			uint64_t best = UINT64_MAX, worst_window = 0;
++			bool valid = true;
++			if (p == PROCESSOR_NULL || !perfprof_cpu_online(cpu)) {
++				continue;
++			}
++			thread_bind(p);
++			thread_block(THREAD_CONTINUE_NULL);
++			for (unsigned trial = 0; trial < 3 && valid; trial++) {
++				uint64_t total = 0, x = 1;
++				for (unsigned done = 0; done < 5000000 && valid;) {
++					unsigned count = MIN(65536u, 5000000u - done);
++					disable_preemption();
++					uint64_t start = mach_absolute_time(), end = start;
++					if ((unsigned)cpu_number() != cpu) {
++						valid = false;
++					}
++					for (unsigned j = 0; j < count && valid; j += 4096) {
++						unsigned block = MIN(4096u, count - j);
++						for (unsigned k = 0; k < block / 8; k++) {
++							__asm__ volatile ("add %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\t"
++							    "add %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1" : "+r" (x));
++						}
++						end = mach_absolute_time();
++						if (pf_us(end - start) >= 200) {
++							valid = false;
++						}
++					}
++					enable_preemption();
++					total += end - start;
++					worst_window = MAX(worst_window, pf_us(end - start));
++					done += count;
++				}
++				if (valid) {
++					best = MIN(best, total);
++				}
++			}
++			uint64_t ns = 0;
++			if (valid && best != UINT64_MAX) {
++				absolutetime_to_nanoseconds(best, &ns);
++			}
++			used += snprintf(line + used, sizeof(line) - (size_t)used, " cpu%u %llu win%u=%llu valid%u=%u",
++			    cpu, ns ? 5000000ull * 1000 / ns : 0, cpu, worst_window, cpu, valid && ns != 0);
++		}
++		thread_bind(PROCESSOR_NULL);
++		thread_block(THREAD_CONTINUE_NULL);
++		redwood_tl("%s pmu=NA\n", line);
++		delay_for_interval(period * 1000, NSEC_PER_MSEC);
++	}
++	thread_terminate(current_thread());
++}
++
++/* One big-core throughput estimate each second. Same dependent-addition method
++ * as clk2, a single <=65536-add window, timer checked every4096, abort at200us.
++ * Binding/logging/sleeping stay outside the no-preemption window; IRQs stay on. */
++static void
++pf_clk1(void *arg __unused, wait_result_t wr __unused)
++{
++	const ml_topology_info_t *t = ml_get_topology_info();
++	unsigned cpu;
++	for (cpu = 0; cpu < t->num_cpus && cpu < PF_CPUS; cpu++) {
++		if (((t->cpus[cpu].phys_id >> 8) & 0xff) >= 4) { break; }
++	}
++	if (cpu >= t->num_cpus || cpu >= PF_CPUS) { thread_terminate(current_thread()); return; }
++	uint64_t second;
++	nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
++	uint64_t next = mach_absolute_time() + second;
++	for (;;) {
++		if (assert_wait_deadline((event_t)&pf_clk1, THREAD_UNINT, next) == THREAD_WAITING) {
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++		uint64_t began = mach_absolute_time(), start = began, end = began, ns = 0, x = 1;
++		bool valid = perfprof_cpu_online(cpu);
++		if (valid) {
++			thread_bind(cpu_to_processor(cpu));
++			thread_block(THREAD_CONTINUE_NULL);
++			disable_preemption();
++			start = mach_absolute_time();
++			valid = (unsigned)cpu_number() == cpu;
++			for (unsigned j = 0; j < 65536 && valid; j += 4096) {
++				for (unsigned k = 0; k < 4096 / 8; k++) {
++					__asm__ volatile ("add %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\t"
++					    "add %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1\n\tadd %0, %0, #1" : "+r" (x));
++				}
++				end = mach_absolute_time();
++				absolutetime_to_nanoseconds(end - start, &ns);
++				if (ns >= 200000) { valid = false; }
++			}
++			__asm__ volatile ("" :: "r"(x));
++			enable_preemption();
++			thread_bind(PROCESSOR_NULL);
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++		redwood_tl("pf: clk1 at %llu cpu%u %llu valid%u=%u win%u=%llu cost_us=%llu\n", pf_us(start),
++		    cpu, valid && ns ? 65536ull * 1000 / ns : 0, cpu, valid && ns != 0, cpu, ns / 1000,
++		    pf_us(mach_absolute_time() - began));
++		uint64_t now = mach_absolute_time();
++		next += second;
++		if (next <= now) { next = now + second; }
++	}
++}
++
++static void
++perfprof_start(void)
++{
++	uint32_t enabled = 0, period = 10;
++	thread_t thread;
++	if (!PE_parse_boot_argn("perfprof", &enabled, sizeof(enabled)) || enabled != 1) {
++		return;
++	}
++	PE_parse_boot_argn("perfprof_hz", &perfprof_hz, sizeof(perfprof_hz));
++	perfprof_hz = MAX(100u, MIN(perfprof_hz, 2000u));
++	PE_parse_boot_argn("mi8_cpuclk", &period, sizeof(period));
++	period = MAX(1u, MIN(period, 3600u));
++	lck_spin_init(&pf_name_lock, &pf_group, LCK_ATTR_NULL);
++	os_atomic_store(&perfprof_enabled, 1, release);
++	if (kernel_thread_start(pf_sampler, NULL, &thread) != KERN_SUCCESS) {
++		os_atomic_store(&perfprof_enabled, 0, release);
++		redwood_tl("pf: status sampler_failed\n");
++		return;
++	}
++	thread_deallocate(thread);
++	if (perfprof_clock_start(pf_clk2, (void *)(uintptr_t)period, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		redwood_tl("pf: status clk2_failed\n");
++	}
++	if (perfprof_clock_start(pf_clk1, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		redwood_tl("pf: status clk1_failed\n");
++	}
++	redwood_tl("pf: status hz=%u slots=%u pmu=NA gpu_busy_mi8=cp_interval_pending latency=fence_observation\n", perfprof_hz, PF_THREADS);
++	const ml_topology_info_t *t = ml_get_topology_info();
++	for (unsigned i = 0; i < t->num_cpus && i < PF_CPUS; i++) {
++		redwood_tl("pf: map cpu%u mpidr=%x type=%s\n", i, t->cpus[i].phys_id,
++		    ((t->cpus[i].phys_id >> 8) & 0xff) < 4 ? "little" : "big");
++	}
++}
++
+ /*
+  * Boot-arg ddr=1: the memory's bus clock managers ("BCM") in the command database the boot loader
+  * left, with what is needed to vote for bandwidth on them -- only read. (membench=2 says the cores
+@@ -560,7 +1403,9 @@ redwood_cpufreq_init(void)
+ 	const ml_topology_info_t *topology = ml_get_topology_info();
  	uint32_t enabled = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
  
++	perfprof_start();
  	load_start();
 +	taskload_start();
  	enabled = 2;
  	PE_parse_boot_argn("ddr", &enabled, sizeof(enabled));
  	if (enabled == 1) {
+diff --git a/bsd/dev/redwood_haptic.c b/bsd/dev/redwood_haptic.c
+index 69391833710f9ee7c1de3e3d283e45d545faac86..2c7ebeaad0832573fdb452eeef84b86e21628d5c 100644
 --- a/bsd/dev/redwood_haptic.c
 +++ b/bsd/dev/redwood_haptic.c
 @@ -1,75 +1,59 @@
@@ -17369,16 +18564,16 @@
  #include <libkern/libkern.h>
  #include <mach/mach_types.h>
  #include <machine/machine_routines.h>
-+#include <miscfs/devfs/devfs.h>
- #include <pexpert/pexpert.h>
--#include <miscfs/devfs/devfs.h>
+-#include <pexpert/pexpert.h>
+ #include <miscfs/devfs/devfs.h>
++#include <pexpert/pexpert.h>
  #include <sys/conf.h>
-+#include <sys/redwood_audio.h>
-+#include <sys/redwood_input.h>
- #include <sys/systm.h>
- #include <sys/uio.h>
--#include <sys/redwood_audio.h>
--#include <sys/redwood_input.h>
+-#include <sys/systm.h>
+-#include <sys/uio.h>
+ #include <sys/redwood_audio.h>
+ #include <sys/redwood_input.h>
++#include <sys/systm.h>
++#include <sys/uio.h>
  
  extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +extern bool redwood_spmi_maps(vm_offset_t *core, vm_offset_t *cnfg, vm_offset_t *observer);
@@ -17389,16 +18584,15 @@
  static uint32_t level;
 -static bool broken, released, leaving;
 +static bool broken, leaving;
-+
-+static int say(const char *format, ...) __printflike(1, 2);
  
- /* every line to the loader's log as well (and to the console when that may be written) */
--static int say(const char *format, ...) __printflike(1, 2);
--
+-/* every line to the loader's log as well (and to the console when that may be written) */
+ static int say(const char *format, ...) __printflike(1, 2);
+ 
++/* every line to the loader's log as well (and to the console when that may be written) */
  static int
  say(const char *format, ...)
  {
-@@ -122,566 +106,545 @@
+@@ -122,566 +106,545 @@ wait_ms(uint32_t ms)
  	}
  }
  
@@ -17418,7 +18612,9 @@
 -
 -static void
 -show_pins(void)
--{
++static uint64_t
++now_us(void)
+ {
 -	static const struct {
 -		unsigned pin;
 -		const char *what;
@@ -17426,12 +18622,15 @@
 -
 -	for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
 -		uint32_t cfg = rd(GPIO_CFG(pins[i].pin)), io = rd(GPIO_IO(pins[i].pin));
--
++	uint64_t ns;
+ 
 -		say("haptic: gpio%u (%s): function %u, pull %u, %u mA, %s, reads %u\n", pins[i].pin, pins[i].what, (cfg >> 2) & 15,
 -		    cfg & 3, (((cfg >> 6) & 7) + 1) * 2, (cfg & CFG_OUTPUT) ? (io & 2 ? "drives high" : "drives low") : "input", io & 1);
 -	}
--}
--
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / NSEC_PER_USEC;
+ }
+ 
 -/* the reset pin as an output of the GPIO function, driving `high' (2 mA, no pull, as Android has it) */
 -static void
 -reset_pin(bool high)
@@ -17440,31 +18639,6 @@
 -	wr(GPIO_CFG(PIN_RESET), CFG_OUTPUT);
 -	released = high;
 -}
--
--/* ---- I2C by hand (as in redwood_speaker.c) ---------------------------------------------------------- */
--
--static void
--half_bit(void)
--{
--	spin_us(5);                     /* 100 kHz at most */
--}
--
--static void
--line(unsigned pin, bool high)
--{
--	wr(GPIO_IO(pin), 0);
--	wr(GPIO_CFG(pin), CFG_PULL_UP | (high ? 0 : CFG_OUTPUT));
--}
--
-+static uint64_t
-+now_us(void)
-+{
-+	uint64_t ns;
-+
-+	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
-+	return ns / NSEC_PER_USEC;
-+}
-+
 +/* ---- the PMIC arbiter (version 5), as in redwood_torch.c ------------------------------------------- */
 +
 +#define ARB_CORE_PHYS           0x0c440000UL
@@ -17509,49 +18683,99 @@
 +	vm_offset_t     write;
 +};
 +static struct peripheral hap = { .name = "the PMI8998's haptics", .id = HAPTIC_ID_SLAVE3 };
-+
+ 
+-/* ---- I2C by hand (as in redwood_speaker.c) ---------------------------------------------------------- */
 +static vm_offset_t arb_core, arb_cnfg, arb_observer;
-+
-+static void
+ 
+ static void
+-half_bit(void)
 +lock(void)
-+{
+ {
+-	spin_us(5);                     /* 100 kHz at most */
 +	if (!leaving) {
 +		redwood_spmi_lock();
 +	}
-+}
-+
-+static void
+ }
+ 
+ static void
+-line(unsigned pin, bool high)
+-{
+-	wr(GPIO_IO(pin), 0);
+-	wr(GPIO_CFG(pin), CFG_PULL_UP | (high ? 0 : CFG_OUTPUT));
+-}
+-
+-static bool
+-level_of(unsigned pin)
 +unlock(void)
-+{
+ {
+-	return rd(GPIO_IO(pin)) & 1;
 +	if (!leaving) {
 +		redwood_spmi_unlock();
 +	}
-+}
-+
+ }
+ 
+-static void
+-i2c_start(void)
 +static const char *
 +wait_done(vm_offset_t channel)
-+{
+ {
+-	line(PIN_SDA, true);
+-	line(PIN_SCL, true);
+-	half_bit();
+-	line(PIN_SDA, false);
+-	half_bit();
+-	line(PIN_SCL, false);
+-	half_bit();
+-}
 +	uint64_t start = mach_absolute_time(), interval;
 +	uint32_t status;
-+
+ 
+-static void
+-i2c_stop(void)
+-{
+-	line(PIN_SDA, false);
+-	half_bit();
+-	line(PIN_SCL, true);
+-	half_bit();
+-	line(PIN_SDA, true);
+-	half_bit();
 +	nanoseconds_to_absolutetime(TRANSFER_TIMEOUT_US * (uint64_t)NSEC_PER_USEC, &interval);
 +	do {
 +		status = rd(channel + CHANNEL_STATUS);
 +	} while (!(status & STATUS_DONE) && mach_absolute_time() - start < interval);
 +	return !(status & STATUS_DONE) ? "no answer from the arbiter" : (status & STATUS_DENIED) ? "the arbiter refuses" :
 +	       (status & STATUS_FAILURE) ? "the transfer failed" : (status & STATUS_DROPPED) ? DROPPED : NULL;
-+}
-+
+ }
+ 
+-static bool
+-i2c_bit(bool out)
 +static const char *
 +spmi_read_once(const struct peripheral *p, uint8_t reg, uint8_t *bytes, uint32_t count)
-+{
+ {
+-	bool in;
 +	vm_offset_t channel = arb_observer + 0x10000UL * ARB_SYSTEM + 0x80UL * p->channel;
 +	const char *problem;
 +	uint32_t data[2];
-+
+ 
+-	line(PIN_SDA, out);
+-	half_bit();
+-	line(PIN_SCL, true);
+-	for (unsigned stretched = 0; !level_of(PIN_SCL) && stretched < 100; stretched++) {
+-		half_bit();
 +	if (!p->found) {
 +		return "no channel";
-+	}
+ 	}
+-	half_bit();
+-	in = level_of(PIN_SDA);
+-	line(PIN_SCL, false);
+-	return in;
+-}
+-
+-static bool
+-i2c_write(uint8_t byte)
+-{
+-	for (int bit = 7; bit >= 0; bit--) {
+-		i2c_bit((byte >> bit) & 1);
 +	lock();
 +	wr(channel + CHANNEL_COMMAND, COMMAND_READ | (uint32_t)reg << 4 | (count - 1));
 +	problem = wait_done(channel);
@@ -17563,30 +18787,57 @@
 +	}
 +	for (uint32_t i = 0; i < count; i++) {
 +		bytes[i] = (uint8_t)(data[i / 4] >> (8 * (i % 4)));
-+	}
+ 	}
+-	return !i2c_bit(true);
 +	return NULL;
-+}
-+
+ }
+ 
+-static uint8_t
+-i2c_read(bool more)
 +/* `count' (1 to 8) registers from `reg' on; a dropped transfer is asked for again, twice at most */
 +static const char *
 +spmi_read(const struct peripheral *p, uint8_t reg, uint8_t *bytes, uint32_t count)
-+{
+ {
+-	uint8_t byte = 0;
 +	const char *problem = NULL;
-+
+ 
+-	for (int bit = 7; bit >= 0; bit--) {
+-		byte = (uint8_t)(byte << 1 | i2c_bit(true));
 +	for (int tries = 0; tries < 3; tries++) {
 +		if ((problem = spmi_read_once(p, reg, bytes, count)) == NULL || strcmp(problem, DROPPED) != 0) {
 +			break;
 +		}
-+	}
+ 	}
+-	i2c_bit(!more);
+-	return byte;
 +	return problem;
-+}
-+
+ }
+ 
+-static uint32_t taken_cfg[2], taken_io[2];
 +static void
 +find_channel(struct peripheral *p, uint32_t channels)
 +{
 +	for (uint32_t n = 0; n < channels; n++) {
 +		uint32_t map = rd(arb_core + ARB_CHANNEL(n)), owner;
-+
+ 
+-static bool
+-bus_take(void)
+-{
+-	taken_cfg[0] = rd(GPIO_CFG(PIN_SDA));
+-	taken_cfg[1] = rd(GPIO_CFG(PIN_SCL));
+-	taken_io[0] = rd(GPIO_IO(PIN_SDA));
+-	taken_io[1] = rd(GPIO_IO(PIN_SCL));
+-	line(PIN_SDA, true);
+-	line(PIN_SCL, true);
+-	half_bit();
+-	if (!level_of(PIN_SDA) || !level_of(PIN_SCL)) {
+-		wr(GPIO_IO(PIN_SDA), taken_io[0] & 2);
+-		wr(GPIO_IO(PIN_SCL), taken_io[1] & 2);
+-		wr(GPIO_CFG(PIN_SDA), taken_cfg[0]);
+-		wr(GPIO_CFG(PIN_SCL), taken_cfg[1]);
+-		say("haptic: the I2C bus is not at rest (gpio%u reads %u, gpio%u reads %u): not touched\n", PIN_SDA,
+-		    level_of(PIN_SDA), PIN_SCL, level_of(PIN_SCL));
+-		return false;
 +		if (map == 0 || ((map >> 8) & 0xfff) != p->id) {
 +			continue;
 +		}
@@ -17601,11 +18852,21 @@
 +	}
 +	if (!p->found) {
 +		say("haptic: no channel of the arbiter is %s\n", p->name);
-+	}
-+}
-+
+ 	}
+-	return true;
+ }
+ 
+-static void
+-bus_give_back(void)
+-{
+-	wr(GPIO_IO(PIN_SDA), taken_io[0] & 2);
+-	wr(GPIO_IO(PIN_SCL), taken_io[1] & 2);
+-	wr(GPIO_CFG(PIN_SDA), taken_cfg[0]);
+-	wr(GPIO_CFG(PIN_SCL), taken_cfg[1]);
+-}
 +/* ---- boot-arg bcl_watch=N (EXP-0164): the PMI8998's battery current limit block, read only ----------- */
-+
+ 
+-#define AW_ADDRESS              0x5a
 +/*
 + * BCL (downstream msm-4.9 bcl_peripheral.c, "qcom,bcl-v4", PMI8998 0x4200 [待验证]): when the battery's voltage drops or
 + * its current rises past a threshold it raises an interrupt that the limits hardware can act on at once -- the suspect
@@ -17614,27 +18875,90 @@
 + * 39 mV and 80 mA a step in that driver [待验证]); the first time all of 0x00-0xff, afterwards what changed. No writes.
 + */
 +static struct peripheral bcl = { .name = "the PMI8998's BCL", .id = 0x242 };
-+
+ 
+-/* `count' 8-bit registers from `reg' on (the chip's address counts up, but for its RAM data port) */
+-static bool
+-regs_read(uint8_t reg, uint8_t *values, unsigned count)
 +static void
 +bcl_watch(uint32_t seconds, uint32_t channels)
-+{
+ {
+-	bool answered;
 +	uint8_t now[256], was[256];
 +	bool first = true;
-+
+ 
+-	if (!bus_take()) {
+-		return false;
+-	}
+-	i2c_start();
+-	answered = i2c_write(AW_ADDRESS << 1) && i2c_write(reg);
+-	if (answered) {
+-		i2c_start();
+-		answered = i2c_write(AW_ADDRESS << 1 | 1);
 +	find_channel(&bcl, channels);
 +	if (!bcl.found) {
 +		bcl.id = 0x342;
 +		find_channel(&bcl, channels);
-+	}
+ 	}
+-	for (unsigned i = 0; answered && i < count; i++) {
+-		values[i] = i2c_read(i + 1 < count);
 +	if (!bcl.found) {
 +		say("bcl: no channel\n");
 +		return;
-+	}
+ 	}
+-	i2c_stop();
+-	bus_give_back();
+-	return answered;
+-}
+-
+-static bool
+-regs_write(uint8_t reg, const uint8_t *values, unsigned count)
+-{
+-	bool answered;
 +	for (uint32_t t = 0; t < seconds; t++) {
 +		char line[700];
 +		int n;
 +		uint64_t ns;
-+
+ 
+-	if (!bus_take()) {
+-		return false;
+-	}
+-	i2c_start();
+-	answered = i2c_write(AW_ADDRESS << 1) && i2c_write(reg);
+-	for (unsigned i = 0; answered && i < count; i++) {
+-		answered = i2c_write(values[i]);
+-	}
+-	i2c_stop();
+-	bus_give_back();
+-	return answered;
+-}
+-
+-/* ---- the chip -------------------------------------------------------------------------------------- */
+-
+-#define AW_RSTCFG               0x00            /* 0xaa: a soft reset */
+-#define AW_SYSST                0x01
+-#define AW_SYSINT               0x02            /* read: cleared */
+-#define AW_SYSINTM              0x03
+-#define AW_PLAYCFG1             0x06            /* [7] boost on, [6:0] its voltage */
+-#define AW_PLAYCFG2             0x07            /* the gain */
+-#define AW_PLAYCFG3             0x08            /* [1:0] the play mode: 0 RAM */
+-#define AW_PLAYCFG4             0x09            /* [1] stop, [0] go */
+-#define AW_WAVCFG1              0x0a            /* the first waveform to play, 1..127 (0: the end) */
+-#define AW_WAVCFG2              0x0b
+-#define AW_WAVCFG9              0x12            /* [7:4] how often the first is repeated, 15: until told to stop */
+-#define AW_BASEADDRH            0x2d
+-#define AW_BASEADDRL            0x2e
+-#define AW_GLBRD5               0x3f            /* [3:0] the state: 0 standby */
+-#define AW_RAMADDRH             0x40
+-#define AW_RAMADDRL             0x41
+-#define AW_RAMDATA              0x42
+-#define AW_SYSCTRL3             0x45            /* [5] standby, [2] the RAM open for loading */
+-#define AW_TMCFG                0x5b            /* 0x7d opens the analog registers 0x70.. for writing, 0 closes them */
+-#define AW_TRIM_LRA             0x79            /* the motor's f0 calibration */
+-#define AW_CHIPIDH              0x57
+-#define AW_CHIPIDL              0x58
+-#define AW_CHIPID               0x9270
+-
+-#define SYSINT_FAULTS           0xe6            /* boost short circuit and over-voltage, under-voltage, over-current, over-temperature */
 +		for (uint32_t reg = 0; reg < 256; reg += 8) {
 +			if (spmi_read(&bcl, (uint8_t)reg, now + reg, 8) != NULL) {
 +				memset(now + reg, 0xee, 8);
@@ -17679,8 +19003,8 @@
 +#define ANDROID_VMAX_CODE       27              /* round(3100 / 116): 3132 mV, the most ever written */
 +#define ANDROID_RATE_US         4878            /* "qcom,wave-play-rate-us" 0x130e */
 +#define RATE_STEP_US            5
-+#define HAPTIC_MAX_MS           1000
-+
+ #define HAPTIC_MAX_MS           1000
+ 
 +/* Android's three effects ("qcom,effect-arry"), eight samples each */
 +static const uint8_t effects[3][8] = {
 +	{ 0x3e, 0x3e, 0xbe, 0x00, 0x00, 0x00, 0x00, 0x00 },
@@ -17700,9 +19024,15 @@
 +
 +static void note(const char *format, ...) __printflike(1, 2);
 +
-+static void
+ static void
+-give_up(const char *why)
 +note(const char *format, ...)
-+{
+ {
+-	broken = true;
+-	say("haptic: %s: THE CHIP IS PUT INTO RESET (gpio%u low) and nothing more is done\n", why, PIN_RESET);
+-	if (tlmm != 0) {
+-		reset_pin(false);
+-	}
 +	char *slot = notes[noted++ % NOTES];
 +	uint64_t ns;
 +	va_list list;
@@ -17714,121 +19044,50 @@
 +	vsnprintf(slot + n, sizeof(notes[0]) - (size_t)n, format, list);
 +	va_end(list);
 +	say("haptic: %s\n", slot);
-+}
-+
+ }
+ 
+-static bool
+-get(uint8_t reg, uint8_t *value)
 +static void
 +give_up(const char *why)
-+{
+ {
+-	if (!regs_read(reg, value, 1)) {
+-		say("haptic: %#04x NOT READ\n", reg);
+-		return false;
 +	if (!broken) {
 +		broken = true;
 +		note("%s: no more writing to the haptics for the rest of the run", why);
-+	}
-+}
-+
+ 	}
+-	return true;
+ }
+ 
+-/* One register written and read back. */
 +/* one register (of the list above only) written and read back; false, and no more writing, if it cannot be or does not read back */
  static bool
--level_of(unsigned pin)
--{
--	return rd(GPIO_IO(pin)) & 1;
--}
--
--static void
--i2c_start(void)
--{
--	line(PIN_SDA, true);
--	line(PIN_SCL, true);
--	half_bit();
--	line(PIN_SDA, false);
--	half_bit();
--	line(PIN_SCL, false);
--	half_bit();
--}
--
--static void
--i2c_stop(void)
--{
--	line(PIN_SDA, false);
--	half_bit();
--	line(PIN_SCL, true);
--	half_bit();
--	line(PIN_SDA, true);
--	half_bit();
--}
--
--static bool
--i2c_bit(bool out)
--{
--	bool in;
--
--	line(PIN_SDA, out);
--	half_bit();
--	line(PIN_SCL, true);
--	for (unsigned stretched = 0; !level_of(PIN_SCL) && stretched < 100; stretched++) {
--		half_bit();
--	}
--	half_bit();
--	in = level_of(PIN_SDA);
--	line(PIN_SCL, false);
--	return in;
--}
--
--static bool
--i2c_write(uint8_t byte)
--{
--	for (int bit = 7; bit >= 0; bit--) {
--		i2c_bit((byte >> bit) & 1);
--	}
--	return !i2c_bit(true);
--}
--
--static uint8_t
--i2c_read(bool more)
--{
--	uint8_t byte = 0;
--
--	for (int bit = 7; bit >= 0; bit--) {
--		byte = (uint8_t)(byte << 1 | i2c_bit(true));
--	}
--	i2c_bit(!more);
--	return byte;
--}
--
--static uint32_t taken_cfg[2], taken_io[2];
--
--static bool
--bus_take(void)
--{
--	taken_cfg[0] = rd(GPIO_CFG(PIN_SDA));
--	taken_cfg[1] = rd(GPIO_CFG(PIN_SCL));
--	taken_io[0] = rd(GPIO_IO(PIN_SDA));
--	taken_io[1] = rd(GPIO_IO(PIN_SCL));
--	line(PIN_SDA, true);
--	line(PIN_SCL, true);
--	half_bit();
--	if (!level_of(PIN_SDA) || !level_of(PIN_SCL)) {
--		wr(GPIO_IO(PIN_SDA), taken_io[0] & 2);
--		wr(GPIO_IO(PIN_SCL), taken_io[1] & 2);
--		wr(GPIO_CFG(PIN_SDA), taken_cfg[0]);
--		wr(GPIO_CFG(PIN_SCL), taken_cfg[1]);
--		say("haptic: the I2C bus is not at rest (gpio%u reads %u, gpio%u reads %u): not touched\n", PIN_SDA,
--		    level_of(PIN_SDA), PIN_SCL, level_of(PIN_SCL));
-+put(uint8_t reg, uint8_t value)
-+{
+ put(uint8_t reg, uint8_t value)
+ {
+-	uint8_t after = 0;
 +	const char *problem;
 +	uint8_t back = 0xff;
 +	bool allowed = false;
-+
+ 
+-	if (broken) {
 +	for (size_t i = 0; i < sizeof(writable_regs); i++) {
 +		allowed |= writable_regs[i] == reg;
 +	}
 +	if (broken || !allowed || !hap.writable || hap.write == 0 || (hap.id != HAPTIC_ID_SLAVE3 && hap.id != HAPTIC_ID_SLAVE2)) {
 +		give_up(allowed ? "a write that may not be made" : "a register that is not to be written");
-+		return false;
-+	}
+ 		return false;
+ 	}
+-	if (!regs_write(reg, &value, 1)) {
+-		say("haptic: %#04x <- %#04x NOT ACKNOWLEDGED\n", reg, value);
+-		give_up("a write was not acknowledged");
 +	if (((rd(arb_core + ARB_CHANNEL(hap.channel)) >> 8) & 0xfff) != hap.id) {
 +		give_up("the arbiter's channel is no longer the haptics'");
-+		return false;
-+	}
+ 		return false;
+ 	}
+-	if (!regs_read(reg, &after, 1)) {
+-		give_up("a register could not be read back");
 +	for (int tries = 0; tries < 3; tries++) {
 +		lock();
 +		wr(hap.write + CHANNEL_WDATA0, value);
@@ -17842,8 +19101,11 @@
 +	if (problem != NULL) {
 +		say("haptic: %#04x <- %#04x: %s\n", reg, value, problem);
 +		give_up("a write that failed");
-+		return false;
-+	}
+ 		return false;
+ 	}
+-	say("haptic: %#04x <- %#04x, reads %#04x%s\n", reg, value, after, after == value ? "" : ": NOT AS WRITTEN");
+-	if (after != value) {
+-		give_up("a register did not read back as written");
 +	if (reg == HAP_PLAY) {
 +		return true;            /* (it clears itself when the pattern has played) */
 +	}
@@ -17858,168 +19120,16 @@
  		return false;
  	}
  	return true;
--}
--
--static void
--bus_give_back(void)
--{
--	wr(GPIO_IO(PIN_SDA), taken_io[0] & 2);
--	wr(GPIO_IO(PIN_SCL), taken_io[1] & 2);
--	wr(GPIO_CFG(PIN_SDA), taken_cfg[0]);
--	wr(GPIO_CFG(PIN_SCL), taken_cfg[1]);
--}
--
--#define AW_ADDRESS              0x5a
--
--/* `count' 8-bit registers from `reg' on (the chip's address counts up, but for its RAM data port) */
--static bool
--regs_read(uint8_t reg, uint8_t *values, unsigned count)
--{
--	bool answered;
--
--	if (!bus_take()) {
--		return false;
--	}
--	i2c_start();
--	answered = i2c_write(AW_ADDRESS << 1) && i2c_write(reg);
--	if (answered) {
--		i2c_start();
--		answered = i2c_write(AW_ADDRESS << 1 | 1);
--	}
--	for (unsigned i = 0; answered && i < count; i++) {
--		values[i] = i2c_read(i + 1 < count);
--	}
--	i2c_stop();
--	bus_give_back();
--	return answered;
--}
--
--static bool
--regs_write(uint8_t reg, const uint8_t *values, unsigned count)
--{
--	bool answered;
--
--	if (!bus_take()) {
--		return false;
--	}
--	i2c_start();
--	answered = i2c_write(AW_ADDRESS << 1) && i2c_write(reg);
--	for (unsigned i = 0; answered && i < count; i++) {
--		answered = i2c_write(values[i]);
--	}
--	i2c_stop();
--	bus_give_back();
--	return answered;
--}
--
--/* ---- the chip -------------------------------------------------------------------------------------- */
--
--#define AW_RSTCFG               0x00            /* 0xaa: a soft reset */
--#define AW_SYSST                0x01
--#define AW_SYSINT               0x02            /* read: cleared */
--#define AW_SYSINTM              0x03
--#define AW_PLAYCFG1             0x06            /* [7] boost on, [6:0] its voltage */
--#define AW_PLAYCFG2             0x07            /* the gain */
--#define AW_PLAYCFG3             0x08            /* [1:0] the play mode: 0 RAM */
--#define AW_PLAYCFG4             0x09            /* [1] stop, [0] go */
--#define AW_WAVCFG1              0x0a            /* the first waveform to play, 1..127 (0: the end) */
--#define AW_WAVCFG2              0x0b
--#define AW_WAVCFG9              0x12            /* [7:4] how often the first is repeated, 15: until told to stop */
--#define AW_BASEADDRH            0x2d
--#define AW_BASEADDRL            0x2e
--#define AW_GLBRD5               0x3f            /* [3:0] the state: 0 standby */
--#define AW_RAMADDRH             0x40
--#define AW_RAMADDRL             0x41
--#define AW_RAMDATA              0x42
--#define AW_SYSCTRL3             0x45            /* [5] standby, [2] the RAM open for loading */
--#define AW_TMCFG                0x5b            /* 0x7d opens the analog registers 0x70.. for writing, 0 closes them */
--#define AW_TRIM_LRA             0x79            /* the motor's f0 calibration */
--#define AW_CHIPIDH              0x57
--#define AW_CHIPIDL              0x58
--#define AW_CHIPID               0x9270
--
--#define SYSINT_FAULTS           0xe6            /* boost short circuit and over-voltage, under-voltage, over-current, over-temperature */
--#define HAPTIC_MAX_MS           1000
--
--static void
--give_up(const char *why)
--{
--	broken = true;
--	say("haptic: %s: THE CHIP IS PUT INTO RESET (gpio%u low) and nothing more is done\n", why, PIN_RESET);
--	if (tlmm != 0) {
--		reset_pin(false);
--	}
  }
  
- static bool
- get(uint8_t reg, uint8_t *value)
- {
--	if (!regs_read(reg, value, 1)) {
--		say("haptic: %#04x NOT READ\n", reg);
-+	const char *problem = spmi_read(&hap, reg, value, 1);
-+
-+	if (problem != NULL) {
-+		say("haptic: reading %#04x of %s: %s\n", reg, hap.name, problem);
- 		return false;
- 	}
- 	return true;
- }
- 
--/* One register written and read back. */
-+static void
-+show_registers(void)
-+{
-+	uint8_t r[8];
-+	char line[200];
-+
-+	for (unsigned base = 0; base < 0x100; base += 0x20) {
-+		int n = snprintf(line, sizeof(line), "haptic: %#04x:", base);
-+
-+		for (unsigned i = 0; i < 0x20; i += 8) {
-+			if (spmi_read(&hap, (uint8_t)(base + i), r, 8) != NULL) {
-+				n += snprintf(line + n, sizeof(line) - (size_t)n, " (unreadable)");
-+				continue;
-+			}
-+			for (unsigned j = 0; j < 8; j++) {
-+				n += snprintf(line + n, sizeof(line) - (size_t)n, " %02x", r[j]);
-+			}
-+		}
-+		say("%s\n", line);
-+	}
-+}
-+
-+/* stopped: the pattern, then the module. Always tried, whatever went before. */
- static bool
--put(uint8_t reg, uint8_t value)
--{
--	uint8_t after = 0;
--
--	if (broken) {
--		return false;
--	}
--	if (!regs_write(reg, &value, 1)) {
--		say("haptic: %#04x <- %#04x NOT ACKNOWLEDGED\n", reg, value);
--		give_up("a write was not acknowledged");
--		return false;
--	}
--	if (!regs_read(reg, &after, 1)) {
--		give_up("a register could not be read back");
--		return false;
--	}
--	say("haptic: %#04x <- %#04x, reads %#04x%s\n", reg, value, after, after == value ? "" : ": NOT AS WRITTEN");
--	if (after != value) {
--		give_up("a register did not read back as written");
--		return false;
--	}
--	return true;
--}
--
 -/* The chip's interrupt flags (reading clears them): false, and the chip given up on, if one is a fault. */
--static bool
+ static bool
 -healthy(const char *when)
--{
++get(uint8_t reg, uint8_t *value)
+ {
 -	uint8_t flags = 0;
--
++	const char *problem = spmi_read(&hap, reg, value, 1);
+ 
 -	if (!get(AW_SYSINT, &flags)) {
 -		give_up("the flags could not be read");
 -		return false;
@@ -18029,11 +19139,13 @@
 -		    flags & 0x40 ? " BOOST OVER-VOLTAGE" : "", flags & 0x20 ? " UNDER-VOLTAGE" : "", flags & 0x04 ? " OVER-CURRENT" : "",
 -		    flags & 0x02 ? " OVER-TEMPERATURE" : "");
 -		give_up("a fault");
--		return false;
--	}
--	return true;
--}
--
++	if (problem != NULL) {
++		say("haptic: reading %#04x of %s: %s\n", reg, hap.name, problem);
+ 		return false;
+ 	}
+ 	return true;
+ }
+ 
 -/* Android's registers as its driver leaves them, read from the phone's sysfs (fw-haptic/android/haptic-sysfs.txt) */
 -static const uint8_t android_regs[0x7d] = {
 -	[0x00] = 0x82, [0x01] = 0x10, [0x02] = 0x11, [0x03] = 0x59, [0x04] = 0x09, [0x05] = 0x00, [0x06] = 0x47, [0x07] = 0x80,
@@ -18049,14 +19161,18 @@
 -};
 -
 -/* What the chip holds now, against Android's (registers 0x00..0x7c; 0x32 and 0x42 are data ports, not read). */
--static void
--show_registers(void)
--{
+ static void
+ show_registers(void)
+ {
 -	unsigned differ = 0;
--
++	uint8_t r[8];
++	char line[200];
+ 
 -	for (unsigned reg = 0; reg <= 0x7c; reg++) {
 -		uint8_t value = 0;
--
++	for (unsigned base = 0; base < 0x100; base += 0x20) {
++		int n = snprintf(line, sizeof(line), "haptic: %#04x:", base);
+ 
 -		if (reg == 0x32 || reg == 0x42) {
 -			continue;
 -		}
@@ -18067,16 +19183,28 @@
 -		if (value != android_regs[reg]) {
 -			differ++;
 -			say("haptic: %#04x = %#04x (Android leaves %#04x)\n", reg, value, android_regs[reg]);
--		}
--	}
++		for (unsigned i = 0; i < 0x20; i += 8) {
++			if (spmi_read(&hap, (uint8_t)(base + i), r, 8) != NULL) {
++				n += snprintf(line + n, sizeof(line) - (size_t)n, " (unreadable)");
++				continue;
++			}
++			for (unsigned j = 0; j < 8; j++) {
++				n += snprintf(line + n, sizeof(line) - (size_t)n, " %02x", r[j]);
++			}
+ 		}
++		say("%s\n", line);
+ 	}
 -	say("haptic: %u registers differ from what Android leaves in them\n", differ);
--}
--
--static bool
+ }
+ 
++/* stopped: the pattern, then the module. Always tried, whatever went before. */
+ static bool
 -chip_answers(void)
--{
++stop_motor(void)
+ {
 -	uint8_t id[2] = { 0, 0 };
--
++	bool was_broken = broken, ok;
+ 
 -	if (!regs_read(AW_CHIPIDH, id, 2)) {
 -		say("haptic: nobody answers at %#x on the bus of gpio%u/%u\n", AW_ADDRESS, PIN_SDA, PIN_SCL);
 -		return false;
@@ -18084,8 +19212,12 @@
 -	say("haptic: the chip at %#x is %#06x%s\n", AW_ADDRESS, id[0] << 8 | id[1], (id[0] << 8 | id[1]) == AW_CHIPID ? ", an AW86927" :
 -	    ": NOT THE AW86927 EXPECTED");
 -	return (id[0] << 8 | id[1]) == AW_CHIPID;
--}
--
++	broken = false;
++	ok = put(HAP_PLAY, 0x00) && put(HAP_EN_CTL, 0x00);
++	broken = was_broken || !ok;
++	return ok;
+ }
+ 
 -/*
 - * Android's configuration: the registers its driver sets (and the mainline Linux driver aw86927.c sets the
 - * same way), with Android's values -- those that differ from the chip's own after a reset, as the phone
@@ -18119,42 +19251,27 @@
 -/* The analog registers opened or closed for writing (AW_TMCFG reads back as 0 either way: what tells is that the writes stick). */
 -static bool
 -unlock(bool open)
--{
--	uint8_t value = open ? 0x7d : 0x00;
--
--	if (broken || !regs_write(AW_TMCFG, &value, 1)) {
--		give_up("the analog registers could not be opened");
--		return false;
--	}
--	say("haptic: %#04x <- %#04x (the analog registers %s)\n", AW_TMCFG, value, open ? "opened" : "closed");
--	return true;
--}
--
-+stop_motor(void)
-+{
-+	bool was_broken = broken, ok;
-+
-+	broken = false;
-+	ok = put(HAP_PLAY, 0x00) && put(HAP_EN_CTL, 0x00);
-+	broken = was_broken || !ok;
-+	return ok;
-+}
-+
 +/* The short-circuit flag; NULL if all is well. */
 +static const char *
 +trouble(void)
-+{
+ {
+-	uint8_t value = open ? 0x7d : 0x00;
 +	uint8_t status = 0;
-+
+ 
+-	if (broken || !regs_write(AW_TMCFG, &value, 1)) {
+-		give_up("the analog registers could not be opened");
+-		return false;
 +	if (!get(HAP_STATUS_1, &status)) {
 +		return "a read of the status that failed";
-+	}
+ 	}
+-	say("haptic: %#04x <- %#04x (the analog registers %s)\n", AW_TMCFG, value, open ? "opened" : "closed");
+-	return true;
 +	if (status & STATUS_SHORT) {
 +		return "the short-circuit flag";
 +	}
 +	return NULL;
-+}
-+
+ }
+ 
 +static bool configured, playing;
 +static int loaded_effect = -1;                  /* the effect whose samples are in the buffer now */
 +static uint8_t vmax_code = ANDROID_VMAX_CODE;   /* what HAP_VMAX holds now */
@@ -18166,166 +19283,79 @@
 -	say("haptic: Android's configuration is written\n");
 -	for (unsigned i = 0; i < sizeof(android_config) / sizeof(android_config[0]); i++) {
 -		if (!put(android_config[i][0], android_config[i][1])) {
+-			return false;
+-		}
+-	}
+-	if (!unlock(true)) {
+-		return false;
 +	uint32_t rate;
 +
 +	if (configured) {
 +		return true;
-+	}
+ 	}
+-	for (unsigned i = 0; i < sizeof(android_analog) / sizeof(android_analog[0]); i++) {
+-		if (!put(android_analog[i][0], android_analog[i][1])) {
+-			(void)unlock(false);
+-			return false;
+-		}
 +	rate = ANDROID_RATE_US / RATE_STEP_US;
 +	if (put(HAP_EN_CTL, 0x00) && put(HAP_SEL, 0x10) && put(HAP_VMAX, (uint8_t)(ANDROID_VMAX_CODE << 1)) && put(HAP_ILIM, 0x01) &&
 +	    put(HAP_RATE1, (uint8_t)rate) && put(HAP_RATE2, (uint8_t)((rate >> 8) & 0x0f)) && put(HAP_WF_REPEAT, 0x00)) {
 +		configured = true;
-+	}
+ 	}
+-	return unlock(false) && healthy("after the configuration");
 +	return configured;
-+}
-+
+ }
+ 
+-static uint32_t states_seen;           /* the GLBRD5 states seen by the last wait, a bit each */
+-
+-/* until the chip says it is in standby (GLBRD5 state 0), at most `ms' */
 +/* the drive voltage, in steps of 116 mV, never above Android's */
-+static bool
+ static bool
+-wait_standby(unsigned ms)
 +set_vmax(uint8_t code)
-+{
+ {
+-	states_seen = 0;
+-	for (unsigned waited = 0; waited <= ms; waited += 2) {
+-		uint8_t state = 0xff;
+-
+-		if (!get(AW_GLBRD5, &state)) {
+-			return false;
+-		}
+-		states_seen |= 1u << (state & 0x0f);
+-		if ((state & 0x0f) == 0) {
+-			return true;
+-		}
+-		wait_ms(2);
 +	code = code > ANDROID_VMAX_CODE ? ANDROID_VMAX_CODE : code < 8 ? 8 : code;
 +	if (code == vmax_code && configured) {
 +		return true;
 +	}
 +	if (!configure() || !put(HAP_VMAX, (uint8_t)(code << 1))) {
 +		return false;
-+	}
+ 	}
+-	return false;
 +	vmax_code = code;
 +	return true;
-+}
-+
-+/* an effect (0 to 2) started, repeated 2^`log_repeats' times; does not wait */
-+static bool
-+start_effect(unsigned effect, unsigned log_repeats)
-+{
-+	const char *why;
-+
-+	if (effect > 2 || (why = trouble()) != NULL) {
-+		if (effect <= 2) {
-+			note("not started: %s", why);
-+			(void)stop_motor();
-+			give_up("trouble before the vibration");
-+		}
-+		return false;
-+	}
-+	if (!configure() || !put(HAP_WF_REPEAT, (uint8_t)((log_repeats & 7) << 4))) {
-+		return false;
-+	}
-+	for (unsigned i = 0; loaded_effect != (int)effect && i < 8; i++) {
-+		if (!put((uint8_t)(HAP_WF_S1 + i), effects[effect][i])) {
- 			return false;
- 		}
- 	}
--	if (!unlock(true)) {
--		return false;
--	}
--	for (unsigned i = 0; i < sizeof(android_analog) / sizeof(android_analog[0]); i++) {
--		if (!put(android_analog[i][0], android_analog[i][1])) {
--			(void)unlock(false);
-+	loaded_effect = (int)effect;
-+	if (!put(HAP_EN_CTL, 0x80) || !put(HAP_PLAY, 0x80)) {
-+		return false;
-+	}
-+	playing = true;
-+	return true;
-+}
-+
-+/* busy for how long, in microseconds, up to `limit_ms' (stopped at that); 0 if it never began */
-+static uint64_t
-+wait_idle(uint32_t limit_ms)
-+{
-+	uint64_t began = now_us();
-+	uint8_t status = 0;
-+
-+	wait_ms(1);
-+	while (now_us() - began < limit_ms * 1000ull) {
-+		if (!get(HAP_STATUS_1, &status)) {
-+			return 0;
-+		}
-+		if (status & STATUS_SHORT) {
-+			note("OFF: the short-circuit flag (status %#x)", status);
-+			(void)stop_motor();
-+			give_up("trouble while playing");
-+			return 0;
-+		}
-+		if (!(status & STATUS_BUSY)) {
-+			break;
-+		}
-+		wait_ms(1);
-+	}
-+	return now_us() - began;
-+}
-+
-+static bool
-+vibrate(unsigned effect, uint32_t ms)
-+{
-+	uint64_t began = now_us(), busy;
-+
-+	ms = ms > HAPTIC_MAX_MS ? HAPTIC_MAX_MS : ms;
-+	while (!broken && now_us() - began < ms * 1000ull) {
-+		if (!start_effect(effect, ms > 60 ? 4 : 0)) {
- 			return false;
- 		}
--	}
--	return unlock(false) && healthy("after the configuration");
--}
--
--static uint32_t states_seen;           /* the GLBRD5 states seen by the last wait, a bit each */
--
--/* until the chip says it is in standby (GLBRD5 state 0), at most `ms' */
--static bool
--wait_standby(unsigned ms)
--{
--	states_seen = 0;
--	for (unsigned waited = 0; waited <= ms; waited += 2) {
--		uint8_t state = 0xff;
--
--		if (!get(AW_GLBRD5, &state)) {
-+		busy = wait_idle((uint32_t)(ms - (now_us() - began) / 1000));
-+		if (!stop_motor()) {
- 			return false;
- 		}
--		states_seen |= 1u << (state & 0x0f);
--		if ((state & 0x0f) == 0) {
--			return true;
--		}
--		wait_ms(2);
--	}
--	return false;
--}
-+		playing = false;
-+		if (busy == 0 && broken) {
-+			return false;
-+		}
-+		if (ms <= 60) {
-+			break;
-+		}
-+	}
-+	return !broken;
-+}
-+
-+/* ---- haptic=3: the motor for iOS --------------------------------------------------------------------- */
+ }
  
- /*
+-/*
 - * Android's waveforms into the chip's RAM: the file is a checksum (16 bits, of all that follows), the
 - * address the RAM's contents begin at (0x0800), and those contents -- a version byte, the start and end
 - * address of each waveform, the waveforms. Written through the data port with the address counting up,
 - * then read back the same way and compared.
-+ * Two ways in. /dev/redwood-haptic is the upstream one: what iOS plays on its "Actuator" device (the audio HAL plug-in's,
-+ * userland/src/audio_plugin.c: the system's feedbacks and vibrations, CoreHaptics' patterns, UIKit's feedbacks) arrives as
-+ * samples of one channel, and is turned into the motor's: a waveform of iOS's (a stretch of samples after a pause) a tap, one
-+ * that goes on longer than a tap a vibration until it ends, as strong as iOS's waveform is loud (the drive voltage: Android's
-+ * from a third of full scale up, five eighths of it for the softest). /dev/redwood-vibrate takes a word for tests and for
-+ * whoever wants a plain vibration: bits 0-15 milliseconds (0 stops), bits 16-19 the effect.
-  */
--static bool
+- */
++/* an effect (0 to 2) started, repeated 2^`log_repeats' times; does not wait */
+ static bool
 -load_waveforms(void)
--{
++start_effect(unsigned effect, unsigned log_repeats)
+ {
 -	uint64_t size = 0;
 -	const uint8_t *file = redwood_wifi_file("aw8697_haptic.bin", &size);
 -	uint32_t sum = 0, base, length;
 -	uint8_t address[2], back[64];
--
++	const char *why;
+ 
 -	if (file == NULL || size < 8) {
 -		say("haptic: no aw8697_haptic.bin in fw/ of the small image (fw-haptic/ when it is built)\n");
 -		return false;
@@ -18343,49 +19373,87 @@
 -	    base - 1) / 4));
 -	if (!wait_standby(250) || !put(AW_SYSCTRL3, (uint8_t)(android_regs[AW_SYSCTRL3] | 0x04))) {
 -		give_up("the RAM could not be opened");
--		return false;
--	}
++	if (effect > 2 || (why = trouble()) != NULL) {
++		if (effect <= 2) {
++			note("not started: %s", why);
++			(void)stop_motor();
++			give_up("trouble before the vibration");
++		}
+ 		return false;
+ 	}
 -	address[0] = (uint8_t)(base >> 8);
 -	address[1] = (uint8_t)base;
 -	if (!put(AW_BASEADDRH, address[0]) || !put(AW_BASEADDRL, address[1]) || !regs_write(AW_RAMADDRH, address, 2)) {
 -		give_up("the RAM's address could not be set");
--		return false;
--	}
++	if (!configure() || !put(HAP_WF_REPEAT, (uint8_t)((log_repeats & 7) << 4))) {
+ 		return false;
+ 	}
 -	for (uint32_t at = 0; at < length; at += 32) {
 -		unsigned n = length - at < 32 ? length - at : 32;
 -
 -		if (!regs_write(AW_RAMDATA, file + 4 + at, n)) {
 -			give_up("the RAM could not be written");
--			return false;
--		}
--	}
++	for (unsigned i = 0; loaded_effect != (int)effect && i < 8; i++) {
++		if (!put((uint8_t)(HAP_WF_S1 + i), effects[effect][i])) {
+ 			return false;
+ 		}
+ 	}
 -	if (!regs_write(AW_RAMADDRH, address, 2)) {
 -		give_up("the RAM's address could not be set again");
--		return false;
--	}
++	loaded_effect = (int)effect;
++	if (!put(HAP_EN_CTL, 0x80) || !put(HAP_PLAY, 0x80)) {
+ 		return false;
+ 	}
 -	for (uint32_t at = 0; at < length; at += sizeof(back)) {
 -		unsigned n = length - at < sizeof(back) ? length - at : sizeof(back);
--
++	playing = true;
++	return true;
++}
+ 
 -		if (!regs_read(AW_RAMDATA, back, n) || memcmp(back, file + 4 + at, n) != 0) {
 -			say("haptic: the RAM reads back differently at %#x\n", base + at);
 -			give_up("the waveforms did not load");
 -			return false;
--		}
--	}
++/* busy for how long, in microseconds, up to `limit_ms' (stopped at that); 0 if it never began */
++static uint64_t
++wait_idle(uint32_t limit_ms)
++{
++	uint64_t began = now_us();
++	uint8_t status = 0;
++
++	wait_ms(1);
++	while (now_us() - began < limit_ms * 1000ull) {
++		if (!get(HAP_STATUS_1, &status)) {
++			return 0;
+ 		}
++		if (status & STATUS_SHORT) {
++			note("OFF: the short-circuit flag (status %#x)", status);
++			(void)stop_motor();
++			give_up("trouble while playing");
++			return 0;
++		}
++		if (!(status & STATUS_BUSY)) {
++			break;
++		}
++		wait_ms(1);
+ 	}
 -	if (!put(AW_SYSCTRL3, android_regs[AW_SYSCTRL3])) {
 -		return false;
 -	}
 -	say("haptic: Android's waveforms are in the chip's RAM and read back as written\n");
 -	return healthy("after the waveforms");
--}
--
++	return now_us() - began;
+ }
+ 
 -/* One waveform played once (Android's effect `effect' - 1), stopped at HAPTIC_MAX_MS at the latest. */
--static bool
+ static bool
 -play_effect(unsigned effect)
--{
++vibrate(unsigned effect, uint32_t ms)
+ {
 -	uint64_t began = mach_absolute_time(), ended;
 -	bool done;
--
++	uint64_t began = now_us(), busy;
+ 
 -	say("haptic: waveform %u is played once, at Android's gain %#x\n", effect, android_regs[AW_PLAYCFG2]);
 -	if (!wait_standby(250) || !put(AW_PLAYCFG3, 0x04) || !put(AW_WAVCFG1, (uint8_t)effect) || !put(AW_WAVCFG2, 0x00) ||
 -	    !put(AW_WAVCFG9, 0x00) || !put(AW_PLAYCFG2, android_regs[AW_PLAYCFG2]) || !healthy("before playing")) {
@@ -18396,8 +19464,11 @@
 -
 -		if (!regs_write(AW_PLAYCFG4, &go, 1)) {
 -			give_up("the start was not acknowledged");
--			return false;
--		}
++	ms = ms > HAPTIC_MAX_MS ? HAPTIC_MAX_MS : ms;
++	while (!broken && now_us() - began < ms * 1000ull) {
++		if (!start_effect(effect, ms > 60 ? 4 : 0)) {
+ 			return false;
+ 		}
 -	}
 -	wait_ms(2);
 -	done = wait_standby(HAPTIC_MAX_MS);
@@ -18409,16 +19480,35 @@
 -		(void)regs_write(AW_PLAYCFG4, &stop, 1);
 -		if (!wait_standby(50)) {
 -			give_up("it does not stop");
--			return false;
--		}
--	}
++		busy = wait_idle((uint32_t)(ms - (now_us() - began) / 1000));
++		if (!stop_motor()) {
+ 			return false;
+ 		}
++		playing = false;
++		if (busy == 0 && broken) {
++			return false;
++		}
++		if (ms <= 60) {
++			break;
++		}
+ 	}
 -	say("haptic: the waveform has played: back in standby after %llu ms (states seen meanwhile: %#x, a bit each; 0 is "
 -	    "standby)\n", ended / NSEC_PER_MSEC, states_seen);
 -	return healthy("after playing");
--}
--
++	return !broken;
+ }
+ 
 -/* ---- haptic=5: the motor for iOS ------------------------------------------------------------------- */
--
++/* ---- haptic=3: the motor for iOS --------------------------------------------------------------------- */
+ 
++/*
++ * Two ways in. /dev/redwood-haptic is the upstream one: what iOS plays on its "Actuator" device (the audio HAL plug-in's,
++ * userland/src/audio_plugin.c: the system's feedbacks and vibrations, CoreHaptics' patterns, UIKit's feedbacks) arrives as
++ * samples of one channel, and is turned into the motor's: a waveform of iOS's (a stretch of samples after a pause) a tap, one
++ * that goes on longer than a tap a vibration until it ends, as strong as iOS's waveform is loud (the drive voltage: Android's
++ * from a third of full scale up, five eighths of it for the softest). /dev/redwood-vibrate takes a word for tests and for
++ * whoever wants a plain vibration: bits 0-15 milliseconds (0 stops), bits 16-19 the effect.
++ */
  #define ACTIVE_US               30000           /* a write that was not silence counts for this long */
  #define SILENT_BELOW            256             /* of 32768: samples no larger are silence */
 -#define TAP_US                  60000           /* longer than this, and it is a vibration, not a tap */
@@ -18439,21 +19529,18 @@
 +static volatile uint32_t heard_peak;            /* the largest sample of that waveform */
  static uint64_t written_frames;
 -static unsigned taps, loops, capped;            /* what has been played, for the run's end */
--
++static unsigned taps, loops, capped, words;
+ 
 -static uint64_t
 -now_us(void)
--{
--	uint64_t ns;
--
--	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
--	return ns / NSEC_PER_USEC;
-+static unsigned taps, loops, capped, words;
-+
 +static void
 +heard(uint32_t peak)
-+{
+ {
+-	uint64_t ns;
 +	uint64_t now = now_us();
-+
+ 
+-	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+-	return ns / NSEC_PER_USEC;
 +	if (peak <= SILENT_BELOW) {
 +		quiet_us = now;
 +		return;
@@ -18469,7 +19556,7 @@
  }
  
  /* From the audio server's I/O thread: never waits. */
-@@ -708,46 +671,28 @@
+@@ -708,46 +671,28 @@ haptic_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
  			peak = v > peak ? v : peak;
  		}
  		written_frames += (uint64_t)bytes / 2;
@@ -18499,9 +19586,16 @@
 - */
 -void
 -redwood_haptic_pretend(uint32_t peak)
--{
++static volatile uint32_t wanted_word;           /* the last word written to /dev/redwood-vibrate */
++static volatile uint32_t asked;                 /* how many were */
++
++static int
++vibrate_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+ {
 -	uint64_t now = now_us();
--
++	uint32_t value;
++	int error;
+ 
 -	if (peak <= SILENT_BELOW) {
 -		quiet_us = now;
 -		return;
@@ -18513,32 +19607,24 @@
 -	heard_us = now;
 -	if (peak > heard_peak) {
 -		heard_peak = peak;
--	}
-+static volatile uint32_t wanted_word;           /* the last word written to /dev/redwood-vibrate */
-+static volatile uint32_t asked;                 /* how many were */
-+
-+static int
-+vibrate_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
-+{
-+	uint32_t value;
-+	int error;
-+
 +	while (uio_resid(uio) >= (user_ssize_t)sizeof(value)) {
 +		if ((error = uiomove((caddr_t)&value, sizeof(value), uio)) != 0) {
 +			return error;
 +		}
 +		wanted_word = value;
 +		asked++;
-+	}
+ 	}
 +	return 0;
  }
  
  static int
-@@ -762,214 +707,250 @@
+@@ -762,214 +707,250 @@ static const struct cdevsw haptic_cdevsw = {
  	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
  };
  
 -/* Start a waveform without waiting for it: once, or (`forever') until stopped. */
+-static bool
+-start_waveform(unsigned waveform, bool forever, uint8_t gain)
 +static const struct cdevsw vibrate_cdevsw = {
 +	.d_open = haptic_open, .d_close = haptic_open, .d_read = eno_rdwrt, .d_write = vibrate_write,
 +	.d_ioctl = eno_ioctl, .d_stop = eno_stop, .d_reset = eno_reset, .d_select = eno_select,
@@ -18548,27 +19634,31 @@
 +/* the drive voltage for a waveform this loud: Android's from a third of full scale up, five eighths of it at the softest */
 +static uint8_t
 +vmax_for(uint32_t peak)
-+{
-+	uint32_t top = ANDROID_VMAX_CODE, low = top * 5 / 8, third = 32767 / 3;
-+
-+	return (uint8_t)(peak >= third ? top : low + (top - low) * peak / third);
-+}
-+
- static bool
--start_waveform(unsigned waveform, bool forever, uint8_t gain)
--{
+ {
 -	uint8_t go = 0x01;
--
++	uint32_t top = ANDROID_VMAX_CODE, low = top * 5 / 8, third = 32767 / 3;
+ 
 -	if (!put(AW_PLAYCFG3, 0x04) || !put(AW_WAVCFG1, (uint8_t)waveform) || !put(AW_WAVCFG2, 0x00) ||
 -	    !put(AW_WAVCFG9, forever ? 0xf0 : 0x00) || !put(AW_PLAYCFG2, gain)) {
 -		return false;
 -	}
 -	if (!regs_write(AW_PLAYCFG4, &go, 1)) {
 -		give_up("the start was not acknowledged");
+-		return false;
+-	}
+-	return true;
++	return (uint8_t)(peak >= third ? top : low + (top - low) * peak / third);
+ }
+ 
+ static bool
+-stop_waveform(void)
 +make_node(const struct cdevsw *sw, const char *name)
-+{
+ {
+-	uint8_t stop = 0x02;
 +	int major = cdevsw_add(-1, sw);
-+
+ 
+-	if (!regs_write(AW_PLAYCFG4, &stop, 1) || !wait_standby(50)) {
+-		give_up("it does not stop");
 +	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, name) == NULL) {
 +		say("haptic: /dev/%s cannot be made\n", name);
  		return false;
@@ -18576,18 +19666,6 @@
  	return true;
  }
  
--static bool
--stop_waveform(void)
--{
--	uint8_t stop = 0x02;
--
--	if (!regs_write(AW_PLAYCFG4, &stop, 1) || !wait_standby(50)) {
--		give_up("it does not stop");
--		return false;
--	}
--	return true;
--}
--
 -/* the chip's state (GLBRD5: 0 standby, 7 and 11 seen while a waveform plays), 0xff if it cannot be read */
 -static unsigned
 -chip_state(void)
@@ -18621,13 +19699,12 @@
 -	uint8_t playing_gain = 0;
 -	unsigned follows = 0;                   /* how often the vibration playing now has changed strength */
 -	int major = cdevsw_add(-1, &haptic_cdevsw);
--
--	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "redwood-haptic") == NULL) {
--		say("haptic: /dev/redwood-haptic cannot be made\n");
 +	enum { IDLE, TAP, HOLD, LOOP, REST } state = IDLE;
 +	uint64_t since = 0, rest_until = 0, last_look = 0, tap_onset = 0;
 +	uint32_t seen = 0;
-+
+ 
+-	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "redwood-haptic") == NULL) {
+-		say("haptic: /dev/redwood-haptic cannot be made\n");
 +	if (!make_node(&haptic_cdevsw, "redwood-haptic") || !make_node(&vibrate_cdevsw, "redwood-vibrate")) {
  		return;
  	}
@@ -18639,8 +19716,7 @@
  		bool active = heard_us != 0 && now - heard_us < ACTIVE_US;
 -		uint32_t peak = heard_peak;
 -		uint8_t gain = gain_for(peak);
--
-+
+ 
 +		if (asked != seen && state == IDLE) {
 +			uint32_t word = wanted_word, ms = word & 0xffff, effect = (word >> 16) & 0xf;
 +
@@ -18666,13 +19742,12 @@
 +			/* a waveform of iOS's that has begun (after a pause), once its first milliseconds say how loud it is: a tap */
  			if (active && onset_us != tap_onset && now - onset_us >= SETTLE_US) {
 -				uint64_t began = onset_us;
--
++				uint8_t code = vmax_for(heard_peak);
+ 
 -				if (state == TAP && !wait_standby(0) && !stop_waveform()) {
 -					break;
 -				}
 -				if (!start_waveform(1, false, gain ? gain : 1)) {
-+				uint8_t code = vmax_for(heard_peak);
-+
 +				tap_onset = onset_us;
 +				if (!set_vmax(code) || !start_effect(TAP_EFFECT, 4)) {
  					break;
@@ -18685,9 +19760,8 @@
 -					wait_ms(4);
 -					say("haptic: tap %u: iOS's waveform peaks at %u of 32768: Android's waveform 1 at gain %#04x; the "
 -					    "chip's state %u\n", taps, peak, gain ? gain : 1, chip_state());
--				}
 +					note("tap %u: iOS's waveform peaks at %u of 32768: %u mV", taps, heard_peak, code * VMAX_STEP_MV);
-+				}
+ 				}
 +			}
 +			break;
 +		case TAP:
@@ -18718,35 +19792,19 @@
 -						    "gain %#04x, %u ms at most; the chip's state %u\n", loops, peak, gain ? gain : 1,
 -						    HAPTIC_MAX_MS, chip_state());
 -					}
--				}
--			} else if (!active && now - since > TAP_US) {
--				state = wait_standby(0) || stop_waveform() ? IDLE : state;
 +			if (!active || quiet_us >= tap_onset || now - tap_onset > LONGER_THAN_TAP_US) {
 +				if (!stop_motor()) {
 +					break;
-+				}
+ 				}
+-			} else if (!active && now - since > TAP_US) {
+-				state = wait_standby(0) || stop_waveform() ? IDLE : state;
 +				playing = false;
 +				state = IDLE;
 +			} else {
 +				state = HOLD;   /* (still deciding: the motor stays on until it is clear) */
-+			}
-+			break;
-+		case HOLD:
-+			if (active && quiet_us < tap_onset && now - tap_onset > LONGER_THAN_TAP_US) {
-+				state = LOOP;
-+				loops++;
-+				if (taps + loops <= TOLD_EVENTS) {
-+					note("vibration %u: iOS goes on playing (peak %u)", loops, heard_peak);
-+				}
-+			} else if (!active || quiet_us >= tap_onset) {
-+				if (!stop_motor()) {
-+					break;
-+				}
-+				playing = false;
-+				state = IDLE;
  			}
  			break;
- 		case LOOP:
+-		case LOOP:
 -			/* as strong as iOS's waveform is now (Android's gain at full scale, never more) */
 -			if (active && now - followed >= FOLLOW_US) {
 -				followed = now;
@@ -18757,8 +19815,22 @@
 -					}
 -					playing_gain = gain;
 -					follows++;
--				}
--			}
++		case HOLD:
++			if (active && quiet_us < tap_onset && now - tap_onset > LONGER_THAN_TAP_US) {
++				state = LOOP;
++				loops++;
++				if (taps + loops <= TOLD_EVENTS) {
++					note("vibration %u: iOS goes on playing (peak %u)", loops, heard_peak);
++				}
++			} else if (!active || quiet_us >= tap_onset) {
++				if (!stop_motor()) {
++					break;
+ 				}
++				playing = false;
++				state = IDLE;
+ 			}
++			break;
++		case LOOP:
  			if (!active || now - since > HAPTIC_MAX_MS * 1000ull) {
  				bool cut = now - since > HAPTIC_MAX_MS * 1000ull;
  
@@ -18777,12 +19849,11 @@
 -						    "the chip is in standby\n", loops, cut ? "CUT at the limit" : "iOS stopped, and so does the motor",
 -						    (now - since) / 1000, follows, playing_gain);
 -					}
--				}
 +				state = cut ? REST : IDLE;
 +				if (taps + loops <= TOLD_EVENTS + 1) {
 +					note("vibration %u: %s after %llu ms", loops, cut ? "CUT at the limit" : "iOS stopped, and so does the motor",
 +					    (now - since) / 1000);
-+				}
+ 				}
 +			} else if (heard_peak != 0) {
 +				(void)set_vmax(vmax_for(heard_peak));
  			}
@@ -18807,21 +19878,19 @@
  			}
  		}
 -		wait_ms(4);
--	}
--	say("haptic: the motor is given up on (%u taps and %u vibrations played, %u cut at %u ms)\n", taps, loops, capped,
--	    HAPTIC_MAX_MS);
--}
 +		wait_ms(2);
 +	}
 +	if (playing) {
 +		(void)stop_motor();
-+	}
+ 	}
+-	say("haptic: the motor is given up on (%u taps and %u vibrations played, %u cut at %u ms)\n", taps, loops, capped,
+-	    HAPTIC_MAX_MS);
 +	say("haptic: the motor is given up on (%u taps, %u vibrations, %u cut at %u ms, %u plain vibrations)\n", taps, loops, capped,
 +	    HAPTIC_MAX_MS, words);
-+}
-+
-+/* ---- the start --------------------------------------------------------------------------------------- */
+ }
  
++/* ---- the start --------------------------------------------------------------------------------------- */
++
  static void
  haptic_thread(__unused void *parameter, __unused wait_result_t result)
  {
@@ -18848,6 +19917,10 @@
 -		if (released) {
 -			give_up("the chip does not answer");
 -		}
+-	} else {
+-		show_registers();
+-		if (level >= 3 && configure() && load_waveforms() && level == 4) {
+-			uint32_t effect = 1;
 +	/* (the buttons' driver maps the arbiter once for all: waited for a few seconds; without it, mapped here) */
 +	for (int tries = 0; tries < 100 && !redwood_spmi_maps(&arb_core, &arb_cnfg, &arb_observer); tries++) {
 +		wait_ms(50);
@@ -18868,7 +19941,10 @@
 +	}
 +	{
 +		uint32_t watch = 0;
-+
+ 
+-			PE_parse_boot_argn("haptic_effect", &effect, sizeof(effect));
+-			if (effect < 1 || effect > 10) {
+-				effect = 1;     /* (the short ones only) */
 +		if (PE_parse_boot_argn("bcl_watch", &watch, sizeof(watch)) && watch != 0) {
 +			bcl_watch(watch, channels);
 +		}
@@ -18905,7 +19981,10 @@
 +			note("effect %u once", e);
 +			if (!start_effect(e, 0)) {
 +				break;
-+			}
+ 			}
+-			(void)play_effect(effect);
+-		} else if (level == 5 && !broken) {
+-			serve();
 +			busy = wait_idle(HAPTIC_MAX_MS);
 +			note("effect %u: busy for %llu us", e, busy);
 +			(void)stop_motor();
@@ -18915,29 +19994,16 @@
 +			wait_ms(1500);
 +			note("a vibration of 500 ms (effect 0 over and over)");
 +			(void)vibrate(0, 500);
-+		}
+ 		}
 +		show_registers();
- 	} else {
--		show_registers();
--		if (level >= 3 && configure() && load_waveforms() && level == 4) {
--			uint32_t effect = 1;
--
--			PE_parse_boot_argn("haptic_effect", &effect, sizeof(effect));
--			if (effect < 1 || effect > 10) {
--				effect = 1;     /* (the short ones only) */
--			}
--			(void)play_effect(effect);
--		} else if (level == 5 && !broken) {
--			serve();
--		}
--	}
++	} else {
 +		serve();
-+	}
+ 	}
 +out:
  	say("haptic: done\n");
  	thread_terminate(current_thread());
  }
-@@ -982,24 +963,37 @@
+@@ -982,24 +963,37 @@ redwood_haptic_init(void)
  	if (!PE_parse_boot_argn("haptic", &level, sizeof(level)) || level == 0) {
  		return;
  	}
@@ -18969,13 +20035,11 @@
 -			say("haptic: at the run's end: %u taps and %u vibrations played (%u cut at %u ms), from %llu frames iOS "
 -			    "wrote; the chip is held in reset\n", taps, loops, capped, HAPTIC_MAX_MS, written_frames);
 -		}
--	}
--}
 +	uint8_t en = 0xff, play = 0xff;
 +
 +	if (level < 2 || hap.write == 0) {
 +		return;
-+	}
+ 	}
 +	leaving = true;
 +	say("haptic: at the run's end: the motor %s; %u taps, %u vibrations (%u cut), %u plain vibrations, from %llu frames iOS "
 +	    "wrote\n", stop_motor() ? "stopped" : "COULD NOT BE STOPPED", taps, loops, capped, words, written_frames);
@@ -18987,10 +20051,12 @@
 +	(void)spmi_read(&hap, HAP_PLAY, &play, 1);
 +	say("haptic: at the run's end the peripheral reads: enable %#04x, play %#04x%s\n", en, play,
 +	    (en & 0x80) == 0 && (play & 0x80) == 0 ? " (stopped)" : " (NOT STOPPED)");
-+}
+ }
+diff --git a/bsd/dev/redwood_input.c b/bsd/dev/redwood_input.c
+index 8076cf00b4acad69bdcca7e4ce93c6a00496e81f..28d9f93eae3355625086b4a8b768d6cfea79d986 100644
 --- a/bsd/dev/redwood_input.c
 +++ b/bsd/dev/redwood_input.c
-@@ -218,6 +218,9 @@
+@@ -218,6 +218,9 @@ redwood_input_init(void)
  	redwood_virtio_input_init();
  	redwood_goodix_init();
  	redwood_buttons_init();
@@ -19000,6 +20066,8 @@
  	redwood_battery_init();
  	redwood_ufs_init();
  	redwood_net_init();
+diff --git a/bsd/dev/redwood_lx.c b/bsd/dev/redwood_lx.c
+index a6786fa59d4895e9d9988e6558f87ae40fae7d59..2235ae022dad65c6ef3c4a623bf7c8d2dea91caa 100644
 --- a/bsd/dev/redwood_lx.c
 +++ b/bsd/dev/redwood_lx.c
 @@ -26,6 +26,7 @@
@@ -19010,22 +20078,21 @@
  #include <sys/redwood_net.h>
  #include <sys/systm.h>
  #include <vm/memory_types.h>
-@@ -60,18 +61,41 @@
+@@ -60,18 +61,41 @@ lx_os_free(void *memory, unsigned long size)
   * in between (as redwood_adreno.c does with what it shares with the GPU); the first, cached
   * view is written out and never used again.
   */
 -void *
 -lx_os_radio_memory(unsigned long size, unsigned long long *address)
--{
--	vm_offset_t cached = 0, uncached;
--	uint64_t physical;
 +static vm_offset_t radio_reserved;
 +static vm_size_t radio_reserved_size;
 +
 +/* Called before the modem worker starts; defer DMA mapping until FW_READY. */
 +int
 +lx_os_reserve_radio_memory(unsigned long size)
-+{
+ {
+-	vm_offset_t cached = 0, uncached;
+-	uint64_t physical;
 +	vm_offset_t cached = 0;
  
  	size = round_page(size);
@@ -19057,7 +20124,7 @@
  	physical = kvtophys(cached);
  	bzero((void *)cached, size);
  	for (vm_offset_t line = cached; line < cached + size; line += 64) {
-@@ -79,6 +103,14 @@
+@@ -79,6 +103,14 @@ lx_os_radio_memory(unsigned long size, unsigned long long *address)
  	}
  	__asm__ volatile ("dsb sy");
  	uncached = ml_io_map_unmappable(physical, size, VM_WIMG_WCOMB);
@@ -19072,7 +20139,7 @@
  	if (uncached == 0 || !redwood_wifi_radio_map(physical, size, address)) {
  		return NULL;
  	}
-@@ -215,7 +247,12 @@
+@@ -215,7 +247,12 @@ int
  lx_os_firmware(const char *name, const void **data, unsigned long *size)
  {
  	uint64_t length = 0;
@@ -19086,7 +20153,7 @@
  
  	if (file == NULL) {
  		return ENOENT;
-@@ -228,6 +265,9 @@
+@@ -228,6 +265,9 @@ lx_os_firmware(const char *name, const void **data, unsigned long *size)
  int
  lx_os_rproc_boot(void)
  {
@@ -19096,7 +20163,7 @@
  	return redwood_wifi_dsp_is_up() ? 0 : ENXIO;
  }
  
-@@ -444,6 +484,9 @@
+@@ -444,6 +484,9 @@ lx_os_irq_attach(unsigned vector, void (*function)(void *), void *argument)
  {
  	kern_return_t kr;
  
@@ -19106,7 +20173,7 @@
  	if (vector >= LX_VECTORS || lx_irq_first == 0 || function == NULL) {
  		return EINVAL;
  	}
-@@ -461,7 +504,8 @@
+@@ -461,7 +504,8 @@ lx_os_irq_attach(unsigned vector, void (*function)(void *), void *argument)
  	lx_vector[vector].argument = argument;
  	lx_vector[vector].attached = true;
  	lck_mtx_unlock(&lx_irq_lock);
@@ -19116,6 +20183,8 @@
  		lck_mtx_lock(&lx_irq_lock);
  		lx_vector[vector].attached = false;
  		lck_mtx_unlock(&lx_irq_lock);
+diff --git a/bsd/dev/redwood_net.c b/bsd/dev/redwood_net.c
+index 27a8e038a44586e4e6562eb67bdea6fb75fe8d68..a480d2eb240ee1a61d31a988f4817fcc4f32182a 100644
 --- a/bsd/dev/redwood_net.c
 +++ b/bsd/dev/redwood_net.c
 @@ -32,6 +32,10 @@
@@ -19129,6 +20198,8 @@
  extern void RedwoodWLANStart(const char *interface, const uint8_t *address);  /* iokit/Kernel/RedwoodWLAN.cpp */
  
  static LCK_GRP_DECLARE(net_lck_grp, "redwood-net");
+diff --git a/bsd/dev/redwood_torch.c b/bsd/dev/redwood_torch.c
+index e3ea9585d0cf764ee1149f3b41c2ee077a787b2a..1a8a3457363ba43fb025b23441018dd1d1bd5a27 100644
 --- a/bsd/dev/redwood_torch.c
 +++ b/bsd/dev/redwood_torch.c
 @@ -1,18 +1,12 @@
@@ -19166,7 +20237,7 @@
  extern kern_return_t thread_terminate(thread_t thread);
  extern void loader_log_putc(char c);
  
-@@ -182,6 +177,11 @@
+@@ -182,6 +177,11 @@ wait_ms(uint32_t ms)
  #define TRANSFER_TIMEOUT_US     2000
  #define DROPPED                 "the transfer was dropped"
  
@@ -19178,7 +20249,7 @@
  struct peripheral {
  	const char *    name;
  	uint16_t        id;             /* slave << 8 | peripheral */
-@@ -189,8 +189,9 @@
+@@ -189,8 +189,9 @@ struct peripheral {
  	bool            found, writable;
  	vm_offset_t     write;          /* its write channel, mapped (only the flash module's) */
  };
@@ -19190,7 +20261,7 @@
  
  static vm_offset_t arb_core, arb_cnfg, arb_observer;
  static uint8_t alarm_subtype;
-@@ -275,33 +276,28 @@
+@@ -275,33 +276,28 @@ spmi_read_once(const struct peripheral *p, uint8_t reg, uint8_t *bytes, uint32_t
  
  #define FLASH_REVISION1         0x00
  #define FLASH_TYPE              0x04            /* 0x18: a flash LED module */
@@ -19241,7 +20312,7 @@
  };
  
  static void
-@@ -327,7 +323,7 @@
+@@ -327,7 +323,7 @@ put(uint8_t reg, uint8_t value)
  	for (size_t i = 0; i < sizeof(writable_regs); i++) {
  		allowed |= writable_regs[i] == reg;
  	}
@@ -19250,7 +20321,7 @@
  		give_up(allowed ? "a write that may not be made" : "a register that is not to be written");
  		return false;
  	}
-@@ -429,27 +425,18 @@
+@@ -429,28 +425,19 @@ show_registers(void)
  	}
  }
  
@@ -19264,14 +20335,13 @@
  {
  	static char why[180];
 -	uint8_t rt = 0, status1 = 0, status2 = 0, alarm_status = 0, stage;
--
++	uint8_t rt = 0, status[3] = { 0, 0, 0 };
+ 
 -	if (!get(&flash, FLASH_INT_RT_STS, &rt) || !get(&flash, FLASH_STATUS1, &status1) ||
 -	    !get(&flash, FLASH_STATUS2, &status2) || (alarm.found && !get(&alarm, ALARM_STATUS, &alarm_status))) {
-+	uint8_t rt = 0, status[3] = { 0, 0, 0 };
-+
 +	if (!get(&flash, FLASH_INT_RT_STS, &rt) || spmi_read(&flash, FLASH_STATUS1, status, 3) != NULL) {
  		return "a read of the flags that failed";
--	}
+ 	}
 -	stage = alarm_subtype == 0x08 ? alarm_status & 0x03 : (alarm_status >> 4) & 0x07;
 -	if ((rt & RT_STS_FAULT) || status1 != 0 || (status2 & (STATUS2_OTST1 | STATUS2_OTST2 | STATUS2_VPH_LOW)) || stage != 0) {
 -		uint8_t more[8] = { 0 }, latched[2] = { 0 };
@@ -19282,10 +20352,11 @@
 -		    "%02x %02x %02x %02x %02x, latched %#x); the PMIC's temperature stage %u", rt, status1, status2, more[0], more[1],
 -		    more[2], more[3], more[4], more[5], more[6], more[7], latched[0], stage);
 -		return why;
- 	}
+-	}
  	if (redwood_battery_temperature() >= HOTTEST_BATTERY_C) {
  		snprintf(why, sizeof(why), "the battery is at %d C", redwood_battery_temperature());
-@@ -460,13 +447,16 @@
+ 		return why;
+@@ -460,13 +447,16 @@ trouble(void)
  
  static bool configured, lit;
  
@@ -19296,17 +20367,16 @@
  {
 -	if (!configured && put_bits(FLASH_STROBE_CTRL0, 0x74, 0x00) && put_bits(FLASH_SAFETY_TIMER0, 0x80, 0x00)) {
 -		configured = true;
--	}
 +	bool ok = !configured;
 +
 +	for (unsigned n = 0; ok && n < TORCH_CHANNELS; n++) {
 +		ok = put_bits(FLASH_STROBE_CTRL(n), 0x06, 0x00) && put_bits(FLASH_SAFETY_TIMER(n), 0x80, 0x00);
-+	}
+ 	}
 +	configured = configured || ok;
  	return configured;
  }
  
-@@ -489,10 +479,15 @@
+@@ -489,10 +479,15 @@ light(uint32_t permille)
  		give_up("trouble before the light");
  		return false;
  	}
@@ -19324,7 +20394,7 @@
  		return false;
  	}
  	lit = true;
-@@ -503,8 +498,11 @@
+@@ -503,8 +498,11 @@ light(uint32_t permille)
  static bool
  dark(void)
  {
@@ -19338,7 +20408,7 @@
  
  	lit = !ok && lit;
  	return ok;
-@@ -646,9 +644,15 @@
+@@ -646,9 +644,15 @@ torch_thread(__unused void *parameter, __unused wait_result_t result)
  
  	say("torch: level %u: %s\n", level, level == 1 ? "a look, reading only" : level == 2 ? "the light on once" :
  	    "the light for iOS");
@@ -19357,7 +20427,7 @@
  	version = rd(arb_core + ARB_VERSION);
  	channels = rd(arb_core + ARB_FEATURES) & 0x7ff;
  	if (version < ARB_VERSION_5 || version >= ARB_VERSION_7) {
-@@ -659,13 +663,22 @@
+@@ -659,13 +663,22 @@ torch_thread(__unused void *parameter, __unused wait_result_t result)
  		channels = ARB_MAX_CHANNELS;
  	}
  	find_channel(&flash, channels);
@@ -19382,7 +20452,7 @@
  	show_registers();
  	if (alarm.found && get(&alarm, ALARM_SUBTYPE, &alarm_subtype) && get(&alarm, ALARM_STATUS, &alarm_status)) {
  		uint8_t stage = alarm_subtype == 0x08 ? alarm_status & 0x03 : (alarm_status >> 4) & 0x07;
-@@ -675,7 +688,7 @@
+@@ -675,7 +688,7 @@ torch_thread(__unused void *parameter, __unused wait_result_t result)
  	} else {
  		alarm.found = false;
  	}
@@ -19391,7 +20461,7 @@
  		goto out;
  	}
  	if (!flash.writable) {
-@@ -692,6 +705,34 @@
+@@ -692,6 +705,34 @@ torch_thread(__unused void *parameter, __unused wait_result_t result)
  
  		PE_parse_boot_argn("torch_secs", &secs, sizeof(secs));
  		secs = secs < 1 ? 1 : secs > max_secs ? max_secs : secs;
@@ -19426,7 +20496,7 @@
  		say("torch: the light ON at Android's %u mA (ITARGET %u, 12.5 mA steps) for %u s\n", ANDROID_TORCH_MA, ANDROID_ITARGET,
  		    secs);
  		if (light(1000)) {
-@@ -741,7 +782,7 @@
+@@ -741,7 +782,7 @@ redwood_torch_init(void)
  void
  redwood_torch_quiesce(void)
  {
@@ -19435,22 +20505,23 @@
  
  	if (level < 2 || flash.write == 0) {
  		return;
-@@ -757,7 +798,8 @@
+@@ -757,7 +798,8 @@ redwood_torch_quiesce(void)
  	}
  	(void)spmi_read(&flash, FLASH_MODULE_EN, &module, 1);
  	(void)spmi_read(&flash, FLASH_EN_LED_CTRL, &channels, 1);
 -	(void)spmi_read(&flash, FLASH_ITARGET0, &target, 1);
 -	say("torch: at the run's end the module reads: enable %#04x, channels %#04x, target %#04x%s\n", module, channels, target,
 -	    module == 0 && (channels & 0x01) == 0 && target == 0 ? " (dark)" : " (NOT DARK)");
--}
 +	(void)spmi_read(&flash, FLASH_ITARGET(0), &target, 1);
 +	(void)spmi_read(&flash, FLASH_ITARGET(1), &target1, 1);
 +	say("torch: at the run's end the module reads: enable %#04x, channels %#04x, targets %#04x %#04x%s\n", module, channels,
 +	    target, target1, module == 0 && (channels & TORCH_MASK) == 0 && target == 0 && target1 == 0 ? " (dark)" : " (NOT DARK)");
-+}
+ }
+diff --git a/bsd/dev/redwood_ufs.c b/bsd/dev/redwood_ufs.c
+index efa2fda7bc55e66b9619d3393ae661027a4959a1..a6a3e7da70dbe93c5d4a6e620283809da8e8f4ca 100644
 --- a/bsd/dev/redwood_ufs.c
 +++ b/bsd/dev/redwood_ufs.c
-@@ -76,8 +76,9 @@
+@@ -76,8 +76,9 @@ extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm
   * bounds and the GUIDs of the partition besides (xnuloader/loader.c, BLOCK_WRITE_FIRST).
   */
  #define UFS_WRITE_FIRST    2042368ULL                  /* darwin's blocks of 4096 */
@@ -19462,7 +20533,7 @@
  
  struct loader_block_part {
  	char name[36];
-@@ -1617,3 +1618,35 @@
+@@ -1617,3 +1618,35 @@ redwood_ufs_init(void)
  		}
  	}
  }
@@ -19498,6 +20569,9 @@
 +	*size = (uint64_t)ufs_page->part[part].block_size * ufs_page->part[part].blocks;
 +	return 0;
 +}
+diff --git a/bsd/sys/mi8_lx.h b/bsd/sys/mi8_lx.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..ab5f8a1131075ce2afd6013fc2518c71564c94d7
 --- /dev/null
 +++ b/bsd/sys/mi8_lx.h
 @@ -0,0 +1,30 @@
@@ -19531,9 +20605,11 @@
 +bool mi8_wsmmu_map(uint64_t physical, uint64_t size);                    /* identity entry for the radio (mi8rp_wsmmu=3) */
 +bool mi8_lx_irq_lines(uint32_t *first);                                 /* the GIC number of CE0's SPI, when interrupts are wanted */
 +#endif
+diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
+index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..a2a8623cabc49ab8689298bac8f16c1dd83b2aa3 100644
 --- a/bsd/sys/redwood_input.h
 +++ b/bsd/sys/redwood_input.h
-@@ -42,6 +42,9 @@
+@@ -42,6 +42,9 @@ void redwood_input_init(void);
  void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
  void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
  void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
@@ -19543,7 +20619,7 @@
  void redwood_ufs_init(void);           /* ufs=2 to xnuloader: the phone's storage, read only, through the loader (ufs_shared_pa=) */
  void redwood_ufs_report(const char *when); /* where reading the storage has spent its time so far */
  bool redwood_ufs_dev(dev_t dev);           /* one of the storage's devices */
-@@ -122,6 +125,24 @@
+@@ -122,6 +125,24 @@ void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t
  void redwood_gpu_report(const char *why);
  bool redwood_gpu_recover(void);
  void redwood_gpu_stop(void);
@@ -19568,9 +20644,25 @@
  #endif
  
  #endif /* _SYS_REDWOOD_INPUT_H_ */
+diff --git a/bsd/sys/redwood_lx.h b/bsd/sys/redwood_lx.h
+index ef79d87b9f76879ecf49ccc4035241306681caef..9b94e1d51739019c2c9c00fdfc1805f743f187f9 100644
+--- a/bsd/sys/redwood_lx.h
++++ b/bsd/sys/redwood_lx.h
+@@ -16,6 +16,9 @@
+ #include "redwood_sta.h"
+ 
+ /* ---- memory ---- */
++#define LX_RADIO_POOL_SIZE (44ul << 20)
++/* Boot-thread reservation only: no radio/SMMU access; consumed by radio_memory. */
++int lx_os_reserve_radio_memory(unsigned long size);
+ void	*lx_os_alloc(unsigned long size);			/* zeroed; NULL when there is none */
+ void	 lx_os_free(void *memory, unsigned long size);
+ /*
+diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d5025c470 100644
 --- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
 +++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
-@@ -77,13 +77,14 @@
+@@ -77,13 +77,14 @@ enum {
  #define SWAP_LAYERS_CLEARED     0x108
  #define SWAP_LAYERS             4
  
@@ -19586,7 +20678,7 @@
  #define SWAP_HELD_MS            700                     /* a swap that cannot be taken by then is not shown at all */
  
  #define FOURCC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
-@@ -162,6 +163,250 @@
+@@ -162,6 +163,250 @@ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
   * to 10 (the phone, 15 October; fb_threads=1 is how it was).
   */
  static TUNABLE(uint32_t, gThreads, "fb_threads", 3);
@@ -19837,7 +20929,7 @@
  #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
  static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
  static inline unsigned
-@@ -231,6 +476,24 @@
+@@ -231,6 +476,24 @@ class IOMobileFramebuffer : public IOService
  public:
  	IOLock *        fLock;
  	uint8_t *       fBase;                  /* the boot framebuffer: the panel */
@@ -19862,7 +20954,7 @@
  	uint32_t        fPanelWidth, fPanelHeight, fRowBytes;
  	uint32_t        fWidth, fHeight;        /* the display as user space sees it */
  	MiniIOSurface * fDefaultSurface;
-@@ -289,6 +552,11 @@
+@@ -289,6 +552,11 @@ public:
  	uint16_t *      fColumnWeight;          /* ... with fb_filter: how much of the column after it, of 256 */
  	uint32_t *      fBlendRow;              /* ... and a row of the picture blended from two (fBlendRowSize pixels) */
  	uint32_t        fBlendRowSize;
@@ -19874,7 +20966,7 @@
  	uint8_t *       fRecBase;
  	uint64_t        fRecSize, fRecUsed;
  	uint64_t        fFirstFrame, fRecFirst; /* when the first frame was shown, and the first recorded */
-@@ -300,10 +568,15 @@
+@@ -300,10 +568,15 @@ public:
  	MiniIOSurface * defaultSurface(void);
  	void present(const uint8_t * swap);
  	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
@@ -19890,7 +20982,7 @@
  	void drawRows(const struct RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow);
  	static void helperMain(void * self, wait_result_t result);
  	/* the scaling shared out (fb_threads): fThreads drawers, the presenter and fThreads - 1 helpers */
-@@ -389,6 +662,542 @@
+@@ -389,6 +662,542 @@ IOMobileFramebuffer::publishModes(void)
  	OSSafeReleaseNULL(color);
  }
  
@@ -20433,7 +21525,7 @@
  bool
  IOMobileFramebuffer::start(IOService * provider)
  {
-@@ -403,6 +1212,7 @@
+@@ -403,6 +1212,7 @@ IOMobileFramebuffer::start(IOService * provider)
  		return false;
  	}
  	fLock = IOLockAlloc();
@@ -20441,7 +21533,7 @@
  	fSwapLock = IOLockAlloc();
  	if (kernel_thread_start(&IOMobileFramebuffer::presenterMain, this, &thread) != KERN_SUCCESS) {
  		IOLog("MiniIOMobileFramebuffer: no thread to put frames on the panel with\n");
-@@ -424,6 +1234,8 @@
+@@ -424,6 +1234,8 @@ IOMobileFramebuffer::start(IOService * provider)
  	fPanelWidth = vinfo.v_width;
  	fPanelHeight = vinfo.v_height;
  	fRowBytes = vinfo.v_rowbytes;
@@ -20450,7 +21542,7 @@
  	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
  	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
  	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
-@@ -442,12 +1254,15 @@
+@@ -442,12 +1254,15 @@ IOMobileFramebuffer::start(IOService * provider)
  			}
  		}
  	}
@@ -20468,7 +21560,7 @@
  
  	if (gRecSeconds != 0) {
  		/* one piece of physical memory: the loader will send it over USB as it lies */
-@@ -595,9 +1410,34 @@
+@@ -595,10 +1410,35 @@ sample_at(int64_t i, int64_t in, int64_t out)
  struct RowJob {
  	const uint8_t * pixels;
  	uint32_t        stride;
@@ -20477,7 +21569,7 @@
 +	int32_t         sx, sy, sw, sh, px0, py0, px1, py1, cx0, cx1, ry0, ry1;
 +	bool            filter, unscaled, copyOnly;     /* copyOnly: rows of a frame the GPU has scaled already: dropped from the cache, sent as they are */
  };
-+
+ 
 +/*
 + * The GPU wrote the surface's memory behind this processor's cache: whatever lines of it the cache took in
 + * meanwhile (a prefetch, the frame before in the same surface) are old. Read through them, they are the
@@ -20502,10 +21594,11 @@
 +	}
 +	__asm__ volatile ("dsb sy" : : : "memory");
 +}
- 
++
  void
  IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow)
-@@ -607,6 +1447,62 @@
+ {
+@@ -607,6 +1447,62 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  	int32_t sx = job->sx, sy = job->sy, sw = job->sw, sh = job->sh;
  	int32_t px0 = job->px0, py0 = job->py0, px1 = job->px1, py1 = job->py1, cx0 = job->cx0, cx1 = job->cx1;
  	bool filter = job->filter;
@@ -20568,7 +21661,7 @@
  
  	for (int32_t y = y0; y < y1; y++) {
  		const uint32_t * from;
-@@ -615,6 +1511,7 @@
+@@ -615,6 +1511,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  		if (y < 0 || (uint32_t) y >= fPanelHeight) {
  			continue;
  		}
@@ -20576,21 +21669,20 @@
  		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
  		if (job->unscaled) {
  			/* not scaled at all */
-@@ -634,12 +1531,30 @@
+@@ -634,13 +1531,31 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  
  				uint32_t * __restrict mixed = blendRow;
  
 -				for (uint32_t c = first; c <= last; c++) {
 -					uint32_t a = upper[c], b = lower[c];
--
--					mixed[c] = a == b ? a : blend(a, b, weight);           /* (most of a screen is the same as next to it) */
 +				/* two pixels to a 64-bit word, no branch (EXP-0125: the branchy one cost 11 us a row, most of the frame) */
 +				const uint64_t M = 0x00ff00ff00ff00ffull;
 +				uint32_t c = first;
 +
 +				for (; c + 1 <= last; c += 2) {
 +					uint64_t a, b, rb, ga;
-+
+ 
+-					mixed[c] = a == b ? a : blend(a, b, weight);           /* (most of a screen is the same as next to it) */
 +					memcpy(&a, upper + c, 8);
 +					memcpy(&b, lower + c, 8);
 +					rb = ((a & M) * (256 - weight) + (b & M) * weight) >> 8 & M;
@@ -20602,16 +21694,17 @@
 +					mixed[c] = blend(upper[c], lower[c], weight);
  				}
  				from = blendRow;
-+			}
+ 			}
 +			if (gProbe) {
 +				uint64_t now = mach_absolute_time();
 +
 +				tv += now - tm;
 +				tm = now;
- 			}
++			}
  		} else {
  			from = (const uint32_t *) (pixels + (size_t) (sy + (int64_t) (y - py0) * sh / (py1 - py0)) * stride);
-@@ -661,7 +1576,7 @@
+ 		}
+@@ -661,7 +1576,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  		if (filter) {
  			const uint32_t * __restrict column = fColumn + cx0;
  			const uint16_t * __restrict weights = fColumnWeight + cx0;
@@ -20620,16 +21713,14 @@
  
  			for (uint32_t i = 0, n = (uint32_t) (cx1 - cx0); i < n; i++) {
  				uint32_t c = column[i], w = weights[i], a = from[c];
-@@ -670,9 +1585,26 @@
+@@ -670,9 +1585,26 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  			}
  		} else {
  			for (int32_t x = cx0; x < cx1; x++) {
 -				to[x] = from[fColumn[x]];
--			}
--		}
 +				line[x] = from[fColumn[x]];
-+			}
-+		}
+ 			}
+ 		}
 +		/*
 +		 * The row is made in memory that is cached and goes to the panel in one piece: the panel's memory takes a
 +		 * word at a time in 13 ms for 1000 rows and memcpy()'s wide stores in 4 ms (EXP-0125, fb_probe).
@@ -20650,7 +21741,7 @@
  	}
  }
  
-@@ -687,6 +1619,7 @@
+@@ -687,6 +1619,7 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  	IOLockLock(fb->fHelperLock);
  	index = fb->fHelpersStarted++;
  	IOLockUnlock(fb->fHelperLock);
@@ -20658,7 +21749,7 @@
  	for (;;) {
  		const RowJob * job;
  		int32_t rows, y0, y1;
-@@ -700,9 +1633,9 @@
+@@ -700,9 +1633,9 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  		job = fb->fHelperJob;
  		IOLockUnlock(fb->fHelperLock);
  		/* share index + 1 of fThreads (the presenter takes share 0) */
@@ -20671,7 +21762,7 @@
  		blend = fb->fHelperBlend[index];
  		fb->drawRows(job, y0, y1, blend);
  		IOLockLock(fb->fHelperLock);
-@@ -714,6 +1647,38 @@
+@@ -714,6 +1647,38 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  	}
  }
  
@@ -20710,11 +21801,10 @@
  /*
   * Put a rectangle of a 32-bit surface on the screen. `dst` is in display coordinates; the
   * panel may be of another size, and the layer itself may be scaled: both are done in one
-@@ -740,6 +1705,33 @@
- 	}
+@@ -741,6 +1706,33 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  	if (sx < 0 || sy < 0 || (uint32_t) (sx + sw) > s->info.width || (uint32_t) (sy + sh) > s->info.height) {
  		return;
-+	}
+ 	}
 +	if (gProbe && (fSwapsShown == 60 || fSwapsShown == 120 || fSwapsShown == 180)) {
 +		/* EXP-0125: what is slow, reading the surface or writing the panel? */
 +		const uint32_t * in = (const uint32_t *) s->pixels();
@@ -20741,10 +21831,11 @@
 +		d = mach_absolute_time();
 +		redwood_tl("tl: p read1000rows %llu us, write1000rows %llu us, memcpy1000rows %llu us (sum %u)\n", micros(b) - micros(a),
 +		    micros(c) - micros(b), micros(d) - micros(c), sum);
- 	}
++	}
  	/* the rectangle on the panel */
  	px0 = (int32_t) ((int64_t) dx * fPanelWidth / fWidth);
-@@ -750,7 +1742,7 @@
+ 	py0 = (int32_t) ((int64_t) dy * fPanelHeight / fHeight);
+@@ -750,7 +1742,7 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  		return;
  	}
  	/* (blending, a row of the picture mixed from two: room for it, for every one who draws rows) */
@@ -20753,7 +21844,7 @@
  		if (fBlendRow != NULL) {
  			IODelete(fBlendRow, uint32_t, fBlendRowSize);
  		}
-@@ -759,7 +1751,7 @@
+@@ -759,7 +1751,7 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  				IODelete(fHelperBlend[i], uint32_t, fBlendRowSize);
  			}
  		}
@@ -20762,7 +21853,7 @@
  		fBlendRow = IONew(uint32_t, fBlendRowSize);
  		for (unsigned i = 0; i + 1 < fThreads; i++) {
  			fHelperBlend[i] = IONew(uint32_t, fBlendRowSize);
-@@ -776,6 +1768,24 @@
+@@ -776,6 +1768,24 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  	/* which pixel of a source row each pixel of a panel row takes: worked out once, not 2.6 million times */
  	cx0 = px0 < 0 ? 0 : px0;
  	cx1 = (uint32_t) px1 > fPanelWidth ? (int32_t) fPanelWidth : px1;
@@ -20787,7 +21878,7 @@
  	for (int32_t x = cx0; x < cx1; x++) {
  		if (filter) {
  			int64_t at = sample_at(x - px0, sw, px1 - px0);
-@@ -798,25 +1808,34 @@
+@@ -798,25 +1808,34 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  	job.py1 = py1;
  	job.cx0 = cx0;
  	job.cx1 = cx1;
@@ -20825,7 +21916,7 @@
  }
  
  /*
-@@ -880,6 +1899,7 @@
+@@ -880,6 +1899,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
  		if (IOLockSleepDeadline(fSwapLock, &fSwapsWaiting, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
  		    fSwapsWaiting >= swapQueue()) {
  			fStatLost++;                    /* (the GPU has stopped answering: the frame before is waiting for it) */
@@ -20833,7 +21924,7 @@
  			IOLockUnlock(fSwapLock);
  			return;
  		}
-@@ -897,9 +1917,21 @@
+@@ -897,9 +1917,21 @@ IOMobileFramebuffer::present(const uint8_t * swap)
  	IOLockUnlock(fSwapLock);
  }
  
@@ -20855,7 +21946,7 @@
  	((IOMobileFramebuffer *) self)->presenter();
  }
  
-@@ -927,6 +1959,17 @@
+@@ -927,6 +1959,17 @@ IOMobileFramebuffer::presenter(void)
  	}
  }
  
@@ -20873,7 +21964,7 @@
  /* A swap's surfaces onto the panel, once the GPU is done with them. */
  void
  IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
-@@ -935,17 +1978,54 @@
+@@ -935,17 +1978,54 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  	uint64_t began = mach_absolute_time(), nanos, ready, shown, drawn;
  	uint32_t layers = 0;
  	MiniIOSurface * recorded = NULL;
@@ -20899,16 +21990,14 @@
 -		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
 -			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; shown as it is\n",
 -			    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS);
--		}
--	}
 +		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 +		if (sid != 0 && surfaces[layer] == NULL) {
 +			IOLog("MiniIOMobileFramebuffer: swap %u surface %u unavailable or unfinished; discard entire frame\n",
 +			    swapWord(swap, SWAP_ID), sid);
 +			complete = false;
 +			break;
-+		}
-+	}
+ 		}
+ 	}
 +	bool held = complete && MiniIOSurfaceBeginDisplay(surfaces, SWAP_LAYERS, SWAP_GPU_MS);
 +	complete &= held;
  	fStatWaiting += mach_absolute_time() - began;
@@ -20934,7 +22023,7 @@
  		uint64_t period, aim, next;
  
  		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
-@@ -971,11 +2051,7 @@
+@@ -971,11 +2051,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  	}
  	shown = began;
  	/* its turn has come: the swap after it may be handed over */
@@ -20947,7 +22036,7 @@
  	IOLockLock(fLock);
  	if (fLastFrame != 0) {
  		absolutetime_to_nanoseconds(began - fLastFrame, &nanos);
-@@ -1010,9 +2086,11 @@
+@@ -1010,9 +2086,11 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  		if (sid == 0) {
  			/* the bottom layer taken away: nothing is shown, the screen is black */
  			if (layer == 0 && (set & 1) && fGraphics) {
@@ -20959,7 +22048,7 @@
  			}
  			continue;
  		}
-@@ -1036,7 +2114,82 @@
+@@ -1036,7 +2114,82 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  				fGraphics = true;
  				PE_initialize_console(NULL, kPEGraphicsMode);
  			}
@@ -21043,7 +22132,7 @@
  			if (layer == 0) {
  				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
  			}
-@@ -1046,6 +2199,14 @@
+@@ -1046,6 +2199,14 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  	if (recorded != NULL) {
  		record(recorded);
  	}
@@ -21058,7 +22147,7 @@
  	fSwapsShown++;
  	if (gTouchLat) {
  		redwood_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
-@@ -1072,7 +2233,7 @@
+@@ -1072,7 +2233,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  		absolutetime_to_nanoseconds(fStatDrawing, &drawing);
  		absolutetime_to_nanoseconds(fStatWaiting, &waiting);
  		absolutetime_to_nanoseconds(fStatBeatWait, &beat);
@@ -21067,7 +22156,7 @@
  		    "waiting for the GPU and, %u of them, %llu us for the next refresh; %u swaps waited for the frame before, "
  		    "%u gave up; %u swaps came a refresh late themselves\n", fStatFrames, nanos / NSEC_PER_MSEC,
  		    fStatFrames * NSEC_PER_SEC / nanos, drawing / fStatFrames / NSEC_PER_USEC,
-@@ -1127,6 +2288,11 @@
+@@ -1127,6 +2288,11 @@ class IOMobileFramebufferUserClient : public IOUserClient
  	uint64_t                fVSyncTime;             /* when the refresh being waited for is due */
  	bool                    fVSyncRunning;
  	bool                    fClosed;
@@ -21079,7 +22168,7 @@
  
  	static void vsyncFired(thread_call_param_t self, thread_call_param_t unused);
  	void vsync(void);
-@@ -1237,6 +2403,20 @@
+@@ -1237,6 +2403,20 @@ IOMobileFramebufferUserClient::armVSync(void)
  
  	/* one refresh after the last, not after whenever we got round to this: the rate does not drift */
  	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
@@ -21100,13 +22189,10 @@
  	fVSyncTime += period;
  	if (fVSyncTime <= now || fVSyncTime > now + 2 * period) {
  		fVSyncTime = now + period;
-@@ -1244,38 +2424,74 @@
+@@ -1244,38 +2424,74 @@ IOMobileFramebufferUserClient::armVSync(void)
  	thread_call_enter_delayed(fVSyncCall, fVSyncTime);
  }
  
--/*
-- * One refresh: tell the client, which gets three 64-bit numbers as six 32-bit halves --
-- * the time of this refresh, the same again (the time it was presented), and a counter.
 +/* With the lock held: the timer has a client for its ticks -- vsync notifications, or frame info with a key asked for. */
 +bool
 +IOMobileFramebufferUserClient::wantsTicks(void) const
@@ -21118,7 +22204,9 @@
 +	       (fCallbacks[kFBNotifyFrameInfo] != 0 && fPorts[kFBNotifyFrameInfo] != NULL && (fFrameInfoMask & 1) != 0);
 +}
 +
-+/*
+ /*
+- * One refresh: tell the client, which gets three 64-bit numbers as six 32-bit halves --
+- * the time of this refresh, the same again (the time it was presented), and a counter.
 + * One refresh. Vsync: the client gets three 64-bit numbers as six 32-bit halves -- the time of this
 + * refresh, the same again (the time it was presented), and a counter. Frame info, when a frame the
 + * client has not been told of is on the panel: [the mask of the values, top bit = each value is two
@@ -21192,7 +22280,7 @@
  }
  
  IOReturn
-@@ -1291,11 +2507,22 @@
+@@ -1291,11 +2507,22 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  
  		gFBCalls[selector]++;
  		proc_selfname(procname, sizeof(procname));
@@ -21218,7 +22306,7 @@
  	}
  
  	switch (selector) {
-@@ -1353,6 +2580,20 @@
+@@ -1353,6 +2580,20 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  		return kIOReturnSuccess;
  
  	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
@@ -21239,7 +22327,7 @@
  		if (gTouchLat) {
  			redwood_tl("tl: w %llu %#llx %#llx at %llu\n", args->scalarInputCount > 0 ? in[0] : 0,
  			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
-@@ -1362,7 +2603,19 @@
+@@ -1362,7 +2603,19 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  	case kFBMethodSwapCancel:
  	case kFBMethodSwapCancelAll:
  	case kFBMethodRequestPowerChange:
@@ -21260,7 +22348,7 @@
  		return kIOReturnSuccess;
  
  	case kFBMethodNotifications:                    /* in: callback (0 = off), its argument, type, 0 */
-@@ -1372,22 +2625,25 @@
+@@ -1372,22 +2625,25 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  		IOLockLock(fLock);
  		fCallbacks[in[2]] = in[0];
  		fRefcons[in[2]] = in[1];
@@ -21281,17 +22369,16 @@
  		}
  		if (args->structureOutput != NULL) {
  			bzero(args->structureOutput, args->structureOutputSize);
--		}
--		return kIOReturnSuccess;
 +			if (gFrameInfo != 0 && args->scalarInputCount >= 1 && in[0] == 0) {
 +				strlcpy((char *) args->structureOutput, "Presentation_time", args->structureOutputSize);
 +			}
-+		}
+ 		}
+-		return kIOReturnSuccess;
 +		return gFrameInfo == 0 || (args->scalarInputCount >= 1 && in[0] == 0) ? kIOReturnSuccess : kIOReturnBadArgument;
  
  	case kFBMethodGetBlock:                         /* in: which block; out: its bytes */
  		if (args->structureOutput == NULL) {
-@@ -1416,7 +2672,7 @@
+@@ -1416,7 +2672,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  
  	if (selector < 128 && !(gFBLogged[selector / 64] & (1ULL << (selector % 64)))) {
  		gFBLogged[selector / 64] |= 1ULL << (selector % 64);
@@ -21300,9 +22387,208 @@
  		    "structure %u in, %u out)\n", selector, args->scalarInputCount, args->scalarInputCount > 0 ? in[0] : 0,
  		    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, args->scalarOutputCount,
  		    args->structureInputSize, args->structureOutputSize);
+diff --git a/iokit/Kernel/MiniIOSurface.cpp b/iokit/Kernel/MiniIOSurface.cpp
+index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b171794282 100644
 --- a/iokit/Kernel/MiniIOSurface.cpp
 +++ b/iokit/Kernel/MiniIOSurface.cpp
-@@ -82,6 +82,24 @@
+@@ -5,7 +5,7 @@
+  * followed by the pixels. Every client that knows a surface has the whole of it mapped once.
+  * Surfaces travel between processes as Mach send rights (IOSurfaceSendRight) or by number.
+  *
+- * What is not here: child surfaces, wrapping of client memory, purgeability, compression,
++ * What is not here: child surfaces, purgeability, compression,
+  * notifications. Calls that are not implemented are logged once and refused.
+  */
+ 
+@@ -25,11 +25,187 @@
+ #include <libkern/c++/OSString.h>
+ #include <libkern/c++/OSSymbol.h>
+ #include <kern/thread_call.h>
++#include <kern/thread.h>
++#include <kern/task.h>
++#include <kern/clock.h>
++#include <kern/sched_prim.h>
++#include <os/atomic_private.h>
+ #include <sys/systm.h>
+ #include <sys/proc.h>
+ 
+ #include "MiniIOSurface.h"
+ 
++/* Optional lock-free rejection counters; names are immutable after publication. */
++#define SURF_PROF_SELECTORS 256
++#define SURF_PROF_NAMES 128
++static uint32_t gSurfaceProfile;
++static uint32_t gFrameFix = 1;
++enum { WRAP_SHAPE, WRAP_SCALARS, WRAP_OUTPUT, WRAP_DIM, WRAP_BPE, WRAP_ROW, WRAP_SIZE, WRAP_ADDRESS, WRAP_PROPS, WRAP_CREATE, WRAP_REF, WRAP_REASON_COUNT, WRAP_OK };
++static const char *wrapReasons[] = { "shape", "scalars", "output", "dim", "bpe", "row", "size", "address", "props", "create", "ref" };
++static uint64_t wrapCounts[WRAP_REASON_COUNT + 1], wrapTime, wrapMax;
++static uint32_t wrapRaw;
++
++struct surface_wrap_image {
++	uint64_t address;
++	uint32_t width, height, pixelFormat, bytesPerElement, bytesPerRow, size;
++};
++static_assert(sizeof(surface_wrap_image) == 32, "wrap input size");
++static_assert(offsetof(surface_wrap_image, width) == 8 && offsetof(surface_wrap_image, size) == 28, "wrap offsets");
++
++static unsigned
++surfaceWrapValidate(const surface_wrap_image &q)
++{
++	if (!q.width || !q.height || q.width > 8192 || q.height > 8192) return WRAP_DIM;
++	if (q.bytesPerElement != 1 && q.bytesPerElement != 2 && q.bytesPerElement != 4 && q.bytesPerElement != 8) return WRAP_BPE;
++	uint64_t row = (uint64_t)q.width * q.bytesPerElement;
++	if (q.bytesPerRow < row) return WRAP_ROW;
++	uint64_t needed = (uint64_t)q.bytesPerRow * (q.height - 1) + row;
++	if (q.size < needed || q.size > (512u << 20)) return WRAP_SIZE;
++	if (!q.address || q.address > UINT64_MAX - q.size) return WRAP_ADDRESS;
++	return WRAP_OK;
++}
++
++static void
++surfaceWrapCount(unsigned reason, uint64_t began)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(mach_absolute_time() - began, &ns);
++	uint64_t us = ns / 1000, old = os_atomic_load(&wrapMax, relaxed);
++	while (old < us && !os_atomic_cmpxchg(&wrapMax, old, us, relaxed)) old = os_atomic_load(&wrapMax, relaxed);
++	os_atomic_add(&wrapTime, us, relaxed);
++	os_atomic_inc(&wrapCounts[reason == WRAP_OK ? WRAP_REASON_COUNT : reason], relaxed);
++}
++
++static struct {
++	uint64_t key, count;
++	uint32_t who;
++} gSurfaceProfileCounts[SURF_PROF_SELECTORS];
++static struct {
++	uint32_t state;
++	char text[32];
++} gSurfaceProfileNames[SURF_PROF_NAMES];
++static uint64_t gSurfaceProfileOverflow;
++extern "C" void redwood_tl(const char *format, ...) __printflike(1, 2);
++
++static void
++surfaceProfileReject(uint32_t selector)
++{
++	uint64_t key = (uint64_t)selector + 1;
++	unsigned slot;
++	for (slot = 0; slot < SURF_PROF_SELECTORS; slot++) {
++		uint64_t seen = os_atomic_load(&gSurfaceProfileCounts[slot].key, acquire);
++		if (seen == key) break;
++		if (seen == 0 && (os_atomic_cmpxchg(&gSurfaceProfileCounts[slot].key, 0, key, acq_rel) ||
++		    os_atomic_load(&gSurfaceProfileCounts[slot].key, acquire) == key)) break;
++	}
++	if (slot == SURF_PROF_SELECTORS) {
++		os_atomic_inc(&gSurfaceProfileOverflow, relaxed);
++		return;
++	}
++	char name[32] = "unknown";
++	proc_selfname(name, sizeof(name)); /* current_proc + strlcpy; no proc_find/name lock */
++	for (unsigned i = 0; i < sizeof(name) - 1 && name[i]; i++) {
++		if (name[i] <= ' ' || name[i] == '=' || name[i] == '[' || name[i] == ']') name[i] = '_';
++	}
++	uint32_t who = 0;
++	for (unsigned i = 0; i < SURF_PROF_NAMES; i++) {
++		uint32_t state = os_atomic_load(&gSurfaceProfileNames[i].state, acquire);
++		if (state == 2 && strcmp(gSurfaceProfileNames[i].text, name) == 0) { who = i + 1; break; }
++		if (state == 0 && os_atomic_cmpxchg(&gSurfaceProfileNames[i].state, 0, 1, acq_rel)) {
++			strlcpy(gSurfaceProfileNames[i].text, name, sizeof(gSurfaceProfileNames[i].text));
++			os_atomic_store(&gSurfaceProfileNames[i].state, 2, release);
++			who = i + 1; break;
++		}
++	}
++	os_atomic_store(&gSurfaceProfileCounts[slot].who, who, release);
++	os_atomic_inc(&gSurfaceProfileCounts[slot].count, relaxed);
++}
++
++static void
++surfaceWrapReport(uint64_t at)
++{
++	uint64_t n[WRAP_REASON_COUNT], refused = 0;
++	for (unsigned i = 0; i < WRAP_REASON_COUNT; i++) { n[i] = os_atomic_xchg(&wrapCounts[i], 0, relaxed); refused += n[i]; }
++	uint64_t ok = os_atomic_xchg(&wrapCounts[WRAP_REASON_COUNT], 0, relaxed);
++	uint64_t us = os_atomic_xchg(&wrapTime, 0, relaxed), max = os_atomic_xchg(&wrapMax, 0, relaxed);
++	if (!ok && !refused) return;
++	redwood_tl("pf: surfwrap at %llu ok=%llu refused=%llu us=%llu max=%llu\n", at, ok, refused, us, max);
++	char line[176]; int used = snprintf(line, sizeof(line), "pf: surfwrap at %llu", at);
++	for (unsigned i = 0; i < WRAP_REASON_COUNT; i++) if (n[i]) {
++		char entry[48]; int added = snprintf(entry, sizeof(entry), " reason=%s:%llu", wrapReasons[i], n[i]);
++		if (used + added >= (int)sizeof(line) - 1) {
++			redwood_tl("%s\n", line); used = snprintf(line, sizeof(line), "pf: surfwrap at %llu", at);
++		}
++		memcpy(line + used, entry, (size_t)added + 1); used += added;
++	}
++	if (refused) redwood_tl("%s\n", line);
++}
++
++static void
++surfaceProfileReport(void *unused __unused, wait_result_t result __unused)
++{
++	for (;;) {
++		uint64_t deadline;
++		clock_interval_to_deadline(1, NSEC_PER_SEC, &deadline);
++		if (assert_wait_deadline((event_t)&gSurfaceProfile, THREAD_UNINT, deadline) == THREAD_WAITING) {
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++		uint64_t ns;
++		absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++		char line[176];
++		int used = snprintf(line, sizeof(line), "pf: surfrej at %llu", ns / 1000);
++		unsigned nonzero = 0;
++		for (unsigned i = 0; i < SURF_PROF_SELECTORS; i++) {
++			uint64_t n = os_atomic_xchg(&gSurfaceProfileCounts[i].count, 0, relaxed);
++			if (!n) continue;
++			nonzero++;
++			uint32_t who = os_atomic_load(&gSurfaceProfileCounts[i].who, acquire);
++			const char *name = who && who <= SURF_PROF_NAMES ? gSurfaceProfileNames[who - 1].text : "name_overflow";
++			char entry[104];
++			int added = snprintf(entry, sizeof(entry), " sel=%llu n=%llu who=%s",
++			    os_atomic_load(&gSurfaceProfileCounts[i].key, relaxed) - 1, n, name);
++			if (used + added >= (int)sizeof(line) - 1) {
++				redwood_tl("%s\n", line);
++				used = snprintf(line, sizeof(line), "pf: surfrej at %llu", ns / 1000);
++			}
++			memcpy(line + used, entry, (size_t)added + 1); used += added;
++		}
++		if (nonzero) redwood_tl("%s\n", line);
++		uint64_t overflow = os_atomic_xchg(&gSurfaceProfileOverflow, 0, relaxed);
++		if (overflow) redwood_tl("pf: surfrej_overflow at %llu n=%llu\n", ns / 1000, overflow);
++		if (gFrameFix & 2) surfaceWrapReport(ns / 1000);
++	}
++}
++
++static uint32_t
++frameFixValue(const char *value)
++{
++	return value[0] >= '0' && value[0] <= '9' && value[1] == 0 ? (uint32_t)(value[0] - '0') : 0;
++}
++
++static void
++surfaceProfileStart(void)
++{
++	char frameFix[3] = { 0, 0, 0 };
++	gFrameFix = PE_parse_boot_arg_str("ffix", frameFix, sizeof(frameFix)) ? frameFixValue(frameFix) : 1;
++	gSurfaceProfile = 0;
++	PE_parse_boot_argn("fprof", &gSurfaceProfile, sizeof(gSurfaceProfile));
++	if (gSurfaceProfile == 0 && !(gFrameFix & 2)) return;
++	if (gSurfaceProfile && (gSurfaceProfile < 200 || gSurfaceProfile > 10000)) {
++		gSurfaceProfile = 0;
++		redwood_tl("pf: surfrej disabled invalid_interval\n");
++		if (!(gFrameFix & 2)) return;
++	}
++	thread_t reporter;
++	if (kernel_thread_start(surfaceProfileReport, NULL, &reporter) == KERN_SUCCESS) {
++		thread_deallocate(reporter);
++		redwood_tl("pf: surfrej enabled interval_us=%u\n", gSurfaceProfile);
++	} else {
++		gSurfaceProfile = 0;
++		redwood_tl("pf: surfrej disabled reporter_failed\n");
++	}
++}
++
+ static_assert(sizeof(struct minisurf_plane) == 0x80, "plane layout");
+ static_assert(sizeof(struct minisurf_result) == 0x68, "result layout");
+ static_assert(offsetof(struct minisurf_shared, attachments) == 0x30, "shared layout");
+@@ -82,6 +258,24 @@ enum {
  #define FOURCC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
  
  static IOLock *         gSurfaceLock;
@@ -21327,7 +22613,7 @@
  static MiniIOSurface *  gSurfaceTable[MINISURF_TABLE_SIZE];     /* index = surface number; [0] unused */
  static uint32_t         gSurfaceNext = 1;
  static uint32_t         gSurfaceCount;
-@@ -90,6 +108,7 @@
+@@ -90,6 +284,7 @@ static uint32_t         gSurfaceUnheld;         /* surfaces around client memory
  /* what making surfaces and taking them away has cost since it was last asked (MiniIOSurfaceCost()) */
  static uint64_t         gSurfaceMaking, gSurfaceFreeing;
  static uint32_t         gSurfacesMade, gSurfacesFreed;
@@ -21335,7 +22621,7 @@
  static uint64_t         gSurfaceLogged[2];                      /* selectors already complained about */
  /* Boot-arg surftrace=N: log the first N surfaces created (default 24). */
  static TUNABLE(uint32_t, gSurfaceTrace, "surftrace", 24);
-@@ -283,6 +302,9 @@
+@@ -283,6 +478,9 @@ MiniIOSurface::free(void)
  		    "the middle %#010x\n", sid, info.width, info.height, nonzero, info.allocSize / 64, middle);
  	}
  
@@ -21345,12 +22631,21 @@
  	OSSafeReleaseNULL(values);
  	OSSafeReleaseNULL(clientMap);
  	if (client != NULL) {
-@@ -314,6 +336,18 @@
- 	absolutetime_to_nanoseconds(gSurfaceFreeing, &nanos);
- 	*freeing = *freed ? nanos / NSEC_PER_USEC / *freed : 0;
+@@ -290,6 +488,10 @@ MiniIOSurface::free(void)
+ 		client->release();
+ 		client = NULL;
+ 	}
++	if (clientTask != NULL && (gFrameFix & 2)) {
++		task_deallocate(clientTask);
++		clientTask = NULL;
++	}
+ 	if (memory != NULL) {
+ 		surfaceMemoryBack(memory);
+ 		memory = NULL;
+@@ -316,6 +518,18 @@ MiniIOSurfaceCost(uint32_t * made, uint64_t * making, uint32_t * freed, uint64_t
  	gSurfaceMaking = gSurfaceFreeing = 0;
-+}
-+
+ }
+ 
 +void
 +MiniIOSurfaceDisplayStats(uint32_t * live, uint32_t * peak, uint32_t * peakEver, uint32_t * made)
 +{
@@ -21361,10 +22656,154 @@
 +	*made = gDisplaySizedMade;
 +	gDisplaySizedPeak = gDisplaySizedLive;
 +	IOLockUnlock(gSurfaceLock);
++}
++
+ /* The values changed: a new seed, and how much room a client needs to fetch them. */
+ void
+ MiniIOSurface::updateValuesState(void)
+@@ -442,7 +656,7 @@ describeComponents(struct minisurf_plane * plane, uint32_t format)
+  * Returned with one holder, and entered in the table.
+  */
+ static MiniIOSurface *
+-surfaceCreate(OSDictionary * props, IOReturn * error)
++surfaceCreate(OSDictionary * props, IOReturn * error, bool wrapImage = false)
+ {
+ 	MiniIOSurface * s;
+ 	struct minisurf_result * info;
+@@ -465,7 +679,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
+ 	 * there is no wide gamut on this panel anyway. The surface is made as ordinary BGRA of
+ 	 * the same geometry, and says so: whoever uses it reads the format back from the surface.
+ 	 */
+-	if (format == 'w30r' || format == 'l10r' || format == 'w30R') {
++	if (!wrapImage && (format == 'w30r' || format == 'l10r' || format == 'w30R')) {
+ 		format = 'BGRA';
+ 	}
+ 	/*
+@@ -473,7 +687,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
+ 	 * surfaces of once it draws with a GPU's renderer (OpenGL ES, userland/src/eagl.c) instead
+ 	 * of its software one. One plane of BGRA here too; the framebuffer shows nothing else.
+ 	 */
+-	if (format == 'b3a8') {
++	if (!wrapImage && format == 'b3a8') {
+ 		format = 'BGRA';
+ 		onePlane = true;
+ 	}
+@@ -577,7 +791,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
+ 		    : alignUp((uint64_t) ((width + ew - 1) / ew) * bpe, MINISURF_ROW_ALIGN);
+ 	}
+ 	if (planeCount == 0) {
+-		needed = (uint64_t) bpr * ((height + eh - 1) / eh);
++		needed = wrapImage ? (uint64_t)bpr * (height - 1) + (uint64_t)width * bpe : (uint64_t) bpr * ((height + eh - 1) / eh);
+ 		/* the one implicit plane, for the per-plane getters */
+ 		s->planes[0].width = width;
+ 		s->planes[0].height = height;
+@@ -625,6 +839,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
+ 	s->kpixels = s->kbase + PAGE_SIZE;
+ 	if (wrapped != NULL) {
+ 		s->clientTask = current_task();
++		if (gFrameFix & 2) task_reference(s->clientTask);
+ 		s->clientAddress = wrapped->unsigned64BitValue();
+ 		IOReturn held = kIOReturnNoMemory;
+ 
+@@ -840,6 +1055,7 @@ MiniIOSurfaceStart(IOService * provider)
+ {
+ 	IOCoreSurfaceRoot * root;
+ 
++	surfaceProfileStart();
+ 	gSurfaceLock = IOLockAlloc();
+ 	gSurfaceKeptLock = IOLockAlloc();
+ 	if (!PE_parse_boot_arg_str("surftrace_of", gSurfaceTraceOf, sizeof(gSurfaceTraceOf))) {
+@@ -887,6 +1103,7 @@ class IOSurfaceRootUserClient : public IOUserClient
+ 
+ 	IOReturn methodInit(IOExternalMethodArguments * args);
+ 	IOReturn methodCreate(IOExternalMethodArguments * args);
++	IOReturn methodWrapImage(IOExternalMethodArguments * args);
+ 	IOReturn methodLookup(IOExternalMethodArguments * args);
+ 	IOReturn methodLookupFromPort(IOExternalMethodArguments * args);
+ 	IOReturn methodCreatePort(IOExternalMethodArguments * args);
+@@ -1019,6 +1236,11 @@ IOSurfaceRootUserClient::addRef(MiniIOSurface * surface)
+ 	ref->map = map;
+ 	if (surface->client != NULL && surface->clientTask != fTask) {
+ 		ref->pixelMap = surface->client->createMappingInTask(fTask, 0, kIOMapAnywhere);
++		if ((gFrameFix & 2) && ref->pixelMap == NULL) {
++			OSSafeReleaseNULL(ref->map);
++			fRefCount--;
++			return NULL;
++		}
+ 	}
+ 	surfaceHold(surface);
+ 	return ref;
+@@ -1069,6 +1291,69 @@ IOSurfaceRootUserClient::returnSurface(struct minisurf_client_ref * ref, bool kn
+ 	return kIOReturnSuccess;
  }
  
- /* The values changed: a new seed, and how much room a client needs to fetch them. */
-@@ -1196,6 +1230,30 @@
++/* A bounded snapshot of the ABI, never the pixels at the client address. */
++static void
++surfaceWrapSnapshot(IOExternalMethodArguments *args)
++{
++	uint32_t index = os_atomic_load(&wrapRaw, relaxed);
++	while (index < 16 && !os_atomic_cmpxchg(&wrapRaw, index, index + 1, relaxed)) index = os_atomic_load(&wrapRaw, relaxed);
++	if (index >= 16) return;
++	index++;
++	char who[32] = "unknown", hex[129]; uint8_t bytes[64];
++	proc_selfname(who, sizeof(who));
++	for (unsigned i = 0; i < sizeof(who) - 1 && who[i]; i++) if (who[i] <= ' ' || who[i] == '=') who[i] = '_';
++	size_t n = args->structureInputSize < sizeof(bytes) ? args->structureInputSize : sizeof(bytes);
++	if (args->structureInputDescriptor != NULL) {
++		uint64_t length = args->structureInputDescriptor->getLength();
++		n = length < sizeof(bytes) ? (size_t)length : sizeof(bytes);
++		n = (size_t)args->structureInputDescriptor->readBytes(0, bytes, n);
++	} else if (args->structureInput != NULL) {
++		memcpy(bytes, args->structureInput, n);
++	} else n = 0;
++	static const char digits[] = "0123456789abcdef";
++	for (size_t i = 0; i < n; i++) { hex[i*2] = digits[bytes[i] >> 4]; hex[i*2+1] = digits[bytes[i] & 15]; }
++	hex[n*2] = 0;
++	redwood_tl("pf: wrapraw n=%u in=%u scalars=%u out=%u who=%s descriptor=%u\n", index,
++	    args->structureInputSize, args->scalarInputCount, args->structureOutputSize, who, args->structureInputDescriptor != NULL);
++	redwood_tl("pf: wraphex n=%u bytes=%lu hex=%s\n", index, (unsigned long)n, hex);
++}
++
++IOReturn
++IOSurfaceRootUserClient::methodWrapImage(IOExternalMethodArguments *args)
++{
++	uint64_t began = mach_absolute_time();
++	surfaceWrapSnapshot(args);
++	unsigned reason = WRAP_OK;
++	surface_wrap_image q = {};
++	if (args->structureInputDescriptor || !args->structureInput || args->structureInputSize != sizeof(q)) reason = WRAP_SHAPE;
++	else if (args->scalarInputCount || args->scalarOutputCount) reason = WRAP_SCALARS;
++	else if (!args->structureOutput || args->structureOutputSize < sizeof(minisurf_result) + sizeof(minisurf_plane)) reason = WRAP_OUTPUT;
++	else { memcpy(&q, args->structureInput, sizeof(q)); reason = surfaceWrapValidate(q); }
++	if (reason != WRAP_OK) { surfaceWrapCount(reason, began); return kIOReturnUnsupported; }
++	OSDictionary *props = OSDictionary::withCapacity(7);
++	if (!props) { surfaceWrapCount(WRAP_PROPS, began); return kIOReturnUnsupported; }
++	const char *keys[] = { "IOSurfaceAddress", "IOSurfaceWidth", "IOSurfaceHeight", "IOSurfacePixelFormat", "IOSurfaceBytesPerElement", "IOSurfaceBytesPerRow", "IOSurfaceAllocSize" };
++	uint64_t values[] = { q.address, q.width, q.height, q.pixelFormat, q.bytesPerElement, q.bytesPerRow, q.size };
++	bool complete = true;
++	for (unsigned i = 0; i < 7; i++) {
++		OSNumber *n = OSNumber::withNumber(values[i], i ? 32 : 64);
++		if (!n || !props->setObject(keys[i], n)) complete = false;
++		OSSafeReleaseNULL(n);
++	}
++	IOReturn error = kIOReturnNoMemory;
++	MiniIOSurface *s = complete ? surfaceCreate(props, &error, true) : NULL;
++	props->release();
++	if (!s) { surfaceWrapCount(complete ? WRAP_CREATE : WRAP_PROPS, began); return kIOReturnUnsupported; }
++	IOLockLock(gSurfaceLock);
++	minisurf_client_ref *ref = addRef(s);
++	IOReturn ret = ref ? returnSurface(ref, false, args) : kIOReturnNoMemory;
++	if (ref && ret != kIOReturnSuccess) dropRef(ref);
++	surfaceUnhold(s); /* release creator hold exactly once; never access s after this */
++	IOLockUnlock(gSurfaceLock);
++	surfaceWrapCount(ret == kIOReturnSuccess ? WRAP_OK : WRAP_REF, began);
++	return ret == kIOReturnSuccess ? ret : kIOReturnUnsupported;
++}
++
+ IOReturn
+ IOSurfaceRootUserClient::methodInit(IOExternalMethodArguments * args)
+ {
+@@ -1196,6 +1481,30 @@ IOSurfaceRootUserClient::methodCreate(IOExternalMethodArguments * args)
  		    (int) (s->info.pixelFormat & 0xff), s->info.bytesPerRow, s->info.planeCount, s->info.allocSize);
  	}
  
@@ -21395,9 +22834,30 @@
  	uint64_t mapped_at = mach_absolute_time();
  	IOLockLock(gSurfaceLock);
  	ref = addRef(s);
+@@ -1584,6 +1893,10 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		return methodInit(args);
+ 	case kSurfaceMethodCreate:
+ 		return methodCreate(args);
++	case kSurfaceMethodWrapClientImage:
++		if (gFrameFix & 2) return methodWrapImage(args);
++		if (gSurfaceProfile) surfaceProfileReject(selector);
++		break;
+ 	case kSurfaceMethodLookup:
+ 		return methodLookup(args);
+ 	case kSurfaceMethodLookupFromPort:
+@@ -1675,6 +1988,7 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+ 		return kIOReturnSuccess;
+ 
+ 	default:
++		if (gSurfaceProfile) surfaceProfileReject(selector);
+ 		break;
+ 	}
+ 
+diff --git a/iokit/Kernel/MiniIOSurface.h b/iokit/Kernel/MiniIOSurface.h
+index 431423b069f6ab4dc98d06eb5f2969a3d50e376a..ce86f05e07ac32bda105a1619322fdf22c599021 100644
 --- a/iokit/Kernel/MiniIOSurface.h
 +++ b/iokit/Kernel/MiniIOSurface.h
-@@ -118,16 +118,22 @@
+@@ -118,16 +118,22 @@ public:
  	mach_vm_address_t               clientAddress;  /* ... and where it is there */
  	uint8_t *                       kpixels;        /* where the pixel memory starts in the kernel, either way */
  	uint32_t                        drawn;          /* the GPU's last submission that names the pixels (0: none; RedwoodGPU.cpp) */
@@ -21420,7 +22880,7 @@
  		return OSObject::init();
  	}
  	virtual void free(void) APPLE_KEXT_OVERRIDE;
-@@ -161,10 +167,23 @@
+@@ -161,10 +167,23 @@ MiniIOSurface * MiniIOSurfaceCopy(uint32_t sid);
   * each; how many got memory that was kept from one before.
   */
  void            MiniIOSurfaceCost(uint32_t * made, uint64_t * making, uint32_t * freed, uint64_t * freeing, uint32_t * again);
@@ -21444,9 +22904,135 @@
  MiniIOSurface * MiniIOSurfaceCreateSimple(uint32_t width, uint32_t height, uint32_t pixelFormat);
  void            MiniIOSurfaceDrop(MiniIOSurface * surface);
  /* A Mach send right for the surface in the task (what IOSurfaceCreateMachPort gives); 0 on failure. */
+diff --git a/iokit/Kernel/RedwoodGPU.cpp b/iokit/Kernel/RedwoodGPU.cpp
+index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfaab68f07d 100644
 --- a/iokit/Kernel/RedwoodGPU.cpp
 +++ b/iokit/Kernel/RedwoodGPU.cpp
-@@ -89,6 +89,8 @@
+@@ -45,7 +45,123 @@
+ 
+ #include "MiniIOSurface.h"
+ 
++extern "C" uint32_t perfprof_enabled;
++extern "C" void perfprof_request(unsigned selector, uint64_t ticks);
++
++/* Scope covers validation failures and every return without changing request handling. */
++class PerfprofRequest {
++	uint32_t selector;
++	uint64_t began;
++public:
++	PerfprofRequest(uint32_t value) : selector(value), began(__atomic_load_n(&perfprof_enabled, __ATOMIC_RELAXED) ? mach_absolute_time() : 0) {}
++	~PerfprofRequest() { if (began) { perfprof_request(selector, mach_absolute_time() - began); } }
++};
++
+ extern "C" void redwood_tl(const char * format, ...) __printflike(1, 2);
++extern "C" void loader_log_line(const char *line);
++
++enum { PS_COPY, PS_LOCK, PS_DISPLAY, PS_BO, PS_CACHE, PS_COMMANDS, PS_RING, PS_OTHER, PS_SEGMENTS };
++static const char *submitNames[] = { "copy", "lock", "display", "bo", "cache", "commands", "ring", "other" };
++struct submit_stat { uint64_t n, ticks, maximum; };
++static struct submit_stat submitStats[PS_SEGMENTS], submitMi8[2];
++static uint64_t submitN, submitLast, submitBytes, submitFlushes, submitBOs, submitHist[6];
++
++static void
++submitAdd(struct submit_stat *s, uint64_t ticks, uint64_t maximum = ~0ull, uint64_t n = 1)
++{
++	__atomic_fetch_add(&s->n, n, __ATOMIC_RELAXED);
++	__atomic_fetch_add(&s->ticks, ticks, __ATOMIC_RELAXED);
++	if (maximum == ~0ull) maximum = ticks;
++	uint64_t old = __atomic_load_n(&s->maximum, __ATOMIC_RELAXED);
++	while (old < maximum && !__atomic_compare_exchange_n(&s->maximum, &old, maximum, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
++}
++
++extern "C" void
++perfprof_submit_mi8(unsigned segment, uint64_t ticks)
++{
++	if (segment < 2) submitAdd(&submitMi8[segment], ticks);
++}
++
++static uint64_t
++submitUS(uint64_t ticks)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(ticks, &ns);
++	return ns / NSEC_PER_USEC;
++}
++
++static void
++submitReport(uint64_t now)
++{
++	uint64_t last = __atomic_load_n(&submitLast, __ATOMIC_RELAXED), second;
++	nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
++	if (now - last < second || !__atomic_compare_exchange_n(&submitLast, &last, now, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
++	char segments[1024]; size_t used = 0;
++	for (unsigned i = 0; i < PS_SEGMENTS + 2; i++) {
++		struct submit_stat *s = i < PS_SEGMENTS ? &submitStats[i] : &submitMi8[i - PS_SEGMENTS];
++		const char *name = i < PS_SEGMENTS ? submitNames[i] : i == PS_SEGMENTS ? "mi8_room" : "mi8_ring";
++		uint64_t n = __atomic_exchange_n(&s->n, 0, __ATOMIC_RELAXED);
++		uint64_t ticks = __atomic_exchange_n(&s->ticks, 0, __ATOMIC_RELAXED);
++		uint64_t maximum = __atomic_exchange_n(&s->maximum, 0, __ATOMIC_RELAXED);
++		used += snprintf(segments + used, sizeof(segments) - used, "%s%s:%llu/%llu/%llu", i ? "," : "", name,
++		    submitUS(ticks), submitUS(maximum), n);
++	}
++	uint64_t bins[6];
++	for (unsigned i = 0; i < 6; i++) bins[i] = __atomic_exchange_n(&submitHist[i], 0, __ATOMIC_RELAXED);
++	char line[1400];
++	snprintf(line, sizeof(line), "pf: submit at %llu n=%llu seg=%s bo=%llu hist=0-1:%llu,2-4:%llu,5-16:%llu,17-64:%llu,65-256:%llu,257+:%llu bytes=%llu flushes=%llu\n",
++	    submitUS(now), __atomic_exchange_n(&submitN, 0, __ATOMIC_RELAXED), segments,
++	    __atomic_exchange_n(&submitBOs, 0, __ATOMIC_RELAXED), bins[0], bins[1], bins[2], bins[3], bins[4], bins[5],
++	    __atomic_exchange_n(&submitBytes, 0, __ATOMIC_RELAXED), __atomic_exchange_n(&submitFlushes, 0, __ATOMIC_RELAXED));
++	loader_log_line(line);
++}
++
++/* All timestamps and counters are behind the existing profiling switch. */
++class PerfprofSubmit {
++	bool on;
++	unsigned segment, bos;
++	uint64_t mark, nested, ticks[PS_SEGMENTS], hits[PS_SEGMENTS], maximums[PS_SEGMENTS];
++public:
++	PerfprofSubmit(unsigned count) : on(__atomic_load_n(&perfprof_enabled, __ATOMIC_RELAXED) != 0), segment(PS_COPY), bos(count), mark(0), nested(0) {
++		if (on) { bzero(ticks, sizeof(ticks)); bzero(hits, sizeof(hits)); bzero(maximums, sizeof(maximums)); mark = mach_absolute_time(); }
++	}
++	void next(unsigned value) {
++		if (!on) return;
++		uint64_t now = mach_absolute_time();
++		uint64_t elapsed = now - mark - nested;
++		ticks[segment] += elapsed; hits[segment]++;
++		if (elapsed > maximums[segment]) maximums[segment] = elapsed;
++		mark = now; nested = 0; segment = value;
++	}
++	uint64_t lookup() { return on ? mach_absolute_time() : 0; }
++	bool enabled() const { return on; }
++	void looked(uint64_t began) {
++		if (!on) return;
++		uint64_t elapsed = mach_absolute_time() - began;
++		ticks[PS_BO] += elapsed; hits[PS_BO]++; nested += elapsed;
++		if (elapsed > maximums[PS_BO]) maximums[PS_BO] = elapsed;
++	}
++	void flushed(uint64_t bytes) {
++		if (!on) return;
++		__atomic_fetch_add(&submitBytes, bytes, __ATOMIC_RELAXED);
++		__atomic_fetch_add(&submitFlushes, 1, __ATOMIC_RELAXED);
++	}
++	~PerfprofSubmit() {
++		if (!on) return;
++		next(PS_OTHER);
++		for (unsigned i = 0; i < PS_SEGMENTS; i++) {
++			if (hits[i]) {
++				submitAdd(&submitStats[i], ticks[i], maximums[i], hits[i]);
++			}
++		}
++		unsigned bin = bos <= 1 ? 0 : bos <= 4 ? 1 : bos <= 16 ? 2 : bos <= 64 ? 3 : bos <= 256 ? 4 : 5;
++		__atomic_fetch_add(&submitHist[bin], 1, __ATOMIC_RELAXED);
++		__atomic_fetch_add(&submitBOs, bos, __ATOMIC_RELAXED);
++		__atomic_fetch_add(&submitN, 1, __ATOMIC_RELAXED);
++		submitReport(mach_absolute_time());
++	}
++};
++
+ 
+ extern "C" {
+ /* bsd/dev/redwood_adreno.c ("the GPU kept on"; declared in bsd/sys/redwood_input.h, which is not seen from here) */
+@@ -89,6 +205,8 @@ enum {
  	kMsmSubmitQueueNew      = 0x4a,
  	kMsmSubmitQueueClose    = 0x4b,
  	kMsmSubmitQueueQuery    = 0x4c,
@@ -21455,21 +23041,21 @@
  	kRedwoodGPUWorked       = 0x7d,         /* ours: how long the 3D core itself has worked, and on how many */
  	kRedwoodSurface         = 0x7e,         /* ours: an IOSurface's memory as a buffer */
  	kRedwoodShow            = 0x7f,         /* ours: pixels of the caller's onto the panel, to see a test's result */
-@@ -155,6 +157,13 @@
- 	uint64_t size;                          /* how big it is, */
+@@ -156,6 +274,13 @@ struct redwood_surface {
  	uint32_t offset, rowBytes;              /* where the pixels start in it and how long a row of them is, */
  	uint32_t width, height, pixelFormat, planes;    /* and what they are */
-+};
+ };
 +struct redwood_scan {
 +	uint32_t op, surface, width, height;
 +};
 +struct redwood_damage {
 +	int32_t box[4];
 +	uint32_t full;
- };
++};
  struct redwood_show {
  	uint64_t pixels;
-@@ -263,10 +272,76 @@
+ 	uint32_t width, height, rowBytes, pad;
+@@ -263,12 +388,78 @@ MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds)
  
  	if (fence != 0 && gGPULock != NULL) {
  		IOLockLock(gGPULock);
@@ -21478,8 +23064,8 @@
  		IOLockUnlock(gGPULock);
  	}
  	return done;
-+}
-+
+ }
+ 
 +/* A completed fence alone is not ownership: another submission may name the same pixels. */
 +bool
 +MiniIOSurfaceBeginDisplay(MiniIOSurface ** surfaces, unsigned count, uint64_t milliseconds)
@@ -21544,13 +23130,104 @@
 +		}
 +	}
 +	IOLockUnlock(gGPULock);
- }
- 
++}
++
  /*
-@@ -952,6 +1027,54 @@
+  * Boot-arg touch_lat=1: a line for every wait of a program's for the GPU that took a millisecond or
+  * more ("tl: f KIND US at US"), for telling apart what holds a frame up (tools/frames.py).
+@@ -395,6 +586,77 @@ struct gpu_buffer {
+ 	uint32_t                        fence;          /* the last submission that names it (0: none has) */
+ };
+ 
++/* FLUSH_PROFILE_BEGIN: callers hold gGPULock; no cache policy is changed here. */
++enum { PF_FLUSH_SEED, PF_FLUSH_SEEN, PF_FLUSH_PERIODIC, PF_FLUSH_CACHED, PF_FLUSH_FIRST, PF_FLUSH_REASONS };
++static const char *flushNames[] = { "seed", "seen", "periodic", "cached", "first" };
++struct flush_stat { uint64_t n, bytes, ticks; };
++struct flush_surface { uint64_t n, bytes; uint32_t width, height; };
++/* Same ID domain as MiniIOSurface.cpp's private surface table. */
++#define FLUSH_SURFACES 16384
++static struct flush_stat flushStats[PF_FLUSH_REASONS];
++static struct flush_surface flushSurfaces[FLUSH_SURFACES];
++static uint64_t flushLast, flushBig, flushUnknown;
++
++static unsigned
++flushReason(uint32_t seed, const struct gpu_buffer *b)
++{
++	if (seed != b->seed) return PF_FLUSH_SEED;
++	if (b->seen) return PF_FLUSH_SEEN;
++	return b->pushed == 0 ? PF_FLUSH_FIRST : PF_FLUSH_PERIODIC;
++}
++
++static void
++flushRecord(unsigned reason, const struct gpu_buffer *b, uint64_t began, uint64_t elapsed)
++{
++	if (flushLast == 0) flushLast = began;
++	struct flush_stat *s = &flushStats[reason];
++	s->n++; s->bytes += b->size; s->ticks += elapsed;
++	if (b->size >= (8ull << 20)) flushBig++;
++	if (b->surface != NULL) {
++		uint32_t id = b->surface->sid;
++		if (id == 0 || id >= FLUSH_SURFACES) { flushUnknown++; return; }
++		struct flush_surface *f = &flushSurfaces[id];
++		f->n++; f->bytes += b->size;
++		f->width = b->surface->info.width; f->height = b->surface->info.height;
++	}
++}
++
++static void
++flushReport(uint64_t now)
++{
++	uint64_t second;
++	nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
++	if (flushLast == 0) { flushLast = now; return; }
++	if (now - flushLast < second) return;
++	uint64_t window = submitUS(now - flushLast);
++	char line[1024]; size_t used = (size_t)snprintf(line, sizeof(line), "pf: flush at %llu reason=", submitUS(now));
++	for (unsigned i = 0; i < PF_FLUSH_REASONS; i++)
++		used += (size_t)snprintf(line + used, sizeof(line) - used, "%s%s:%llu/%llu/%llu", i ? "," : "", flushNames[i],
++		    flushStats[i].n, flushStats[i].bytes, submitUS(flushStats[i].ticks));
++	snprintf(line + used, sizeof(line) - used, " big=%llu window_us=%llu unknown_surface=%llu\n", flushBig, window, flushUnknown);
++	loader_log_line(line);
++	uint32_t top[5] = { 0, 0, 0, 0, 0 };
++	for (uint32_t id = 1; id < FLUSH_SURFACES; id++) {
++		if (flushSurfaces[id].n == 0) continue;
++		for (unsigned rank = 0; rank < 5; rank++) {
++			const struct flush_surface *a = &flushSurfaces[id], *b = &flushSurfaces[top[rank]];
++			if (top[rank] == 0 || a->bytes > b->bytes || (a->bytes == b->bytes && a->n > b->n)) {
++				for (unsigned j = 4; j > rank; j--) top[j] = top[j - 1];
++				top[rank] = id; break;
++			}
++		}
++	}
++	for (unsigned rank = 0; rank < 5 && top[rank] != 0; rank++) {
++		struct flush_surface *f = &flushSurfaces[top[rank]];
++		snprintf(line, sizeof(line), "pf: flushsurf at %llu rank=%u id=%u w=%u h=%u n=%llu bytes=%llu window_us=%llu\n",
++		    submitUS(now), rank + 1, top[rank], f->width, f->height, f->n, f->bytes, window);
++		loader_log_line(line);
++	}
++	bzero(flushStats, sizeof(flushStats)); bzero(flushSurfaces, sizeof(flushSurfaces));
++	flushBig = flushUnknown = 0; flushLast = now;
++}
++/* FLUSH_PROFILE_END */
++
+ /*
+  * A buffer given back while the GPU is still at it: its memory and its place in the GPU's
+  * address space are kept until the submission is done, and nobody waits for that. (A window
+@@ -935,6 +1197,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+ 	uint32_t words[GPU_SUBMIT_CMDS], count = 0;
+ 	uint64_t began, nanos, again;
+ 	IOReturn ret = kIOReturnBadArgument;
++	PerfprofSubmit profile(request->nr_bos);
+ 
+ 	if (request->nr_cmds == 0 || request->nr_cmds > GPU_SUBMIT_CMDS || request->nr_bos == 0 || request->nr_bos > GPU_SUBMIT_BOS) {
+ 		IOLog("RedwoodGPU: a submission of %u command buffers in %u buffers: not taken\n", request->nr_cmds, request->nr_bos);
+@@ -951,7 +1214,61 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+ 		ret = kIOReturnVMError;
  		goto out;
  	}
++	profile.next(PS_LOCK);
  	IOLockLock(gGPULock);
++	profile.next(PS_DISPLAY);
 +	/* No cache clean or GPU access may touch pixels while the display is reading them. */
 +	{
 +		uint64_t started = mach_absolute_time(), patience;
@@ -21567,7 +23244,9 @@
 +				goto out;
 +			}
 +			for (uint32_t i = 0; i < request->nr_bos; i++) {
++				uint64_t lookupBegan = profile.lookup();
 +				struct gpu_buffer * b = buffer(bos[i].handle);
++				profile.looked(lookupBegan);
 +
 +				held |= b != NULL && b->surface != NULL && b->surface->displayReaders != 0;
 +			}
@@ -21583,7 +23262,9 @@
 +			waited = true;
 +			IOLockUnlock(gGPULock);
 +			delay_for_interval(GPU_ASK_AGAIN_US, NSEC_PER_USEC);
++			profile.next(PS_LOCK);
 +			IOLockLock(gGPULock);
++			profile.next(PS_DISPLAY);
 +			/* Handles are looked up again: no gpu_buffer pointer survives the unlocked wait. */
 +		}
 +		if (waited) {
@@ -21602,17 +23283,108 @@
  	/*
  	 * The GPU reads memory and writes memory. What this processor's cache holds of an IOSurface
  	 * (somebody has written it, or has read it, as the display's driver does, and the GPU is to
-@@ -970,6 +1093,9 @@
+@@ -963,34 +1280,49 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+ 	 * has mapped, every time. The buffers made here need none of that, unless they are
+ 	 * ordinary memory (gpu_cached=1).
+ 	 */
++	profile.next(PS_CACHE);
+ 	began = mach_absolute_time();
+ 	nanoseconds_to_absolutetime(GPU_PUSH_AGAIN_MS * NSEC_PER_MSEC, &again);
+ 	for (uint32_t i = 0; i < request->nr_bos; i++) {
++		uint64_t lookupBegan = profile.lookup();
+ 		struct gpu_buffer * b = buffer(bos[i].handle);
++		profile.looked(lookupBegan);
  
  		if (b == NULL) {
  			continue;
-+		}
+ 		}
 +		if (b->surface != NULL && b->surface->gpuOnly) {
 +			continue;                       /* (the CPU never writes it: nothing of it is in the cache that the GPU would miss) */
- 		}
++		}
++		unsigned flushCause = PF_FLUSH_CACHED;
  		if (b->surface != NULL) {
  			uint32_t seed = b->surface->shared()->seed;
-@@ -1179,6 +1305,8 @@
+ 
+ 			if (seed == b->seed && !b->seen && began - b->pushed < again) {
+ 				continue;
+ 			}
++			if (profile.enabled()) flushCause = flushReason(seed, b);
+ 			b->seed = seed;
+ 			b->pushed = began;
+ 		} else if (!b->seen || !gGPUCached) {
+ 			continue;
+ 		}
++		uint64_t flushBegan = profile.lookup();
+ 		redwood_gpu_to_memory(b->kernel, b->size);
++		if (profile.enabled()) flushRecord(flushCause, b, flushBegan, mach_absolute_time() - flushBegan);
++		profile.flushed(b->size);
+ 		gGPUStat.flushed += b->size;
+ 	}
+ 	redwood_gpu_to_memory(NULL, 0);                 /* (and what was written last is in memory: a barrier) */
++	if (profile.enabled()) flushReport(mach_absolute_time());
+ 	gGPUStat.flushing += mach_absolute_time() - began;
+ 	gGPUStat.buffers += request->nr_bos;
++	profile.next(PS_COMMANDS);
+ 	for (uint32_t i = 0; i < request->nr_cmds; i++) {
++		uint64_t lookupBegan = profile.lookup();
+ 		struct gpu_buffer * b = cmds[i].submit_idx < request->nr_bos ? buffer(bos[cmds[i].submit_idx].handle) : NULL;
+ 
++		profile.looked(lookupBegan);
+ 		if (cmds[i].type != MSM_SUBMIT_CMD_BUF) {
+ 			continue;                               /* the other kinds are for a GPU shared between address spaces */
+ 		}
+@@ -1004,6 +1336,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+ 		addresses[count] = b->address + cmds[i].submit_offset;
+ 		words[count++] = cmds[i].size / 4;
+ 	}
++	profile.next(PS_RING);
+ 	request->fence = redwood_gpu_submit(addresses, words, count);
+ 	/*
+ 	 * The ring is full and the core is not reading it: it has stopped. With gpu_recover=1 it is
+@@ -1018,13 +1351,16 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+ 			request->fence = redwood_gpu_submit(addresses, words, count);
+ 		}
+ 	}
++	profile.next(PS_OTHER);
+ 	if (gpu_log && request->fence != 0) {
+ 		/* "tl: Q FENCE at US: N buffers, B of 4 MB or more, W words of commands": what was given (tl: q: what it took) */
+ 		uint32_t big = 0, all_words = 0;
+ 		uint64_t ns;
+ 
+ 		for (uint32_t i = 0; i < request->nr_bos; i++) {
++			uint64_t lookupBegan = profile.lookup();
+ 			struct gpu_buffer * b = buffer(bos[i].handle);
++			profile.looked(lookupBegan);
+ 
+ 			big += b != NULL && b->size >= (4u << 20);
+ 		}
+@@ -1044,7 +1380,9 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+ 	 * told; the last submission of a frame names the surface the frame is drawn into.)
+ 	 */
+ 	for (uint32_t i = 0; request->fence != 0 && i < request->nr_bos; i++) {
++		uint64_t lookupBegan = profile.lookup();
+ 		struct gpu_buffer * b = buffer(bos[i].handle);
++		profile.looked(lookupBegan);
+ 
+ 		if (b != NULL) {
+ 			b->fence = request->fence;
+@@ -1109,6 +1447,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+ 	IOLockUnlock(gGPULock);
+ 	ret = request->fence != 0 ? kIOReturnSuccess : kIOReturnTimeout;
+ out:
++	profile.next(PS_OTHER);
+ 	if (bos != NULL) {
+ 		IODelete(bos, struct msm_gem_submit_bo, request->nr_bos);
+ 	}
+@@ -1166,6 +1505,7 @@ IOReturn
+ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
+     IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
+ {
++	PerfprofRequest profile(selector);
+ 	union {
+ 		struct msm_param param;
+ 		struct msm_gem_new gemNew;
+@@ -1179,6 +1519,8 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
  		struct drm_gem_close close;
  		struct redwood_surface surface;
  		struct redwood_show show;
@@ -21621,7 +23393,7 @@
  		struct redwood_worked worked;
  	} r;
  	size_t size = args->structureInputSize;
-@@ -1280,6 +1408,12 @@
+@@ -1280,6 +1622,12 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
  	case kRedwoodShow:
  		ret = show(&r.show);
  		break;
@@ -21634,6 +23406,8 @@
  	default:
  		IOLog("RedwoodGPU: request %#x (%zu bytes) is not known here\n", selector, size);
  		ret = kIOReturnUnsupported;
+diff --git a/osfmk/arm/io_map.c b/osfmk/arm/io_map.c
+index 18ef2f02122f203a42aaa2a3d1552d0a0d2aaee4..06255c40b226b7506c35a8b7d1facca8ec843296 100644
 --- a/osfmk/arm/io_map.c
 +++ b/osfmk/arm/io_map.c
 @@ -62,7 +62,7 @@
@@ -21645,6 +23419,8 @@
  
  __startup_data static struct mach_vm_range io_range;
  static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
+diff --git a/osfmk/arm64/gic_v3_irq.c b/osfmk/arm64/gic_v3_irq.c
+index 63ffd4b9906f83f92e3f1ae765f5681f2654dc38..3fa60bb45cee869d7853c6dad857427bf27c32cc 100644
 --- a/osfmk/arm64/gic_v3_irq.c
 +++ b/osfmk/arm64/gic_v3_irq.c
 @@ -72,7 +72,15 @@
@@ -21664,7 +23440,7 @@
  #define GIC_INTID_SPI_MIN       32
  #define GIC_INTID_SPURIOUS_MIN  1020
  #define GIC_SPI_MOST            48          /* attached at a time */
-@@ -418,7 +426,16 @@
+@@ -418,7 +426,16 @@ gic_v3_irq_cpu_init(void)
  {
  	int cpu = cpu_number();
  	vm_offset_t gicr;
@@ -21682,18 +23458,32 @@
  
  	if (gicd_base == 0) {
  		DTEntry entry;
+diff --git a/osfmk/arm64/loader_return.c b/osfmk/arm64/loader_return.c
+index a058bb5263934bb489894fc933ba340690f590db..abdc19e459fe3fbd32bd5cd717905834c254e299 100644
 --- a/osfmk/arm64/loader_return.c
 +++ b/osfmk/arm64/loader_return.c
-@@ -45,6 +45,8 @@
+@@ -45,7 +45,10 @@ extern void gic_v3_irq_cpu_shutdown(void);
  void loader_log_putc(char c);
  void loader_return(void);
  extern void redwood_adreno_quiesce(void);
 +extern void mi8_panel_restore(void);     /* bsd/dev/mi8_adreno.c: the panel on again if the screen was off */
 +extern void MiniIOFlipQuiesce(void);      /* iokit/Kernel/MiniIOMobileFramebuffer.cpp: the display reads the boot framebuffer again */
  extern void redwood_adreno_stop(void);
++extern void mi8_thermgov_stop(void);
  extern void redwood_adreno_minute(void);
  extern void redwood_wifi_stop(void);
-@@ -371,6 +373,11 @@
+ extern void redwood_wifi_quiesce(void);
+@@ -361,6 +364,9 @@ loader_log_append_msgbuf(void)
+ void
+ loader_return(void)
+ {
++	/* Close the CPU writer and restore its vote before any secondary can be parked.
++	 * Safe with IRQs off; no console, allocation, sleep or scheduler dependency. */
++	mi8_thermgov_stop();
+ #if defined(GENERIC_PSCI_SMP)
+ 	/*
+ 	 * With more than one processor: the others switch themselves off first, and the rest of
+@@ -371,6 +377,11 @@ loader_return(void)
  #endif
  	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
  	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
@@ -21705,7 +23495,7 @@
  	redwood_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
  	redwood_adsp_quiesce();         /* nor the audio DSP */
  	redwood_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
-@@ -378,6 +385,7 @@
+@@ -378,6 +389,7 @@ loader_return(void)
  	redwood_torch_quiesce();        /* the flashlight off, if it was lit */
  	redwood_camera_quiesce();       /* the camera powered down, if it was powered up */
  	redwood_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
@@ -21713,15 +23503,75 @@
  	/*
  	 * A panic's text is first collected in the panic buffer and only later
  	 * flushed to the console; if the console itself is what failed, that
---- a/bsd/sys/redwood_lx.h
-+++ b/bsd/sys/redwood_lx.h
-@@ -16,6 +16,9 @@
- #include "redwood_sta.h"
+diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
+index 0a7de6fc4be75dc19dc7626d406a251299d22fb0..2ec713e2ede72c86d0c135ab4ae99c4d5da7b0e7 100644
+--- a/osfmk/kern/sched_prim.c
++++ b/osfmk/kern/sched_prim.c
+@@ -66,6 +66,7 @@
  
- /* ---- memory ---- */
-+#define LX_RADIO_POOL_SIZE (44ul << 20)
-+/* Boot-thread reservation only: no radio/SMMU access; consumed by radio_memory. */
-+int lx_os_reserve_radio_memory(unsigned long size);
- void	*lx_os_alloc(unsigned long size);			/* zeroed; NULL when there is none */
- void	 lx_os_free(void *memory, unsigned long size);
- /*
+ #include <debug.h>
+ 
++
+ #include <mach/mach_types.h>
+ #include <mach/machine.h>
+ #include <mach/policy.h>
+@@ -128,6 +129,37 @@
+ #include <stdatomic.h>
+ #include <os/atomic_private.h>
+ 
++/* Processor objects live for the boot. A scalar state check is advisory: no remote thread
++ * pointer is exposed. Recheck state after acquiring each identity snapshot as well. */
++extern uint32_t perfprof_enabled;
++extern void perfprof_switch(unsigned cpu, uint64_t tid, int pid, bool idle, int priority);
++
++/* Keep BSD's diagnostic scalar ABI synchronized with processor_state_t. */
++_Static_assert(PROCESSOR_OFF_LINE == 0 && PROCESSOR_IDLE == 4 && PROCESSOR_RUNNING == 6,
++    "perfprof processor state ABI");
++int
++perfprof_cpu_state(unsigned cpu)
++{
++	processor_t p = cpu_to_processor((int)cpu);
++	return p == PROCESSOR_NULL ? -1 : (int)os_atomic_load(&p->state, relaxed);
++}
++
++bool
++perfprof_cpu_online(unsigned cpu)
++{
++	processor_t p = cpu_to_processor((int)cpu);
++	if (p == PROCESSOR_NULL) { return false; }
++	unsigned state = os_atomic_load(&p->state, relaxed);
++	return state == PROCESSOR_RUNNING || state == PROCESSOR_IDLE;
++}
++
++kern_return_t
++perfprof_clock_start(thread_continue_t function, void *arg, thread_t *thread)
++{
++	return kernel_thread_start_priority(function, arg, BASEPRI_PREEMPT, thread);
++}
++
++
+ #ifdef KDBG_MACOS_RELEASE
+ #define KTRC KDBG_MACOS_RELEASE
+ #else
+@@ -3065,6 +3097,10 @@ thread_invoke(
+ 			parameter = thread->parameter;
+ 
+ 			processor_t processor = current_processor();
++			if (os_atomic_load(&perfprof_enabled, relaxed)) {
++				perfprof_switch(processor->cpu_id, thread_tid(thread), task_pid(get_threadtask(thread)),
++				    (thread->state & TH_IDLE) != 0, thread->sched_pri);
++			}
+ 			processor->active_thread = thread;
+ 			processor_state_update_from_thread(processor, thread, false);
+ 
+@@ -3207,6 +3243,10 @@ need_stack:
+ 	 * Context switch by full context save.
+ 	 */
+ 	processor_t processor = current_processor();
++	if (os_atomic_load(&perfprof_enabled, relaxed)) {
++		perfprof_switch(processor->cpu_id, thread_tid(thread), task_pid(get_threadtask(thread)),
++		    (thread->state & TH_IDLE) != 0, thread->sched_pri);
++	}
+ 	processor->active_thread = thread;
+ 	processor_state_update_from_thread(processor, thread, false);
+ 
