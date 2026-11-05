@@ -193,6 +193,34 @@ class PatchTests(unittest.TestCase):
         with self.assertRaises(m.Failure):
             m.source_path(self.work / 'shared', 'link/escape')
 
+    def test_unowned_nested_component(self):
+        parent = self.work / 'shared'
+        child = parent / 'nested'
+        child.mkdir()
+        baseline = self.base / 'shared/nested'
+        baseline.mkdir()
+        for name in ['changed.c', 'deleted.c', 'owned.c']:
+            (baseline / name).write_bytes(b'base\n')
+            (child / name).write_bytes(b'base\n')
+        m.git('add', '--all', cwd=parent)
+        (child / 'changed.c').write_bytes(b'changed\n')
+        (child / 'deleted.c').unlink()
+        (child / 'new.c').write_bytes(b'new\n')
+        (child / 'owned.c').write_bytes(b'owned\n')
+        (parent / 'extra.c').write_bytes(b'parent\n')
+        targets = m.paths_for(self.work)
+        targets['child'] = child
+        bases = dict(self.bases, child=baseline)
+        groups = self.groups + [{'component': 'child', 'files': [{'path': 'owned.c'}]}]
+        expected = [{'component': 'alpha', 'path': 'extra.c'}] + [
+            {'component': 'child', 'path': name}
+            for name in ['changed.c', 'deleted.c', 'new.c']]
+        self.assertEqual(m.unowned_changes(targets, bases, groups), expected)
+        # Ownership must not depend on whether the parent or child is visited first.
+        self.assertEqual(m.unowned_changes(dict(reversed(list(targets.items()))), bases, groups),
+                         [dict(entry, component='beta') if entry['component'] == 'alpha'
+                          else entry for entry in expected])
+
     def test_unowned_nested_submodule(self):
         parent = self.work / 'other'
         child = parent / 'nested'

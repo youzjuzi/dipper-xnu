@@ -390,7 +390,7 @@ def unowned_changes(targets, bases, groups, root=None, work=None):
                  for p in bases[component].rglob('*') if p.is_file() or p.is_symlink()}
         for name in sorted(set(candidates(tree)) | {n for n in known if not ignored(n)}):
             safe_path(name)
-            if any(other != tree and other in (tree / name).parents for other in roots):
+            if any(tree in other.parents and other in (tree / name).parents for other in roots):
                 continue
             if (str(tree), name) in owners:
                 continue
