@@ -1,6 +1,8 @@
+diff --git a/libs/compatible/malloc.c b/libs/compatible/malloc.c
+index f550e40d878840bf3e945361166878bf0b57e099..659896d3feeaea4c7fec240e4080d35b866814b7 100644
 --- a/libs/compatible/malloc.c
 +++ b/libs/compatible/malloc.c
-@@ -167,11 +167,16 @@
+@@ -167,11 +167,16 @@ free(void *Ptr)
  {
  	CPOOL_HEAD   *Head;
  

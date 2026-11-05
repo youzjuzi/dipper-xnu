@@ -1,3 +1,5 @@
+diff --git a/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf b/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf
+index bfdb3b3dc0fb5b84ec1d98998364f1f512679663..cce5fcea666af31df2763ab711d5402987645c99 100644
 --- a/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf
 +++ b/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf
 @@ -30,6 +30,7 @@

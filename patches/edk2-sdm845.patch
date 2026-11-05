@@ -1,3 +1,5 @@
+diff --git a/Platform/Xiaomi/sdm845/dipper.dsc b/Platform/Xiaomi/sdm845/dipper.dsc
+index f2d15200c8b6a1a1a13e52cf5242ffd611ff4586..4646353c8ddf09bfe8a082d1e714760a3cd6385d 100644
 --- a/Platform/Xiaomi/sdm845/dipper.dsc
 +++ b/Platform/Xiaomi/sdm845/dipper.dsc
 @@ -14,7 +14,10 @@
@@ -27,9 +29,11 @@
 +  # (removed, HackiOS route) DarwinBootPkg/Driver/DarwinBoot.inf
 +  # HackiOS 加载器的 Boot#### 注册器（EXP-0025），加载器本体在 fdf 里以 FILE APPLICATION 嵌入
 +  XnuLoaderPkg/Driver/XnuLoaderDxe/XnuLoaderDxe.inf
+diff --git a/Platform/Xiaomi/sdm845/dipper.fdf.inc b/Platform/Xiaomi/sdm845/dipper.fdf.inc
+index 4519dcb17b3d9b8d2ed9aa775b16297c139e5bd6..4efe633f2c862a92fa5fd05a299c574ec399f718 100644
 --- a/Platform/Xiaomi/sdm845/dipper.fdf.inc
 +++ b/Platform/Xiaomi/sdm845/dipper.fdf.inc
-@@ -20,4 +20,16 @@
+@@ -20,4 +20,16 @@ FILE FREEFORM = 7E374E25-8E01-4FEE-87F2-390C23C606CD {
  // Mainline device tree blob
  FILE FREEFORM = 25462CDA-221F-47DF-AC1D-259CFAA4E326 {
    SECTION RAW = Platform/Xiaomi/sdm845/FdtBlob/sdm845-xiaomi-polaris.dtb
@@ -48,9 +52,11 @@
 +  SECTION PE32 = XnuLoaderPkg/Binary/loader.efi
 +  SECTION UI = "XnuLoader"
 +}
+diff --git a/Silicon/platform.sh.inc b/Silicon/platform.sh.inc
+index aa2a4462489440f010a237aa708f7fe383eabe36..aced9f547efbd2a79ed1b6a38cdd2f688161bc1c 100644
 --- a/Silicon/platform.sh.inc
 +++ b/Silicon/platform.sh.inc
-@@ -2,6 +2,7 @@
+@@ -2,6 +2,7 @@ function platform_build_kernel(){
  	cat \
  		"${ROOTDIR}/tools/BootShim/BootShim.bin" \
  		"${WORKSPACE}/Build/${DEVICE}/${_MODE}_${TOOLCHAIN}/FV/${SOC_PLATFORM}_UEFI.fd" \
@@ -58,9 +64,11 @@
  		> "${WORKSPACE}/Build/${DEVICE}/${_MODE}_${TOOLCHAIN}/FV/${SOC_PLATFORM}_UEFI.fd-bootshim" \
  		||return "$?"
  	gzip -c \
+diff --git a/tools/BootShim/BootShim.S b/tools/BootShim/BootShim.S
+index f6fe3624a69f3df3b5b090f8dd1553abc94f695d..7feea4e0d06f37e8e8bcb27795e7ce7efa46bf90 100644
 --- a/tools/BootShim/BootShim.S
 +++ b/tools/BootShim/BootShim.S
-@@ -55,6 +55,27 @@
+@@ -55,6 +55,27 @@ _CopyLoop:
  	stp	x2, x3, [x5], #16
  	subs	x6, x6, #16
  	b.ne	_CopyLoop
@@ -88,9 +96,11 @@
  	ldr	x5, _StackBase
  
  _Entry:
+diff --git a/tools/BootShim/Makefile b/tools/BootShim/Makefile
+index e2b69c7d2b2d065646c28e8790dcc61eb9dafee9..fdf857840c636bc41b24f7c8f1feaea5d8dbac01 100755
 --- a/tools/BootShim/Makefile
 +++ b/tools/BootShim/Makefile
-@@ -3,6 +3,8 @@
+@@ -3,6 +3,8 @@ TARGET            = aarch64-linux-gnu
  CROSS_COMPILE     = $(TARGET)-
  CC                = $(CROSS_COMPILE)gcc
  OBJCOPY           = $(CROSS_COMPILE)objcopy
@@ -99,7 +109,7 @@
  
  all: BootShim.elf BootShim.bin BootShim.Dualboot.elf BootShim.Dualboot.bin
  
-@@ -10,7 +12,7 @@
+@@ -10,7 +12,7 @@ BootShim.bin: BootShim.elf
  	$(OBJCOPY) -O binary $< $@
  
  BootShim.elf: BootShim.S

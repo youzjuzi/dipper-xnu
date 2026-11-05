@@ -1,3 +1,6 @@
+diff --git a/tools/mk-ath10k.sh b/tools/mk-ath10k.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..8aecd35eb08a6b41182c9b400a83f2ae32651dba
 --- /dev/null
 +++ b/tools/mk-ath10k.sh
 @@ -0,0 +1,188 @@
@@ -189,6 +192,9 @@
 +echo "mk-ath10k.sh: out/ath10k.o: $(llvm-size out/ath10k.o | awk 'NR == 2 { print $1 + $2 }') bytes of code and data from" \
 +	"$(echo $DRIVER | wc -w) of the driver's files; $(wc -l < out/stubs.txt) functions of the others are stubs (out/stubs.txt);" \
 +	"asks the kernel for $(llvm-nm -u --format=just-symbols out/ath10k.o | grep -vc 'section\$') names"
+diff --git a/wifi/lx/include-ath10k/linux/acpi.h b/wifi/lx/include-ath10k/linux/acpi.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0262b2c0995f550878d720c63b03e8b3ed398b81
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/acpi.h
 @@ -0,0 +1,18 @@
@@ -210,6 +216,9 @@
 +struct acpi_buffer { size_t length; void *pointer; };
 +static inline int acpi_get_handle(acpi_handle p, acpi_string n, acpi_handle *out) { return -ENOENT; }
 +static inline int acpi_evaluate_object(acpi_handle h, const char *n, void *args, struct acpi_buffer *out) { return -ENOENT; }
+diff --git a/wifi/lx/include-ath10k/linux/clk.h b/wifi/lx/include-ath10k/linux/clk.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ffcf4845112f70c772e539ffbfdef47584f1ff1
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/clk.h
 @@ -0,0 +1,7 @@
@@ -220,6 +229,9 @@
 +int devm_clk_bulk_get_optional(struct device *, int, struct clk_bulk_data *);
 +static inline int clk_bulk_prepare_enable(int n, struct clk_bulk_data *c) { return 0; }
 +static inline void clk_bulk_disable_unprepare(int n, struct clk_bulk_data *c) { }
+diff --git a/wifi/lx/include-ath10k/linux/io.h b/wifi/lx/include-ath10k/linux/io.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f66e4562344a57b319626194d767d64178a5e90
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/io.h
 @@ -0,0 +1,4 @@
@@ -227,6 +239,9 @@
 +#include_next <linux/io.h>
 +#include <linux/err.h>
 +static inline void *devm_memremap(struct device *d, resource_size_t p, size_t n, unsigned long f) { return ERR_PTR(-ENODEV); }
+diff --git a/wifi/lx/include-ath10k/linux/iommu.h b/wifi/lx/include-ath10k/linux/iommu.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..09f074c0ed13f625af52d03fbdab2831ca5bf4eb
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/iommu.h
 @@ -0,0 +1,13 @@
@@ -243,6 +258,9 @@
 +static inline void iommu_domain_free(struct iommu_domain *d) { }
 +static inline int iommu_map(struct iommu_domain *d, unsigned long i, phys_addr_t p, size_t s, int prot, gfp_t g) { return -ENODEV; }
 +static inline size_t iommu_unmap(struct iommu_domain *d, unsigned long i, size_t s) { return 0; }
+diff --git a/wifi/lx/include-ath10k/linux/nvmem-consumer.h b/wifi/lx/include-ath10k/linux/nvmem-consumer.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e4642e32e4695c799d9c72130295004c4bcee0b
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/nvmem-consumer.h
 @@ -0,0 +1,5 @@
@@ -251,6 +269,9 @@
 +struct nvmem_cell;
 +static inline struct nvmem_cell *devm_nvmem_cell_get(struct device *d, const char *n) { return ERR_PTR(-ENOENT); }
 +static inline void *nvmem_cell_read(struct nvmem_cell *c, size_t *n) { return ERR_PTR(-ENOENT); }
+diff --git a/wifi/lx/include-ath10k/linux/of.h b/wifi/lx/include-ath10k/linux/of.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ca053b7700bc20559acb731961984685275df14
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/of.h
 @@ -0,0 +1,5 @@
@@ -259,6 +280,9 @@
 +static inline int of_property_read_u8_array(const struct device_node *n, const char *s, u8 *out, size_t count) { return -EINVAL; }
 +static inline int of_property_read_u8(const struct device_node *n, const char *s, u8 *out) { return -EINVAL; }
 +static inline int of_property_read_string_index(const struct device_node *n, const char *s, int i, const char **out) { return -EINVAL; }
+diff --git a/wifi/lx/include-ath10k/linux/of_device.h b/wifi/lx/include-ath10k/linux/of_device.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ba59e0a3dff429315fade19cab7a631fe0fd111
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/of_device.h
 @@ -0,0 +1,5 @@
@@ -267,6 +291,9 @@
 +#include <linux/device.h>
 +const void *device_get_match_data(const struct device *);
 +static inline int of_dma_configure(struct device *d, struct device_node *n, bool force) { return -ENODEV; }
+diff --git a/wifi/lx/include-ath10k/linux/platform_device.h b/wifi/lx/include-ath10k/linux/platform_device.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..0719d3070bb15d759b774584be7e46cad19a2a45
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/platform_device.h
 @@ -0,0 +1,42 @@
@@ -312,12 +339,18 @@
 +int lx_ath10k_platform_start(void);
 +void lx_ath10k_platform_stop(void);
 +#endif
+diff --git a/wifi/lx/include-ath10k/linux/property.h b/wifi/lx/include-ath10k/linux/property.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7998a4ea20d390d9b82e2603372e2ed5c018a302
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/property.h
 @@ -0,0 +1,3 @@
 +#pragma once
 +#include_next <linux/property.h>
 +static inline int device_property_read_u32(struct device *d, const char *p, u32 *out) { return -EINVAL; }
+diff --git a/wifi/lx/include-ath10k/linux/pwrseq/consumer.h b/wifi/lx/include-ath10k/linux/pwrseq/consumer.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..ba5b798bf0976cd1a0a6e5f4f8d57323384bdf13
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/pwrseq/consumer.h
 @@ -0,0 +1,6 @@
@@ -327,11 +360,17 @@
 +static inline struct pwrseq_desc *devm_pwrseq_get(struct device *dev, const char *name) { return ERR_PTR(-EPROBE_DEFER); }
 +static inline int pwrseq_power_on(struct pwrseq_desc *p) { return 0; }
 +static inline int pwrseq_power_off(struct pwrseq_desc *p) { return 0; }
+diff --git a/wifi/lx/include-ath10k/linux/qrtr.h b/wifi/lx/include-ath10k/linux/qrtr.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..6938921c79ced2de2a658c2c87cd1be5f2a01494
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/qrtr.h
 @@ -0,0 +1,2 @@
 +#pragma once
 +#include <linux/soc/qcom/qmi.h>
+diff --git a/wifi/lx/include-ath10k/linux/regulator/consumer.h b/wifi/lx/include-ath10k/linux/regulator/consumer.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b835c0d32c8c584ef3eca47fe0a3def1f261392
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/regulator/consumer.h
 @@ -0,0 +1,7 @@
@@ -342,6 +381,9 @@
 +int devm_regulator_bulk_get(struct device *, int, struct regulator_bulk_data *);
 +static inline int regulator_bulk_enable(int n, struct regulator_bulk_data *r) { return 0; }
 +static inline int regulator_bulk_disable(int n, struct regulator_bulk_data *r) { return 0; }
+diff --git a/wifi/lx/include-ath10k/linux/remoteproc/qcom_rproc.h b/wifi/lx/include-ath10k/linux/remoteproc/qcom_rproc.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..df984918ce41b7439eca8c09c2e096ede47aa5bb
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/linux/remoteproc/qcom_rproc.h
 @@ -0,0 +1,7 @@
@@ -352,6 +394,9 @@
 +/* The kernel owns the modem; this layer never subscribes to or controls it. */
 +static inline void *qcom_register_ssr_notifier(const char *name, struct notifier_block *nb) { return nb; }
 +static inline int qcom_unregister_ssr_notifier(void *cookie, struct notifier_block *nb) { return 0; }
+diff --git a/wifi/lx/include-ath10k/lx_ath10k_prelude.h b/wifi/lx/include-ath10k/lx_ath10k_prelude.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e267c58331377a2ff433f6b5db0c2f847fe5c791
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/lx_ath10k_prelude.h
 @@ -0,0 +1,6 @@
@@ -361,6 +406,9 @@
 +    spin_lock_bh(_T->lock), spin_unlock_bh(_T->lock))
 +#define IRQF_NO_AUTOEN 0x80000
 +static inline void netif_threaded_enable(struct net_device *d) { }
+diff --git a/wifi/lx/include/lx_ath10k_cfg.h b/wifi/lx/include/lx_ath10k_cfg.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..786e79806890c9b4045df5d0c38cb3affd6623c7
 --- /dev/null
 +++ b/wifi/lx/include/lx_ath10k_cfg.h
 @@ -0,0 +1,13 @@
@@ -377,6 +425,9 @@
 +};
 +int lx_ath10k_translate(const struct ath10k_qmi_wlan_enable_cfg *, struct lx_ath10k_cfg *);
 +#endif
+diff --git a/wifi/lx/include/lx_wlfw.h b/wifi/lx/include/lx_wlfw.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb48668ee1eca942b72bff755ba4e30a9041ebb6
 --- /dev/null
 +++ b/wifi/lx/include/lx_wlfw.h
 @@ -0,0 +1,27 @@
@@ -407,6 +458,9 @@
 +int lx_os_wlfw_wait_ready(void (*ready)(void *), void *arg);
 +
 +#endif
+diff --git a/wifi/lx/src-ath10k/lx_ath10k_bus.c b/wifi/lx/src-ath10k/lx_ath10k_bus.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c02b66a1ae
 --- /dev/null
 +++ b/wifi/lx/src-ath10k/lx_ath10k_bus.c
 @@ -0,0 +1,404 @@
@@ -814,6 +868,9 @@
 +	if (frames) *frames = 0;
 +	if (bytes) *bytes = 0;
 +}
+diff --git a/wifi/lx/src-ath10k/lx_ath10k_gaps.c b/wifi/lx/src-ath10k/lx_ath10k_gaps.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..2da9594f1a76001ebdf867436bba6e105ef8ed29
 --- /dev/null
 +++ b/wifi/lx/src-ath10k/lx_ath10k_gaps.c
 @@ -0,0 +1,16 @@
@@ -833,6 +890,9 @@
 +{
 +	return kzalloc(sizeof(struct linuxkpi_ieee80211_regdomain) + n * sizeof(struct ieee80211_reg_rule), GFP_KERNEL);
 +}
+diff --git a/wifi/lx/src-ath10k/lx_ath10k_qmi.c b/wifi/lx/src-ath10k/lx_ath10k_qmi.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..eefefc0fb1ae86b8551d4adc096fabf202ef52d9
 --- /dev/null
 +++ b/wifi/lx/src-ath10k/lx_ath10k_qmi.c
 @@ -0,0 +1,205 @@
@@ -1041,9 +1101,24 @@
 +	return 0;
 +}
 +#endif
+diff --git a/wifi/lx/src/lx_base.c b/wifi/lx/src/lx_base.c
+index df4daeea097697f1ceb0957f48128fc5abdc49c9..01af3111fafa6c4a6fffda724286707c6f184171 100644
+--- a/wifi/lx/src/lx_base.c
++++ b/wifi/lx/src/lx_base.c
+@@ -755,7 +755,7 @@ iounmap(void *address)
+  * or the other way round. The first part of it is handed out for good, a stretch at a time
+  * (rings); the rest is slots of one size, taken and given back (buffers).
+  */
+-#define POOL_SIZE	(44u << 20)
++#define POOL_SIZE	((unsigned)LX_RADIO_POOL_SIZE)
+ #define POOL_RINGS	(12u << 20)		/* (the data path's rings and link descriptors come to about 6 MB) */
+ #define POOL_SLOT	4096u
+ #define POOL_SLOTS	((POOL_SIZE - POOL_RINGS) / POOL_SLOT)
+diff --git a/xnu-build.sh b/xnu-build.sh
+index 8f851bbb22e20eea041bcd34d4cd3c297b87f2d4..9d1337f6e346764939c3e678305fd87aba13b30a 100755
 --- a/xnu-build.sh
 +++ b/xnu-build.sh
-@@ -5,6 +5,8 @@
+@@ -5,6 +5,8 @@ cd "$XNU_SRC" || exit 1
  # The Wi-Fi driver's object (tools/mk-ath11k.sh) is linked into the kernel when it is there; make
  # does not see it change, so the linked kernel is thrown away when it has.
  LX=$XNUDEPS/build/ath11k/out/ath11k.o
@@ -1052,9 +1127,11 @@
  STAMP=BUILD/obj/redwood-objects
  if [ -f "$LX" ]; then now="$LX $(stat -c %Y "$LX")"; else LX= now=; fi
  if [ -d BUILD/obj ] && [ "$(cat $STAMP 2>/dev/null)" != "$now" ]; then
+diff --git a/xnuloader/efi.h b/xnuloader/efi.h
+index 14c7b625539fbd1a22a8b87ca0efbdfe52e4cd36..66bb557d1567b8ae45aad3ae233cc0ff833400ce 100644
 --- a/xnuloader/efi.h
 +++ b/xnuloader/efi.h
-@@ -30,6 +30,8 @@
+@@ -30,6 +30,8 @@ struct efi_text_output;
  typedef struct efi_text_output {
  	void *reset;
  	efi_status (EFIAPI *output_string)(struct efi_text_output *self, const char16 *str);
@@ -1063,9 +1140,11 @@
  } efi_text_output;
  
  enum { EfiLoaderData = 2, EfiConventionalMemory = 7 };
+diff --git a/xnuloader/loader.c b/xnuloader/loader.c
+index 640b05d0788b4368384e7f8534b93ea05294bd3b..8a6d1bdc360d678526cecfcf5a5ee73795834a97 100644
 --- a/xnuloader/loader.c
 +++ b/xnuloader/loader.c
-@@ -254,6 +254,9 @@
+@@ -254,6 +254,9 @@ clean_dcache(uint64_t start, uint64_t end)
  /* ------------------------------------------------------------------------ */
  /* Log persistence: raw write to a GPT partition (phone only)               */
  
@@ -1075,7 +1154,7 @@
  static efi_block_io *
  find_log_partition(void)
  {
-@@ -263,6 +266,9 @@
+@@ -263,6 +266,9 @@ find_log_partition(void)
  	efi_handle *handles;
  	uint64_t count;
  
@@ -1085,7 +1164,7 @@
  	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) {
  		return NULL;
  	}
-@@ -336,9 +342,54 @@
+@@ -336,9 +342,54 @@ write_logs(const char *klog, uint64_t klog_len)
  	if (bio == NULL) {
  		/* No log partition (QEMU): echo the returned kernel log on the console instead. */
  		if (klog != NULL) {
@@ -1142,7 +1221,7 @@
  			}
  			print("\n== END OF LOG ==\n");
  		}
-@@ -525,6 +576,9 @@
+@@ -525,6 +576,9 @@ struct platform {
  	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
  	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
  	uint64_t fb_base;                /* the framebuffer the firmware reports (GOP): it tells this device apart */
@@ -1152,7 +1231,7 @@
  };
  
  static const struct platform platform_qemu_virt = {
-@@ -553,6 +607,25 @@
+@@ -553,6 +607,25 @@ static const struct platform platform_redwood = {
  	.fb_base = 0xE1000000,
  };
  
@@ -1178,7 +1257,7 @@
  /*
   * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
   * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
-@@ -560,6 +633,7 @@
+@@ -560,6 +633,7 @@ static const struct platform platform_redwood = {
   */
  static const struct platform *const platforms[] = {
  	&platform_redwood,
@@ -1186,7 +1265,7 @@
  };
  
  /* ------------------------------------------------------------------------ */
-@@ -1489,10 +1563,11 @@
+@@ -1489,10 +1563,11 @@ ufs_survey(void)
   * same partition, named the same, of the same size, in the same place, on logical unit 0.
   */
  #define BLOCK_WRITE_FIRST  2042368ULL                  /* darwin's blocks of 4096: past both cryptexes */
@@ -1201,7 +1280,7 @@
  
  /*
   * The partitions first, then the logical units they are on (BLOCK_PART_UNIT, named unit0, unit1,
-@@ -2503,6 +2578,8 @@
+@@ -2503,6 +2578,8 @@ struct payload_info {
  	uint64_t forced_base;
  	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
  	int usb_mode;
@@ -1210,7 +1289,7 @@
  };
  
  static uint64_t
-@@ -2555,6 +2632,10 @@
+@@ -2555,6 +2632,10 @@ parse_payload(struct payload_info *pi, int verbose)
  			pi->checkpoint = parse_number(text, 10);  /* where the kernel should stop and come back */
  		} else if (str_eq(e->name, "usb")) {
  			pi->usb_mode = 1;                         /* stay in the loader and take commands over USB */
@@ -1221,13 +1300,10 @@
  		}
  		p += sizeof(*e) + ((e->size + 15) & ~15u);
  	}
-@@ -2985,6 +3066,19 @@
+@@ -2988,6 +3069,19 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+ 			ba->commandLine[n++] = *c;
+ 		}
  	}
- 	if (rd_size != 0 && !own_root) {
- 		for (const char *c = "rd=md0 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
-+			ba->commandLine[n++] = *c;
-+		}
-+	}
 +	/* a SoC whose virtual timer is not on the kernel's default PPI says so (the payload's own vtimer_intid= wins) */
 +	int own_vtimer = 0;
 +	for (const char *c = pi.cmdline; *c; c++) {
@@ -1238,10 +1314,13 @@
 +		tail[13] = (char)('0' + PLAT->vtimer_intid / 10);
 +		tail[14] = (char)('0' + PLAT->vtimer_intid % 10);
 +		for (const char *c = tail; *c && n < BOOT_LINE_LENGTH - 1; c++) {
++			ba->commandLine[n++] = *c;
++		}
++	}
+ 	if (wdt_armed) {
+ 		for (const char *c = "hv_wdt_pet=1 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
  			ba->commandLine[n++] = *c;
- 		}
- 	}
-@@ -3344,6 +3438,12 @@
+@@ -3344,6 +3438,12 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
  		print("ufs: the kernel put its own list in %d times and took it out %d times\n",
  		    (uint64_t)block_shared.kernel_native.switched_in, (uint64_t)block_shared.kernel_native.switched_out);
  	}
@@ -1254,7 +1333,7 @@
  	if (block_write_requested) {
  		print("ufs: %d writes into darwin, %d bytes, read back the same; %d refused\n", block_writes,
  		    block_write_bytes, block_writes_refused);
-@@ -3788,8 +3888,17 @@
+@@ -3788,8 +3888,17 @@ usb_poll_command(void)
  	if (USB == NULL) {
  		return;         /* this run was not started over USB */
  	}
@@ -1274,7 +1353,7 @@
  	}
  	USB->handle_event(&msg, &size, &data);
  	if (msg == UsbDeviceEventDeviceStateChange) {
-@@ -3917,6 +4026,241 @@
+@@ -3917,6 +4026,241 @@ ramfb_phone_screen(void)
  	SCREEN.stride = PHONE_WIDTH * 4;
  }
  
@@ -1516,7 +1595,7 @@
  efi_status EFIAPI
  efi_main(efi_handle image, efi_system_table *st)
  {
-@@ -3944,24 +4288,67 @@
+@@ -3944,24 +4288,67 @@ efi_main(efi_handle image, efi_system_table *st)
  		for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
  			if (platforms[i]->fb_base == SCREEN.base)
  				PLAT = platforms[i];
@@ -1584,14 +1663,3 @@
  	}
  	reboot();
  	return 0;
---- a/wifi/lx/src/lx_base.c
-+++ b/wifi/lx/src/lx_base.c
-@@ -755,7 +755,7 @@
-  * or the other way round. The first part of it is handed out for good, a stretch at a time
-  * (rings); the rest is slots of one size, taken and given back (buffers).
-  */
--#define POOL_SIZE	(44u << 20)
-+#define POOL_SIZE	((unsigned)LX_RADIO_POOL_SIZE)
- #define POOL_RINGS	(12u << 20)		/* (the data path's rings and link descriptors come to about 6 MB) */
- #define POOL_SLOT	4096u
- #define POOL_SLOTS	((POOL_SIZE - POOL_RINGS) / POOL_SLOT)
