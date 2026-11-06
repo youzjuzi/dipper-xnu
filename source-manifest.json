@@ -134,6 +134,11 @@
         "mode": "0o664"
       },
       {
+        "path": "bsd/kern/kern_sysctl.c",
+        "sha256": "4dc2ab40d80881ca5bd95c073096df3b49f8d2384a49c5393b4e29d6c6ad429f",
+        "mode": "0o664"
+      },
+      {
         "path": "bsd/sys/mi8_lx.h",
         "sha256": "a47ea5fcd10cefb4cc1ddd08409af6058914f8a93c349cc5720423a5b5b3bc33",
         "mode": "0o664"
@@ -186,6 +191,21 @@
       {
         "path": "osfmk/kern/sched_prim.c",
         "sha256": "0dfbdd8a0256e7c4040e8648bc0f61e316779d272b0ea5c244f3d6e8d78c23eb",
+        "mode": "0o664"
+      },
+      {
+        "path": "pexpert/arm/pe_bootargs.c",
+        "sha256": "e718b8fc18f0da7bdaf44e887fb3912a9e6ea08a4199904f3cd33f6ad9591b5f",
+        "mode": "0o664"
+      },
+      {
+        "path": "pexpert/arm/pe_init.c",
+        "sha256": "cf97c6c7f3d086e377da2393adedadaefac698523e04373b780c31cab699721c",
+        "mode": "0o664"
+      },
+      {
+        "path": "pexpert/pexpert/pexpert.h",
+        "sha256": "de0e639eedad269818348ef1186d11554239a49bd57f22dba724e2782108914d",
         "mode": "0o664"
       }
     ]

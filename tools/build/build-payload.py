@@ -20,6 +20,19 @@ def sha256(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def build_cmdline(seconds, epoch, wifi_mac=None, peripherals=False):
+    """Use kernel defaults; preserve the packager's opt-in radio profile."""
+    cmdline = (f'loader_return_after={seconds} epoch={epoch} '
+               'bootcpu=7 cpus=7 ufs=2 root_apfs=ufs_darwin')
+    if wifi_mac is not None:
+        cmdline += f' wifi_mac={wifi_mac}'
+    else:
+        cmdline += ' mi8rp_mss=0 wifi_lx=0 wifi_station=0'
+    if peripherals:
+        cmdline += ' battery=1 torch=3 haptic=3'
+    return cmdline
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='new directory, preferably under ignored work/runs/')
@@ -75,14 +88,7 @@ def main():
         if hashlib.sha256(data).hexdigest() != expected:
             raise SystemExit('WCN3990 firmware-5.bin missing or stale in root.apfs; rebuild userland')
         wifi_firmware[name] = expected
-    cmdline = (
-        f'loader_return_after={args.seconds} epoch={int(time.time())} '
-        'bootcpu=7 cpus=7 ufs=2 root_apfs=ufs_darwin '
-        'fts=1 fts_steps=6 fts_raw=0 buttons=1 buttons_steps=5 '
-        'gpu=1 mi8gpu_gmuclk=1 mi8gpu_zap_keep=1 '
-        'caenv=FD_MESA_DEBUG=sysmem fb_partial=0 fb_drop=0 '
-        'fb_flip=1 fb_native=1 sb_fps_clamp=1'
-    )
+    mac = None
     if args.wifi:
         mac_file = ROOT / 'local/wifi-mac'
         mac_file.parent.mkdir(parents=True, exist_ok=True)
@@ -95,13 +101,7 @@ def main():
         mac = mac_file.read_text().strip()
         if not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', mac) or int(mac[:2], 16) & 3 != 2:
             raise SystemExit('local/wifi-mac must contain a locally administered unicast MAC')
-        cmdline += (
-            ' mi8rp_mss=6 mi8rp_hold=90 mi8rp_svc=1 mi8rp_servreg=1'
-            ' mi8rp_wlfw=1 mi8rp_bdf=1 mi8rp_wsmmu=3 mi8rp_lx=1 mi8rp_lxirq=1'
-            f' wifi_lx=2 wifi_station=1 wifi_quiet=1 wifi_mac={mac}'
-        )
-    if args.peripherals:
-        cmdline += ' battery=1 torch=3 haptic=3'
+    cmdline = build_cmdline(args.seconds, int(time.time()), mac, args.peripherals)
     # Maximum generated prefix for this fixed dipper profile (cpus supplied,
     # no serial UART), including the optional watchdog and battery address.
     prefix = 'debug=0x8 rd=md0 vtimer_intid=19 hv_wdt_pet=1 ufs_shared_pa=0x' + '0' * 16 + ' '

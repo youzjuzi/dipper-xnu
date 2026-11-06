@@ -1,5 +1,5 @@
 {
-  "review_date": "2026-11-05",
+  "review_date": "2026-11-06",
   "original_code_authorization": "Maintainer confirmed original human/AI-authored portions may use MIT; excludes third-party derivatives.",
   "files": [
     {
@@ -633,6 +633,38 @@
       "license": "APSL-2.0 AND LicenseRef-CMU",
       "basis": "Apple APSL and CMU notices retained in pinned XNU sched_prim.c",
       "sha256": "0dfbdd8a0256e7c4040e8648bc0f61e316779d272b0ea5c244f3d6e8d78c23eb"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/kern/kern_sysctl.c",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "Pinned Apple XNU derivative; existing Apple copyright and applicable upstream license notices retained; no relicense",
+      "sha256": "4dc2ab40d80881ca5bd95c073096df3b49f8d2384a49c5393b4e29d6c6ad429f"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "pexpert/arm/pe_bootargs.c",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "Pinned Apple XNU derivative; existing Apple copyright and applicable upstream license notices retained; no relicense",
+      "sha256": "e718b8fc18f0da7bdaf44e887fb3912a9e6ea08a4199904f3cd33f6ad9591b5f"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "pexpert/arm/pe_init.c",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "Pinned Apple XNU derivative; existing Apple copyright and applicable upstream license notices retained; no relicense",
+      "sha256": "cf97c6c7f3d086e377da2393adedadaefac698523e04373b780c31cab699721c"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "pexpert/pexpert/pexpert.h",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "Pinned Apple XNU derivative; existing Apple copyright and applicable upstream license notices retained; no relicense",
+      "sha256": "de0e639eedad269818348ef1186d11554239a49bd57f22dba724e2782108914d"
     }
   ]
 }

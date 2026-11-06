@@ -43,6 +43,57 @@ Wi-Fi 需要已核验的对应固件；基础测试可省略 `--wifi --periphera
 
 `tools/build/build-loader-uefi.sh` 会嵌入 USB 引导载荷；缺少它，即使看到 UEFI 也不保证出现 xnuloader 服务。构建命令退出成功只是主机证据，设备成功须另验。
 
+## dipper 短启动参数与默认值
+
+以下短参数需配套包含平台默认值表的新内核；旧内核仍需完整参数，不能只替换 cmdline。内核在读取设备树后依据 `/arm-io/device_type` 精确等于 `dipper` 启用默认值；这是现有 loader 的物理平台字段，与模拟的 iPhone 根节点身份不同。redwood、QEMU 和缺少该字段的目标保持原参数行为。
+
+| 载荷 | 参数 |
+| --- | --- |
+| daily | `bootcpu=7 cpus=7 ufs=2 root_apfs=ufs_darwin epoch=<UNIX_TIME> wifi_mac=<LOCAL_WIFI_MAC>` |
+| bench 追加 | `loader_return_after=360 taskload=500 touch_lat=1 mi8_cpuclk=10 perfprof=1 fprof=1000` |
+
+`epoch` 按运行时间提供；`wifi_mac` 仍来自本机私有配置，不能固化进代码。daily 不含测量开关和自动返回期限，并不表示长期稳定性已验证。`bootcpu`、`cpus` 由 loader 在内核启动前消费，必须保留；存储选择 `ufs`、`root_apfs` 也保留。需要其他 loader 功能时仍显式传参。
+
+默认值集中在 `pexpert/arm/pe_bootargs.c`，内核解析器与用户态 `kern.bootargs` 共用展开后的配置：
+
+| 参数 | dipper 缺省值 |
+| --- | --- |
+| `fts` | `1` |
+| `fts_steps` | `6` |
+| `fts_raw` | `0` |
+| `buttons` | `1` |
+| `buttons_steps` | `5` |
+| `gpu` | `1` |
+| `mi8gpu_gmuclk` | `1` |
+| `mi8gpu_zap_keep` | `1` |
+| `caenv` | `FD_MESA_DEBUG=sysmem` |
+| `fb_partial` | `0` |
+| `fb_flip` | `1` |
+| `fb_native` | `1` |
+| `sb_fps_clamp` | `1` |
+| `mi8rp_mss` | `6` |
+| `mi8rp_hold` | `90` |
+| `mi8rp_svc` | `1` |
+| `mi8rp_servreg` | `1` |
+| `mi8rp_wlfw` | `1` |
+| `mi8rp_bdf` | `1` |
+| `mi8rp_wsmmu` | `3` |
+| `mi8rp_lx` | `1` |
+| `mi8rp_lxirq` | `1` |
+| `wifi_lx` | `2` |
+| `wifi_station` | `1` |
+| `wifi_quiet` | `1` |
+| `thermgov` | `66` |
+| `ffix` | `1` |
+
+显式参数优先，包括 `0`。例如 `fb_native=0`、`thermgov=0`、`ffix=0` 分别关闭对应功能，`caenv=0` 阻止注入默认环境变量；其他显式值沿用原消费者的解析和约束。启动时 `bootcfg:` 行按 `arg`/`def` 标记来源；MAC 只显示 `wifi_mac=set(arg)`，不输出其值。
+
+默认 Wi-Fi 配置需要匹配固件和私有 MAC。通用打包工具仍保留 `--wifi` 的显式选择：不带该选项时，短参数中增加 `mi8rp_mss=0 wifi_lx=0 wifi_station=0` 以关闭其无线启动路径。`--peripherals` 仍追加 `battery=1 torch=3 haptic=3`，它们不属于本次默认值表。
+
+以 10 位 epoch、17 字符 MAC 计，daily 为 87 字节，bench 为 172 字节（均不含换行）；加 80 字节保守 loader 前缀分别为 167、252 字节。bench 距 600 字节边界为 348 字节，保持严格小于 600 时最多再加 347 字节。带电池等其他 loader 参数时必须另计前缀。loader 的 608 字节输入结构不变；内核另用 2048 字节缓存保存展开配置，`kern.bootargs` 可返回展开值。该缓存不放宽载荷输入长度限制。
+
+此变更已通过主机解析测试、补丁重放和干净内核 build；短参数载荷的设备冒烟仍待持有人验证。
+
 ## 3. 临时启动
 
 日常启动 iOS 不需要重新刷入 TWRP，也不需要先进入 TWRP。Recovery 只在分区维护和回读等步骤使用；首次安装或进入已安装 TWRP 的说明见[设备准备教程](DEVICE_PREPARATION.md)。

@@ -20569,6 +20569,24 @@ index efa2fda7bc55e66b9619d3393ae661027a4959a1..a6a3e7da70dbe93c5d4a6e620283809d
 +	*size = (uint64_t)ufs_page->part[part].block_size * ufs_page->part[part].blocks;
 +	return 0;
 +}
+diff --git a/bsd/kern/kern_sysctl.c b/bsd/kern/kern_sysctl.c
+index 9ba4ffbfef033532d8d3627f1c83f4bdf01403c4..215e4038fcc01ad7a0b77ddf0f200b045fadec91 100644
+--- a/bsd/kern/kern_sysctl.c
++++ b/bsd/kern/kern_sysctl.c
+@@ -2164,10 +2164,10 @@ sysctl_sysctl_bootargs
+ (__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+ {
+ 	int error;
+-	char buf[BOOT_LINE_LENGTH];
++	char buf[PE_BOOT_ARGS_MAX];
+ 
+-	strlcpy(buf, PE_boot_args(), BOOT_LINE_LENGTH);
+-	error = sysctl_io_string(req, buf, BOOT_LINE_LENGTH, 0, NULL);
++	strlcpy(buf, PE_boot_args(), sizeof(buf));
++	error = sysctl_io_string(req, buf, sizeof(buf), 0, NULL);
+ 	return error;
+ }
+ 
 diff --git a/bsd/sys/mi8_lx.h b/bsd/sys/mi8_lx.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..ab5f8a1131075ce2afd6013fc2518c71564c94d7
@@ -23574,4 +23592,160 @@ index 0a7de6fc4be75dc19dc7626d406a251299d22fb0..2ec713e2ede72c86d0c135ab4ae99c4d
 +	}
  	processor->active_thread = thread;
  	processor_state_update_from_thread(processor, thread, false);
+ 
+diff --git a/pexpert/arm/pe_bootargs.c b/pexpert/arm/pe_bootargs.c
+index c6b87b081d2f4338653431e4baefa712b4da710a..f5b1388b0dd9ad1a494d121cd347f86511bbd730 100644
+--- a/pexpert/arm/pe_bootargs.c
++++ b/pexpert/arm/pe_bootargs.c
+@@ -3,10 +3,110 @@
+  */
+ #include <pexpert/pexpert.h>
+ #include <pexpert/boot.h>
++#include <pexpert/device_tree.h>
++
++/* One source for both kernel parsers and kern.bootargs consumers. The loader's
++ * bounded command line remains untouched; only absent options are supplied. */
++static const struct {
++	const char *name;
++	const char *value;
++} dipper_defaults[] = {
++	{ "fts", "1" },
++	{ "fts_steps", "6" },
++	{ "fts_raw", "0" },
++	{ "buttons", "1" },
++	{ "buttons_steps", "5" },
++	{ "gpu", "1" },
++	{ "mi8gpu_gmuclk", "1" },
++	{ "mi8gpu_zap_keep", "1" },
++	{ "caenv", "FD_MESA_DEBUG=sysmem" },
++	{ "fb_partial", "0" },
++	{ "fb_flip", "1" },
++	{ "fb_native", "1" },
++	{ "sb_fps_clamp", "1" },
++	{ "mi8rp_mss", "6" },
++	{ "mi8rp_hold", "90" },
++	{ "mi8rp_svc", "1" },
++	{ "mi8rp_servreg", "1" },
++	{ "mi8rp_wlfw", "1" },
++	{ "mi8rp_bdf", "1" },
++	{ "mi8rp_wsmmu", "3" },
++	{ "mi8rp_lx", "1" },
++	{ "mi8rp_lxirq", "1" },
++	{ "wifi_lx", "2" },
++	{ "wifi_station", "1" },
++	{ "wifi_quiet", "1" },
++	{ "thermgov", "66" },
++	{ "ffix", "1" },
++};
++#define DIPPER_DEFAULT_COUNT (sizeof(dipper_defaults) / sizeof(dipper_defaults[0]))
++static char effective_args[PE_BOOT_ARGS_MAX];
++static boolean_t default_used[DIPPER_DEFAULT_COUNT];
++static boolean_t dipper_args_ready;
+ 
+ char *
+-PE_boot_args(
+-	void)
++PE_boot_args(void)
+ {
+-	return (char *)((boot_args *)PE_state.bootArgs)->CommandLine;
++	return dipper_args_ready ? effective_args :
++	       (char *)((boot_args *)PE_state.bootArgs)->CommandLine;
++}
++
++void
++PE_init_boot_defaults(void)
++{
++	DTEntry entry;
++	const void *type;
++	unsigned int size;
++
++	/* The existing loader describes the physical platform here, while root
++	 * compatible/model describe the iPhone identity expected by user space. */
++	if (dipper_args_ready ||
++	    SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
++	    SecureDTGetProperty(entry, "device_type", &type, &size) != kSuccess ||
++	    size != sizeof("dipper") || memcmp(type, "dipper", sizeof("dipper")) != 0) {
++		return;
++	}
++	strlcpy(effective_args, PE_boot_args(), sizeof(effective_args));
++	for (unsigned int i = 0; i < DIPPER_DEFAULT_COUNT; i++) {
++		/* Keep the original parser's token rules and explicit-zero semantics.
++		 * Until the table is complete PE_boot_args still returns the raw input. */
++		default_used[i] = !PE_parse_boot_argn(dipper_defaults[i].name, NULL, 0);
++		if (!default_used[i]) {
++			continue;
++		}
++		size_t used = strlen(effective_args);
++		size_t needed = 1 + strlen(dipper_defaults[i].name) + 1 + strlen(dipper_defaults[i].value);
++		if (needed >= sizeof(effective_args) - used) {
++			panic("platform boot defaults exceed buffer");
++		}
++		strlcat(effective_args, " ", sizeof(effective_args));
++		strlcat(effective_args, dipper_defaults[i].name, sizeof(effective_args));
++		strlcat(effective_args, "=", sizeof(effective_args));
++		strlcat(effective_args, dipper_defaults[i].value, sizeof(effective_args));
++	}
++	dipper_args_ready = TRUE;
++}
++
++void
++PE_log_boot_defaults(void)
++{
++	char line[2048] = "bootcfg:";
++	char value[BOOT_LINE_LENGTH];
++
++	if (!dipper_args_ready) {
++		return;
++	}
++	for (unsigned int i = 0; i < DIPPER_DEFAULT_COUNT; i++) {
++		value[0] = '\0';
++		PE_parse_boot_arg_str(dipper_defaults[i].name, value, sizeof(value));
++		strlcat(line, " ", sizeof(line));
++		strlcat(line, dipper_defaults[i].name, sizeof(line));
++		strlcat(line, "=", sizeof(line));
++		strlcat(line, value, sizeof(line));
++		strlcat(line, default_used[i] ? "(def)" : "(arg)", sizeof(line));
++	}
++	/* Never print device identity, including when supplied explicitly. */
++	strlcat(line, PE_parse_boot_argn("wifi_mac", NULL, 0) ?
++	    " wifi_mac=set(arg)" : " wifi_mac=unset", sizeof(line));
++	printf("%s\n", line);
+ }
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index c622b4cc84ab074400bc955e7111df7426bb1dd2..1f555b8b8ba362cf8af13a839eb5d65f95f4de89 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -247,6 +247,7 @@ PE_init_iokit(void)
+ 	uint32_t        populate_registry_time_value = 0;
+ 
+ 	PE_init_printf(TRUE);
++	PE_log_boot_defaults();
+ 
+ 	printf("iBoot version: %s\n", iBoot_version);
+ #if defined(TARGET_OS_OSX) && defined(__arm64__)
+@@ -422,6 +423,7 @@ PE_init_platform(boolean_t vm_initialized, void *args)
+ 		 * can be used..
+ 		 */
+ 		SecureDTInit(PE_state.deviceTreeHead, PE_state.deviceTreeSize);
++		PE_init_boot_defaults();
+ 		pe_identify_machine(boot_args_ptr);
+ 	} else {
+ 		pe_arm_init_interrupts(args);
+diff --git a/pexpert/pexpert/pexpert.h b/pexpert/pexpert/pexpert.h
+index 769a733a53f28002eb348b54f597f48393fe1607..241452ff7080d290a7fcbd3e8a7f0c1df288dc46 100644
+--- a/pexpert/pexpert/pexpert.h
++++ b/pexpert/pexpert/pexpert.h
+@@ -331,6 +331,13 @@ typedef struct PE_state {
+ 
+ extern PE_state_t PE_state;
+ 
++/* Expanded platform defaults can exceed the loader input limit. */
++#define PE_BOOT_ARGS_MAX 2048
++#if defined(__arm__) || defined(__arm64__)
++extern void PE_init_boot_defaults(void);
++extern void PE_log_boot_defaults(void);
++#endif
++
+ extern char * PE_boot_args(
+ 	void);
  
