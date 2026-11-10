@@ -37,7 +37,7 @@ python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --se
 (cd "work/runs/$RUN_ID/candidate" && sha256sum -c SHA256SUMS)
 ```
 
-Wi-Fi 需要已核验的对应固件；基础测试可省略 `--wifi --peripherals`。此处候选限时 300 秒，默认不启用持久存储写入或旧 var_store。具体测试矩阵见[已有分区测试](EXISTING_INSTALL.md)。
+Wi-Fi 需要已核验的对应固件；基础测试可省略 `--wifi --peripherals`。此处候选限时 300 秒，默认不启用持久存储写入或 var_store；要保留 `/private/var` 见下面的[持久保存](#持久保存可选)。具体测试矩阵见[已有分区测试](EXISTING_INSTALL.md)。
 
 重建后核对新 GUID、ARM64 EFI、UEFI 内嵌的 loader，以及 boot 镜像中的 BootShim、FD、USB 引导载荷与 DTB。沿用的内核和用户态产物也要核对摘要；在新的 candidate/ 中保存完整的一组启动文件。
 
@@ -95,6 +95,22 @@ Wi-Fi 需要已核验的对应固件；基础测试可省略 `--wifi --periphera
 此变更已通过主机解析测试、补丁重放和干净内核 build；短参数载荷的设备冒烟仍待持有人验证。
 
 
+## 持久保存（可选）
+
+iOS 的 `/private/var`（主屏布局、设置、应用数据）平时是内存盘，每次启动都是空的。加 `--persist` 后，启动时从 darwin 读回上次的内容，运行结束时把它整体存回去：
+
+```sh
+python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --seconds 300 --persist
+```
+
+- 它在启动参数里追加 `ufs_write=1 var_store=1 var_save_ms=120000`。**这会写设备存储**：loader 和内核只允许写 darwin 块 2042368 之后的区域（系统卷和两个 cryptex 在其之前），存档放在块 2097152 起的两个 2 GiB 槽里，每次写入读回比对，其他分区一律拒绝。
+- 只在有序结束时保存：限时到期（`--persist` 要求 `--seconds` 不少于 180）或主机 stop。长按电源、断电、崩溃不保存，上一次存档保持不变。保存期间（限时到期后最长约 120 秒）不要拔线或长按电源。
+- 双槽交替写，头最后写；读回取校验通过的最新一槽，存档损坏时 `/private/var` 保持空白启动，不会阻止开机。
+- 只读读回：只加 `var_store=1`（不加 `ufs_write=1`），读回但不保存。日常开发和对比测试不加这两个参数，就和以前一样是干净状态、不写盘。
+- 存档和 `/private/var` 一起放在内存里，每槽上限 2 GiB；日志目录、临时目录和运行时目录不保存。
+- 清空存档：在 TWRP 把 darwin 块 2097152..3145727 清零（`dd if=/dev/zero of=/dev/block/<darwin 节点> bs=4096 seek=2097152 count=1048576`），先核对节点是 darwin；系统卷不受影响。
+- 保存期间系统仍在运行，数据库可能存到一半的状态；周期保存、异常退出和存档增长尚未测试。
+
 ## 降低渲染分辨率（可选，不是默认值）
 
 在 daily 参数后显式追加 `fbscale=2 fb_dpu=1`，iOS 按 750×1624（iPhone X 的点尺寸、每点 2 像素）渲染，像素约为 1125×2436 的 44%：
@@ -140,7 +156,7 @@ fastboot -s xnuloader stage "$CANDIDATE/payload.bin"
 fastboot -s xnuloader oem run
 ```
 
-所有文件必须来自同一候选。系统根卷从 darwin 读取，启动卷与内核载荷传到 RAM；UFS 路线使用 `ufs=2 root_apfs=ufs_darwin`。基础测试不要加入 `ufs_write=1`，持久保存须单独审查范围与恢复方法。已安装并回读匹配后，日常启动从本节开始。
+所有文件必须来自同一候选。系统根卷从 darwin 读取，启动卷与内核载荷传到 RAM；UFS 路线使用 `ufs=2 root_apfs=ufs_darwin`。基础测试不要加入 `ufs_write=1`；持久保存是单独的可选项，范围与恢复方法见[持久保存](#持久保存可选)。已安装并回读匹配后，日常启动从本节开始。
 
 ## 4. 验收、日志与结束
 

@@ -20,7 +20,7 @@ def sha256(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def build_cmdline(seconds, epoch, wifi_mac=None, peripherals=False):
+def build_cmdline(seconds, epoch, wifi_mac=None, peripherals=False, persist=False):
     """Use kernel defaults; preserve the packager's opt-in radio profile."""
     cmdline = (f'loader_return_after={seconds} epoch={epoch} '
                'bootcpu=7 cpus=7 ufs=2 root_apfs=ufs_darwin')
@@ -30,6 +30,9 @@ def build_cmdline(seconds, epoch, wifi_mac=None, peripherals=False):
         cmdline += ' mi8rp_mss=0 wifi_lx=0 wifi_station=0'
     if peripherals:
         cmdline += ' battery=1 torch=3 haptic=3'
+    if persist:
+        # The data volume is read back at boot and saved when the run ends (darwin blocks >= 2042368 only).
+        cmdline += ' ufs_write=1 var_store=1 var_save_ms=120000'
     return cmdline
 
 
@@ -39,7 +42,11 @@ def main():
     parser.add_argument('--seconds', type=int, default=300)
     parser.add_argument('--wifi', action='store_true', help='enable Mi8 modem/ath10k station mode')
     parser.add_argument('--peripherals', action='store_true', help='enable battery reporting, iOS torch and haptics')
+    parser.add_argument('--persist', action='store_true',
+                        help='keep /private/var in darwin: read it back at boot, save it when the run ends (writes storage)')
     args = parser.parse_args()
+    if args.persist and args.seconds < 180:
+        raise SystemExit('--persist needs --seconds >= 180: the desktop must come up before the run ends')
     if not 60 <= args.seconds <= 1800:
         raise SystemExit('Use a bounded run between 60 and 1800 seconds')
     k = ROOT / 'work/hackios'
@@ -101,13 +108,13 @@ def main():
         mac = mac_file.read_text().strip()
         if not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', mac) or int(mac[:2], 16) & 3 != 2:
             raise SystemExit('local/wifi-mac must contain a locally administered unicast MAC')
-    cmdline = build_cmdline(args.seconds, int(time.time()), mac, args.peripherals)
+    cmdline = build_cmdline(args.seconds, int(time.time()), mac, args.peripherals, args.persist)
     # Maximum generated prefix for this fixed dipper profile (cpus supplied,
     # no serial UART), including the optional watchdog and battery address.
     prefix = 'debug=0x8 rd=md0 vtimer_intid=19 hv_wdt_pet=1 ufs_shared_pa=0x' + '0' * 16 + ' '
     if args.peripherals:
         prefix += 'battery_shared_pa=0x' + '0' * 16 + ' '
-    # Neither ufs_write nor var_store is enabled.
+    # ufs_write and var_store are enabled only with --persist.
     if len(cmdline.encode()) + len(prefix) >= 608:
         raise SystemExit('Boot arguments exceed conservative loader allowance')
     out = args.output.resolve()
@@ -131,7 +138,7 @@ def main():
     (out / 'SHA256SUMS').write_text(''.join(digest + '  ' + name + '\n' for name, digest in records.items()))
     (out / 'manifest.json').write_text(json.dumps({
         'scope': 'host package, device GPT and system hash must be checked separately',
-        'storage_writes': False, 'restore_old_var_store': False,
+        'storage_writes': args.persist, 'restore_old_var_store': args.persist,
         'wifi_enabled': args.wifi, 'seconds': args.seconds, 'cmdline': cmdline,
         'peripherals_enabled': args.peripherals,
         'maximum_bootargs_bytes': len(cmdline.encode()) + len(prefix),

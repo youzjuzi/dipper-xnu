@@ -125,12 +125,11 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-10，覆盖更新，接手时重新核对）
 
-- **分支/基线**：`feat/render-scale`，来自 `feat/bootargs-defaults`（`299b9f2`）；本地提交，未 push。第二次提交加入静态壁纸。
-- **源码对应**：`iokit/Kernel/MiniIOMobileFramebuffer.cpp`（行缓冲大小修复、`fb_dpu`）和用户态 `src/inject_sb.c`（状态栏后备样式替换、静态壁纸，`still_wall=1` 或降分辨率时启用）已由 patchtool 导出写回 `xnu-mi8.patch`、`hackios-userland.patch` 与清单，干净树重放通过；work 源码与补丁一致。其余四个补丁不变。
-- **验证**：内核在干净树增量构建、用户态库单独编译通过；设备上已验证 `fbscale=2 fb_dpu=1` 进桌面、状态栏正常、更流畅，数据与限制见[验证记录](../validation/VALIDATION.md#降低渲染分辨率与状态栏2026-11-10)。静态壁纸在降分辨率（渐变、图片）和原分辨率（`still_wall=1`）下均已进桌面、无 panic，持有人确认基本没有问题；`B-7` 里设置、信息、日历、Spotlight 打开无闪退、Wi-Fi 联网；最终提交内容的完整回归没有做。
-- **产物**：`work/runs/20261109-fbscale-01/B-1`（含状态栏修复的根镜像 + DPU 放大内核，参数 `fbscale=2 fb_dpu=1`，无测量开关）；`D-1` 带测量开关；`B-6`（降分辨率 + 图片壁纸）、`B-7`（原分辨率 + `still_wall=1` + 图片壁纸）。内核构建目录在同一运行目录的 `kernel/`，干净树在 `../experiments/bootargs-20261106/clean`。运行目录里还有多个已分析完的载荷和日志，可按本机清理约定处理。
-- **下一步**：**查降分辨率下的应用闪退**（设置、信息在降分辨率启动里反复闪退，原分辨率一次对照没有闪退；原因没查清前不要把降分辨率纳入默认值）；壁纸可改为从数据盘读图以便不重新打包就能换；MobileGestaltHelper 的尺寸查询是让壁纸进程认出屏幕的线索（未试）；最终内容 Wi-Fi、触摸、按键回归。
-- **边界**：wifi plist、loader 本机身份字段及 edk2 11 项维持原样，krb5 辅助子模块基线不可用仍为已知例外。GPU/基带退出恢复、首次安装外设收尾和完整 all 待验；设备轮次间完整重启。禁止重跑分区脚本。
+- **分支/基线**：`feat/persist-var-store`，来自 `feat/render-scale`（降分辨率与静态壁纸，本地提交，未 push）；本分支只改打包工具、测试与文档，未改上游衍生源码，补丁不变。
+- **本分支内容**：`tools/build/build-payload.py --persist`（追加 `ufs_write=1 var_store=1 var_save_ms=120000`，要求 `--seconds` 不少于 180，清单记录 `storage_writes`）；主机测试 327 项通过；用法与边界见[启动教程](../install/STARTUP.md#持久保存可选)，设备结果见[验证记录](../validation/VALIDATION.md#持久保存首测2026-11-10)。
+- **设备证据**：存一次、读一次均通过——写入 45 次读回一致且 0 拒绝，TWRP 下槽 0 头与存档 CRC 正确，读回后图标、文件夹、设置开关保留。载荷与日志在 `work/runs/20261110-persist-01/`（`P-save`、`P-load`，`device-save-01`、`device-load-01`，`device-test-plan.md`）。
+- **下一步**：第二次保存（写槽 1）；周期保存（`var_store watch N`）与长按电源的丢失量；保存时数据库一致性；存档增长和耗时；评估上游的 HFS+ 数据卷（与存档区重叠，二选一）。降分辨率下应用闪退仍未查清，降分辨率保持可选。
+- **边界**：只在有序结束时保存；内核返回后日志只剩 32 KB，看不到保存完成行。GPU/基带退出恢复、首次安装外设收尾和完整 all 待验；设备轮次间完整重启。禁止重跑分区脚本。清空存档的范围见启动教程。
 - **私人配置**：沿用 local/README.md 和 local/index.json，切换源码版本前重新核对 work 与目标提交的对应关系。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。

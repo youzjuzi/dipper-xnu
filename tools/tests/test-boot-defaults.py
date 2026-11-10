@@ -165,5 +165,15 @@ const char *raw_input(void) { return input.CommandLine; }
                 check(v.value==(expected if wifi is not None else 0))
             for key in ['battery','torch','haptic']:
                 check(lib.PE_parse_boot_argn(key.encode(),None,0)==peripherals)
+    for wifi in [None,'00:00:00:00:00:00']:
+        plain=packager.build_cmdline(300,1793436756,wifi,True)
+        raw=packager.build_cmdline(300,1793436756,wifi,True,True)
+        check(raw.startswith(plain)and raw[len(plain):]==' ufs_write=1 var_store=1 var_save_ms=120000')
+        check(len(raw)+116<600)
+        check('ufs_write' not in plain and 'var_store' not in plain)
+        reset(raw)
+        for key in ['ufs_write','var_store']:
+            v=ctypes.c_uint32(99);lib.PE_parse_boot_argn(key.encode(),ctypes.byref(v),4);check(v.value==1)
+        v=ctypes.c_uint32(0);lib.PE_parse_boot_argn(b'var_save_ms',ctypes.byref(v),4);check(v.value==120000)
 
 print(json.dumps({'status':'PASS_HOST_ONLY','assertions':checks,'defaults':len(entries),'daily_bytes':len(daily),'bench_bytes':len(bench),'prefix_budget_including_separator':80,'bench_total':len(bench)+80,'strict_limit_additional_bytes':599-len(bench)-80},indent=2))
