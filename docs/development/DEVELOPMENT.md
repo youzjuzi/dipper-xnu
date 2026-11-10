@@ -125,12 +125,12 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-10，覆盖更新，接手时重新核对）
 
-- **分支/基线**：`feat/persist-var-store`，来自 `feat/render-scale`（降分辨率与静态壁纸，本地提交，未 push）；本分支只改打包工具、测试与文档，未改上游衍生源码，补丁不变。
-- **本分支内容**：`tools/build/build-payload.py --persist`（追加 `ufs_write=1 var_store=1 var_save_ms=120000`，要求 `--seconds` 不少于 180，清单记录 `storage_writes`）；主机测试 327 项通过；用法与边界见[启动教程](../install/STARTUP.md#持久保存可选)，设备结果见[验证记录](../validation/VALIDATION.md#持久保存首测2026-11-10)。
-- **设备证据**：存一次、读一次均通过——写入 45 次读回一致且 0 拒绝，TWRP 下槽 0 头与存档 CRC 正确，读回后图标、文件夹、设置开关保留。载荷与日志在 `work/runs/20261110-persist-01/`（`P-save`、`P-load`，`device-save-01`、`device-load-01`，`device-test-plan.md`）。
-- **下一步**：第二次保存（写槽 1）；周期保存（`var_store watch N`）与长按电源的丢失量；保存时数据库一致性；存档增长和耗时；评估上游的 HFS+ 数据卷（与存档区重叠，二选一）。降分辨率下应用闪退仍未查清，降分辨率保持可选。
-- **边界**：只在有序结束时保存；内核返回后日志只剩 32 KB，看不到保存完成行。GPU/基带退出恢复、首次安装外设收尾和完整 all 待验；设备轮次间完整重启。禁止重跑分区脚本。清空存档的范围见启动教程。
-- **私人配置**：沿用 local/README.md 和 local/index.json，切换源码版本前重新核对 work 与目标提交的对应关系。
+- **分支/基线**：`feat/bluetooth`，来自 `feat/persist-var-store`（持久保存，已提交 `b175b06`）；本地提交，未 push。
+- **本分支内容**：蓝牙诊断驱动 `bsd/dev/mi8_bt.c`（`bt=1..4`），接入 `bsd/conf/files`、`bsd/sys/redwood_input.h`、`bsd/dev/redwood_input.c`；已由 patchtool 导出写回 `xnu-mi8.patch` 与清单，干净树重放通过，许可清单已加该文件；`work/` 源码与补丁一致。
+- **设备证据**：三轮运行（`bt=2`、`bt=3`、`bt=4`）都正常返回、无 panic；芯片应答 HCI Reset 和读版本。细节见[验证记录](../validation/VALIDATION.md#蓝牙芯片的-uart-链路2026-11-10)。内核增量构建复用降分辨率那轮的目标目录，不另建源码副本。
+- **下一步**：固件下载（`crbtfw21.tlv` 与 `crnv21.bin` 在手机 `bluetooth` 分区，需放进 ramdisk 的 `/fw`）、厂商命令读 SoC 版本、提高波特率到 3.2 Mbaud；之后才是让 iOS 的 `bluetoothd` 看到控制器（它通过 IOKit 服务 `AppleBTHci` 收发 HCI，需要内核侧垫片）。
+- **边界**：只到 HCI 命令链路；GPU/基带退出恢复、首次安装外设收尾和完整 all 待验；设备轮次间完整重启。禁止重跑分区脚本。
+- **私人配置**：沿用 local/README.md 和 local/index.json；蓝牙固件在 `local/devices/mi8/bt-firmware/`，不进 Git。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

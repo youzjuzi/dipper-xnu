@@ -1,12 +1,13 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..e68991b4ab42f6bdbfbab776a32d863226a0ce34 100644
+index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..65c3425a649ea1462927f933b40c54a4ca245273 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -113,6 +113,13 @@ bsd/dev/redwood_input.c		standard
+@@ -113,6 +113,14 @@ bsd/dev/redwood_input.c		standard
  bsd/dev/redwood_virtio_input.c	standard
  bsd/dev/redwood_goodix.c	standard
  bsd/dev/redwood_buttons.c	standard
 +bsd/dev/mi8_fts.c	standard
++bsd/dev/mi8_bt.c	standard
 +bsd/dev/mi8_adreno.c	standard
 +bsd/dev/mi8_rproc.c	standard
 +bsd/dev/mi8_glink.c	standard
@@ -5561,6 +5562,816 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +		delay_for_interval(period * 1000, NSEC_PER_MSEC);
 +	}
 +	thread_terminate(current_thread());
++}
+diff --git a/bsd/dev/mi8_bt.c b/bsd/dev/mi8_bt.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..19fbe25d78c96599cc809c466f1186007a57bb25
+--- /dev/null
++++ b/bsd/dev/mi8_bt.c
+@@ -0,0 +1,804 @@
++/*
++ * The Bluetooth of the Xiaomi Mi 8 (dipper, SDM845): a Qualcomm WCN3990 -- the chip whose Wi-Fi half
++ * redwood_wifi.c / mi8_rproc.c already run -- spoken to over a UART: serial engine 6 of the first QUP
++ * wrapper (the device tree's hsuart0, qup_uart@898000), pins 45 CTS, 46 RTS, 47 TX, 48 RX, function
++ * qup6. Only with boot-arg bt=1; bt=N stops after N steps.
++ *
++ * How Linux (hci_qca.c, btqca.c) brings this chip up, which is what the later steps follow: the
++ * supplies on; at 115200 baud with the flow control off, ONE byte, 0xFC, the "power on pulse" (an
++ * external circuit on the TX line decodes it); 100 ms; HCI reset; the vendor commands that read the
++ * chip's version; the rampatch (crbtfw21.tlv) and the NVM (crnv21.bin) downloaded as vendor
++ * commands; the baud rate raised (3.2 Mbaud at most); the flow control on; then plain H4.
++ *
++ *   1  look. Reads the clock controller (the wrapper's two AHB clocks, the engine's clock and its
++ *      source), the four pins (TLMM), and the command database's addresses of the five supplies the
++ *      device tree gives the Bluetooth node. The engine itself is read only if the AHB clocks and
++ *      its own clock are on (an access to an unclocked QUP can hang the bus).
++ *   2  the engine's clock: the crystal, undivided, as mi8_fts.c does for its engine (the clock
++ *      source takes the new configuration and is read back; then the votes), after which the
++ *      engine is read: which protocol its firmware runs (2 should be UART), whether the FIFO
++ *      interface is on (GENI_IF_DISABLE_RO: it was off on the I2C engine, EXP-0068), the DMA
++ *      interface, the FIFO depths and the UART's registers. Nothing is written to the engine.
++ *
++ *   3  the UART, inside the engine only: the engine's clock source moved to 100 MHz (GPLL0 / 3), the
++ *      serial clock divided to 115200 baud, the engine set up as Linux's qcom_geni_serial does (FIFO
++ *      mode, 8N1, no flow control), and 12 bytes sent through the engine's own TX-to-RX loopback
++ *      (SE_UART_LOOPBACK_CFG) and read back. The pins stay as the boot left them and nothing is sent
++ *      to the chip: this proves the clock, the divider and the FIFO programming on their own.
++ *
++ *   4  the chip. After bt_delay seconds (default 60: the Wi-Fi bring-up uses the same RPMh channel
++ *      early in the boot): the five supplies on through the RPMh (voltage, and for the LDOs the
++ *      high-power mode, then enable); the four pins muxed to the engine; the loopback again with the
++ *      time the 12 bytes took (12 bytes at 115200 baud are 1.04 ms: the proof of the baud rate);
++ *      the flow control off and the one byte 0xFC; 100 ms; the flow control on; HCI reset and HCI
++ *      read local version, with every byte the chip answers printed. The chip's firmware is NOT
++ *      downloaded and the baud rate is not raised: that is the next step.
++ *
++ * Addresses: the phone's device tree (qup_uart@898000, pinctrl@3400000, gcc@100000), Linux
++ * drivers/clk/qcom/gcc-sdm845.c, drivers/pinctrl/qcom/pinctrl-sdm845.c,
++ * include/linux/soc/qcom/geni-se.h and drivers/tty/serial/qcom_geni_serial.c.
++ *
++ * Status: steps 1 and 2 run on the phone (the engine runs the UART firmware, FIFO interface on); step 3
++
++ * run (loopback SAME); step 4 compiled, not yet run.
++ */
++#include <kern/clock.h>
++#include <kern/sched_prim.h>
++#include <kern/thread.h>
++#include <libkern/libkern.h>
++#include <mach/mach_types.h>
++#include <pexpert/pexpert.h>
++#include <sys/redwood_input.h>
++#include <sys/systm.h>
++#include <vm/vm_kern.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern kern_return_t thread_terminate(thread_t thread);
++extern void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
++extern void loader_log_putc(char c);
++
++static int say(const char *format, ...) __printflike(1, 2);
++
++static int
++say(const char *format, ...)
++{
++	char line[400];
++	va_list list;
++
++	va_start(list, format);
++	vsnprintf(line, sizeof(line), format, list);
++	va_end(list);
++	for (const char *c = line; *c != 0; c++) {
++		loader_log_putc(*c);
++	}
++	return printf("%s", line);
++}
++#define printf say
++
++static inline uint32_t
++rd(vm_offset_t address)
++{
++	return *(volatile uint32_t *)address;
++}
++
++static inline void
++wr(vm_offset_t address, uint32_t value)
++{
++	*(volatile uint32_t *)address = value;
++}
++
++static void
++sleep_us(uint32_t us)
++{
++	delay_for_interval(us, NSEC_PER_USEC);
++}
++
++/* ---- the clock controller ------------------------------------------------------------------------ */
++
++#define GCC_PHYS                0x00100000UL
++#define GCC_SIZE                0x001f0000UL
++#define GCC_VOTE_APPS           0x5200c         /* the apps processor's enables of several branches */
++#define VOTE_WRAP0_M_AHB        (1u << 6)
++#define VOTE_WRAP0_S_AHB        (1u << 7)
++#define VOTE_WRAP0_S6           (1u << 16)      /* the engine: SE6 is the 7th of the first wrapper */
++#define GCC_WRAP0_M_AHB_HALT    0x17004
++#define GCC_WRAP0_S_AHB_HALT    0x17008
++#define GCC_WRAP0_S6_HALT       0x17750
++#define GCC_WRAP0_S6_RCG        0x17754         /* [31] root off; CFG at +4, M, N, D after */
++#define CBCR_OFF                (1u << 31)      /* the branch is off (for the voted ones: not running) */
++
++static vm_offset_t gcc;
++
++static bool
++branch_on(const char *name, uint32_t halt_reg)
++{
++	uint32_t v = rd(gcc + halt_reg);
++
++	printf("bt: clock %-26s halt register %#07x = %#010x: %s\n", name, halt_reg, v, (v & CBCR_OFF) ? "OFF" : "on");
++	return !(v & CBCR_OFF);
++}
++
++/* ---- the engine ----------------------------------------------------------------------------------- */
++
++#define SE6_PHYS                0x00898000UL
++#define SE6_SIZE                0x4000UL
++#define QUP0_PHYS               0x008c0000UL    /* the wrapper: its hardware version at 4 */
++#define QUP0_SIZE               0x6000UL
++#define GENI_STATUS             0x40
++#define GENI_CLK_CTRL_RO        0x60
++#define GENI_IF_DISABLE_RO      0x64            /* bit 0: the FIFO interface is off */
++#define GENI_FW_REVISION_RO     0x68            /* [15:8] protocol (1 spi, 2 uart, 3 i2c, 4 i3c), [7:0] version */
++#define GENI_CLK_SEL            0x7c
++#define GENI_DMA_MODE_EN        0x258
++#define DMA_IF_EN_RO            0xe20
++#define HW_PARAM_0              0xe24
++#define HW_PARAM_1              0xe28
++#define UART_TX_TRANS_CFG       0x25c
++#define UART_RX_TRANS_CFG       0x280
++#define UART_LOOPBACK_CFG       0x22c
++#define UART_IO_MACRO_CTRL      0x240
++#define GENI_TX_FIFO_STATUS     0x800
++#define GENI_RX_FIFO_STATUS     0x804
++#define GENI_FORCE_DEFAULT_REG  0x20
++#define GENI_OUTPUT_CTRL        0x24
++#define GENI_CGC_CTRL           0x28
++#define GENI_SER_M_CLK_CFG      0x48
++#define GENI_SER_S_CLK_CFG      0x4c
++#define GENI_BYTE_GRAN          0x254
++#define GENI_TX_PACKING_CFG0    0x260
++#define GENI_TX_PACKING_CFG1    0x264
++#define GENI_RX_PACKING_CFG0    0x284
++#define GENI_RX_PACKING_CFG1    0x288
++#define UART_TX_WORD_LEN        0x268
++#define UART_TX_STOP_BIT_LEN    0x26c
++#define UART_TX_TRANS_LEN       0x270
++#define UART_RX_WORD_LEN        0x28c
++#define UART_RX_STALE_CNT       0x294
++#define UART_TX_PARITY_CFG      0x2a4
++#define UART_RX_PARITY_CFG      0x2a8
++#define GENI_M_CMD0             0x600
++#define GENI_M_CMD_CTRL         0x604
++#define GENI_M_IRQ_STATUS       0x610
++#define GENI_M_IRQ_EN           0x614
++#define GENI_M_IRQ_CLEAR        0x618
++#define GENI_S_CMD0             0x630
++#define GENI_S_CMD_CTRL         0x634
++#define GENI_S_IRQ_STATUS       0x640
++#define GENI_S_IRQ_EN           0x644
++#define GENI_S_IRQ_CLEAR        0x648
++#define GENI_TX_FIFOn           0x700
++#define GENI_RX_FIFOn           0x780
++#define GENI_TX_WATERMARK       0x80c
++#define GENI_RX_WATERMARK       0x810
++#define GENI_RX_RFR_WATERMARK   0x814
++#define GENI_SE_IRQ_EN          0xe1c
++#define GENI_GSI_EVENT_EN       0xe18
++#define DMA_GENERAL_CFG         0xe30
++#define DMA_TX_IRQ_CLR          0xc44
++#define DMA_RX_IRQ_CLR          0xd44
++#define M_CMD_DONE              (1u << 0)
++#define RX_FIFO_WC_MSK          0x01ffffffu
++#define RX_LAST_BIT             (1u << 31)
++#define RX_LAST_VALID_SHFT      28
++#define UART_START_TX           1u
++#define UART_START_READ         1u
++#define OPCODE_SHFT             27
++
++/* ---- the pins ------------------------------------------------------------------------------------- */
++
++#define TLMM_PHYS               0x03400000UL
++#define TLMM_EAST               0x00100000UL    /* pins 44 to 48 and others; each pin has 0x1000 of registers in its tile */
++#define PIN_CTS                 45
++#define PIN_RTS                 46
++#define PIN_TX                  47
++#define PIN_RX                  48
++
++static vm_offset_t pins;        /* the registers of pin 45; the others follow at 0x1000 */
++
++static void
++pin_look(const char *what, unsigned pin)
++{
++	vm_offset_t base = pins + 0x1000UL * (pin - PIN_CTS);
++	uint32_t cfg = rd(base), io = rd(base + 4);
++
++	printf("bt: pin %2u (%s): config %#05x = pull %u, function %u, drive %u mA, %s; level in %u, out %u\n", pin, what, cfg,
++	    cfg & 3, (cfg >> 2) & 15, 2 * (((cfg >> 6) & 7) + 1), (cfg & (1u << 9)) ? "output" : "input", io & 1, (io >> 1) & 1);
++}
++
++/* ---- the command database (reads only) ----------------------------------------------------------- */
++
++#define CMD_DB_PHYS             0x85fe0000UL
++#define CMD_DB_SIZE             0x20000UL
++
++static vm_offset_t cmd_db;
++
++struct cmd_db_slave {
++	uint16_t id, header_offset, data_offset, count, version, reserved[3];
++};
++struct cmd_db_header {
++	uint32_t version;
++	uint8_t magic[4];
++	struct cmd_db_slave slave[8];
++	uint32_t checksum, reserved;
++	uint8_t data[];
++};
++struct cmd_db_entry {
++	char id[8];
++	uint32_t priority[2];
++	uint32_t address;
++	uint16_t length, offset;
++};
++
++/* The RPMh address of a resource by its name in the command database; 0 = none (as in mi8_fts.c). */
++static uint32_t
++rpmh_address(const char *name)
++{
++	const struct cmd_db_header *db = (const struct cmd_db_header *)cmd_db;
++	char id[8] = { 0 };
++
++	if (db->magic[0] != 0xdb || db->magic[1] != 0x30 || db->magic[2] != 0x03 || db->magic[3] != 0x0c) {
++		return 0;
++	}
++	strlcpy(id, name, sizeof(id));
++	for (unsigned s = 0; s < 8; s++) {
++		const struct cmd_db_slave *slave = &db->slave[s];
++		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(db->data + slave->header_offset);
++
++		if (slave->id == 0 || slave->header_offset >= CMD_DB_SIZE - 0x1000 || slave->count > 512) {
++			continue;
++		}
++		for (unsigned i = 0; i < slave->count; i++) {
++			if (memcmp(entry[i].id, id, sizeof(id)) == 0) {
++				return entry[i].address;
++			}
++		}
++	}
++	return 0;
++}
++
++/* ---- the steps ------------------------------------------------------------------------------------ */
++
++/* What the engine says about itself. Called only with its clocks on. */
++static void
++engine_look(vm_offset_t se)
++{
++	uint32_t fw = rd(se + GENI_FW_REVISION_RO), hw0 = rd(se + HW_PARAM_0), hw1 = rd(se + HW_PARAM_1);
++
++	printf("bt: SE6 firmware revision %#010x: protocol %u (1 spi, 2 uart, 3 i2c, 4 i3c), version %u\n", fw, (fw >> 8) & 0xff,
++	    fw & 0xff);
++	printf("bt: SE6 FIFO interface %s (GENI_IF_DISABLE_RO %#x), DMA interface %#x, DMA mode %#x\n",
++	    (rd(se + GENI_IF_DISABLE_RO) & 1) ? "OFF" : "on", rd(se + GENI_IF_DISABLE_RO), rd(se + DMA_IF_EN_RO),
++	    rd(se + GENI_DMA_MODE_EN));
++	printf("bt: SE6 status %#010x, clock control %#x, clock select %#x, hw params %#x %#x (FIFO depth in words: tx %u, rx %u)\n",
++	    rd(se + GENI_STATUS), rd(se + GENI_CLK_CTRL_RO), rd(se + GENI_CLK_SEL), hw0, hw1, (hw0 >> 16) & 0x3f,
++	    (hw1 >> 16) & 0x3f);
++	printf("bt: SE6 UART registers: tx trans cfg %#x, rx trans cfg %#x, loopback %#x, io macro %#x; FIFO status tx %#x rx %#x\n",
++	    rd(se + UART_TX_TRANS_CFG), rd(se + UART_RX_TRANS_CFG), rd(se + UART_LOOPBACK_CFG), rd(se + UART_IO_MACRO_CTRL),
++	    rd(se + GENI_TX_FIFO_STATUS), rd(se + GENI_RX_FIFO_STATUS));
++}
++
++/* Step 2's write: the crystal, undivided, then the votes; each read back. */
++static bool
++clock_on(void)
++{
++	uint32_t cfg = rd(gcc + GCC_WRAP0_S6_RCG + 4);
++
++	printf("bt: step 2: the engine's clock, the crystal undivided\n");
++	wr(gcc + GCC_WRAP0_S6_RCG + 4, (cfg & ~0x371fu) | 1);
++	wr(gcc + GCC_WRAP0_S6_RCG, rd(gcc + GCC_WRAP0_S6_RCG) | 1);
++	for (int i = 0; i < 500 && (rd(gcc + GCC_WRAP0_S6_RCG) & 1); i++) {
++		sleep_us(10);
++	}
++	printf("bt: the engine's clock source: command %#010x, config %#010x\n", rd(gcc + GCC_WRAP0_S6_RCG),
++	    rd(gcc + GCC_WRAP0_S6_RCG + 4));
++	if (rd(gcc + GCC_WRAP0_S6_RCG) & 1) {
++		printf("bt: the clock source does not take its configuration: stopping\n");
++		return false;
++	}
++	wr(gcc + GCC_VOTE_APPS, rd(gcc + GCC_VOTE_APPS) | VOTE_WRAP0_M_AHB | VOTE_WRAP0_S_AHB | VOTE_WRAP0_S6);
++	for (int i = 0; i < 1000 && (rd(gcc + GCC_WRAP0_S6_HALT) & CBCR_OFF); i++) {
++		sleep_us(10);
++	}
++	printf("bt: votes now %#010x\n", rd(gcc + GCC_VOTE_APPS));
++	if (!branch_on("QUPV3_WRAP_0_M_AHB", GCC_WRAP0_M_AHB_HALT) || !branch_on("QUPV3_WRAP_0_S_AHB", GCC_WRAP0_S_AHB_HALT) ||
++	    !branch_on("QUPV3_WRAP0_S6 (SE6)", GCC_WRAP0_S6_HALT)) {
++		printf("bt: a clock stays off: stopping\n");
++		return false;
++	}
++	return true;
++}
++
++/* ---- step 3: the engine's UART, tested inside the engine ----------------------------------------- */
++
++/* The clock source: GPLL0's even output (300 MHz) divided by 3 = 100 MHz; or the crystal. */
++static bool
++engine_clock_source(bool pll)
++{
++	uint32_t cfg = rd(gcc + GCC_WRAP0_S6_RCG + 4);
++
++	wr(gcc + GCC_WRAP0_S6_RCG + 4, (cfg & ~0x371fu) | (pll ? ((6u << 8) | 5u) : 1u));
++	wr(gcc + GCC_WRAP0_S6_RCG, rd(gcc + GCC_WRAP0_S6_RCG) | 1);
++	for (int i = 0; i < 2000 && (rd(gcc + GCC_WRAP0_S6_RCG) & 1); i++) {
++		sleep_us(10);
++	}
++	printf("bt: the engine's clock source (%s): command %#010x, config %#010x\n", pll ? "GPLL0 even / 3, 100 MHz" : "crystal",
++	    rd(gcc + GCC_WRAP0_S6_RCG), rd(gcc + GCC_WRAP0_S6_RCG + 4));
++	return !(rd(gcc + GCC_WRAP0_S6_RCG) & 1) && !(rd(gcc + GCC_WRAP0_S6_HALT) & CBCR_OFF);
++}
++
++/* Linux's geni_se_config_packing for 8 bit words, four to a FIFO word, LSB first, both directions. */
++static void
++geni_packing(vm_offset_t se)
++{
++	uint32_t cfg[4], cfg0, cfg1;
++
++	for (int i = 0; i < 4; i++) {
++		cfg[i] = ((uint32_t)(i * 8) << 5) | (0u << 4) | (7u << 1);
++	}
++	cfg[3] |= 1;
++	cfg0 = cfg[0] | (cfg[1] << 10);
++	cfg1 = cfg[2] | (cfg[3] << 10);
++	wr(se + GENI_TX_PACKING_CFG0, cfg0);
++	wr(se + GENI_TX_PACKING_CFG1, cfg1);
++	wr(se + GENI_RX_PACKING_CFG0, cfg0);
++	wr(se + GENI_RX_PACKING_CFG1, cfg1);
++	wr(se + GENI_BYTE_GRAN, 0);
++}
++
++/* Linux's geni_se_init + select FIFO mode + the UART's own port setup and termios, 8N1, no flow control. */
++static void
++uart_setup(vm_offset_t se, uint32_t clock_div, uint32_t loopback)
++{
++	/* geni_se_io_init */
++	wr(se + GENI_CGC_CTRL, rd(se + GENI_CGC_CTRL) | 0x7f);
++	wr(se + DMA_GENERAL_CFG, rd(se + DMA_GENERAL_CFG) | 0xf);
++	wr(se + GENI_OUTPUT_CTRL, 0x7f);
++	wr(se + GENI_FORCE_DEFAULT_REG, 1);
++	/* geni_se_irq_clear, geni_se_io_set_mode: the FIFO, not the DMA */
++	wr(se + GENI_GSI_EVENT_EN, 0);
++	wr(se + GENI_M_IRQ_CLEAR, 0xffffffffu);
++	wr(se + GENI_S_IRQ_CLEAR, 0xffffffffu);
++	wr(se + DMA_TX_IRQ_CLR, 0xffffffffu);
++	wr(se + DMA_RX_IRQ_CLR, 0xffffffffu);
++	wr(se + GENI_SE_IRQ_EN, rd(se + GENI_SE_IRQ_EN) | 0xf);
++	wr(se + GENI_DMA_MODE_EN, rd(se + GENI_DMA_MODE_EN) & ~1u);
++	geni_packing(se);
++	wr(se + UART_RX_STALE_CNT, 10 * 16);
++	wr(se + GENI_RX_WATERMARK, 2);
++	wr(se + GENI_RX_RFR_WATERMARK, 32 - 2);
++	/* the serial clock: root / (divider * 32) baud */
++	wr(se + GENI_SER_M_CLK_CFG, (clock_div << 4) | 1);
++	wr(se + GENI_SER_S_CLK_CFG, (clock_div << 4) | 1);
++	wr(se + GENI_CLK_SEL, 0);
++	/* termios: no parity, 8 bits, one stop bit, the CTS pin ignored */
++	wr(se + UART_LOOPBACK_CFG, loopback);
++	wr(se + UART_TX_TRANS_CFG, 2);
++	wr(se + UART_TX_PARITY_CFG, 0);
++	wr(se + UART_RX_TRANS_CFG, 0);
++	wr(se + UART_RX_PARITY_CFG, 0);
++	wr(se + UART_TX_WORD_LEN, 8);
++	wr(se + UART_RX_WORD_LEN, 8);
++	wr(se + UART_TX_STOP_BIT_LEN, 0);
++}
++
++/* The engine's receiver, started; and cancelled again. */
++static void
++uart_rx_start(vm_offset_t se)
++{
++	wr(se + GENI_S_CMD0, UART_START_READ << OPCODE_SHFT);
++}
++
++static void
++uart_stop(vm_offset_t se)
++{
++	wr(se + GENI_S_CMD_CTRL, 4);    /* cancel */
++	sleep_us(2000);
++	wr(se + GENI_S_CMD_CTRL, 2);    /* abort */
++	wr(se + GENI_M_CMD_CTRL, 2);
++	sleep_us(2000);
++	wr(se + GENI_M_IRQ_CLEAR, 0xffffffffu);
++	wr(se + GENI_S_IRQ_CLEAR, 0xffffffffu);
++	wr(se + UART_LOOPBACK_CFG, 0);
++}
++
++/* Throw away what the receiver holds. */
++static void
++uart_drain(vm_offset_t se)
++{
++	for (int i = 0; i < 64 && (rd(se + GENI_RX_FIFO_STATUS) & RX_FIFO_WC_MSK) != 0; i++) {
++		(void)rd(se + GENI_RX_FIFOn);
++	}
++}
++
++/* Send n bytes (the transmitter's command, then the FIFO words, four bytes to a word, first byte lowest). */
++static bool
++uart_tx(vm_offset_t se, const uint8_t *data, uint32_t n)
++{
++	wr(se + GENI_M_IRQ_CLEAR, 0xffffffffu);
++	wr(se + UART_TX_TRANS_LEN, n);
++	wr(se + GENI_M_CMD0, UART_START_TX << OPCODE_SHFT);
++	for (uint32_t i = 0; i < n; i += 4) {
++		uint32_t word = 0;
++
++		for (uint32_t j = 0; j < 4 && i + j < n; j++) {
++			word |= (uint32_t)data[i + j] << (8 * j);
++		}
++		wr(se + GENI_TX_FIFOn, word);
++	}
++	for (int t = 0; t < 2000; t++) {
++		if (rd(se + GENI_M_IRQ_STATUS) & M_CMD_DONE) {
++			wr(se + GENI_M_IRQ_CLEAR, M_CMD_DONE);
++			return true;
++		}
++		sleep_us(50);
++	}
++	printf("bt: the transmitter did not finish (M status %#x, TX FIFO status %#x)\n", rd(se + GENI_M_IRQ_STATUS),
++	    rd(se + GENI_TX_FIFO_STATUS));
++	return false;
++}
++
++/* Read what has arrived, up to max bytes, waiting up to timeout_ms for `want` of them; returns the count. */
++static uint32_t
++uart_rx(vm_offset_t se, uint8_t *data, uint32_t max, uint32_t want, uint32_t timeout_ms)
++{
++	uint32_t n = 0;
++
++	for (uint32_t t = 0; t < timeout_ms * 20 && n < want; t++) {
++		uint32_t status = rd(se + GENI_RX_FIFO_STATUS), words = status & RX_FIFO_WC_MSK;
++
++		while (words > 0 && n < max) {
++			uint32_t word = rd(se + GENI_RX_FIFOn), bytes = 4;
++
++			if (words == 1 && (status & RX_LAST_BIT)) {
++				bytes = (status >> RX_LAST_VALID_SHFT) & 7;
++				if (bytes == 0) {
++					bytes = 4;
++				}
++			}
++			for (uint32_t j = 0; j < bytes && n < max; j++) {
++				data[n++] = (word >> (8 * j)) & 0xff;
++			}
++			words--;
++		}
++		if (n >= want) {
++			break;
++		}
++		sleep_us(50);
++	}
++	return n;
++}
++
++static void
++dump_bytes(const char *what, const uint8_t *b, uint32_t n)
++{
++	char line[3 * 32 + 1];
++	uint32_t k = 0;
++
++	for (uint32_t i = 0; i < n && i < 32; i++) {
++		k += snprintf(line + k, sizeof(line) - k, "%02x ", b[i]);
++	}
++	line[k] = 0;
++	printf("bt: %s (%u bytes): %s\n", what, n, line);
++}
++
++/* Step 3. Returns true when the loopback came back the same. */
++static bool
++uart_loopback(vm_offset_t se)
++{
++	static const uint8_t pattern[12] = { 0x01, 0x03, 0x0c, 0x00, 0x55, 0xaa, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc };
++	uint8_t got[16] = { 0 };
++	uint32_t n;
++	bool sent, same;
++
++	printf("bt: step 3: the engine's UART, 115200 baud, tested through its own loopback\n");
++	if (!engine_clock_source(true)) {
++		printf("bt: the clock source does not take 100 MHz: back to the crystal, stopping\n");
++		engine_clock_source(false);
++		return false;
++	}
++	uart_setup(se, 27, 3);
++	printf("bt: serial clock config %#x, loopback %#x, tx trans cfg %#x, packing %#x %#x, status %#x\n", rd(se + GENI_SER_M_CLK_CFG),
++	    rd(se + UART_LOOPBACK_CFG), rd(se + UART_TX_TRANS_CFG), rd(se + GENI_TX_PACKING_CFG0), rd(se + GENI_TX_PACKING_CFG1),
++	    rd(se + GENI_STATUS));
++	uart_rx_start(se);
++	sleep_us(1000);
++	sent = uart_tx(se, pattern, sizeof(pattern));
++	n = uart_rx(se, got, sizeof(got), sizeof(pattern), 50);
++	dump_bytes("sent", pattern, sizeof(pattern));
++	dump_bytes("received", got, n);
++	same = sent && n == sizeof(pattern) && memcmp(got, pattern, sizeof(pattern)) == 0;
++	printf("bt: loopback %s; engine status %#x, M irq %#x, S irq %#x, RX FIFO status %#x\n", same ? "SAME" : "DIFFERENT", rd(se + GENI_STATUS),
++	    rd(se + GENI_M_IRQ_STATUS), rd(se + GENI_S_IRQ_STATUS), rd(se + GENI_RX_FIFO_STATUS));
++	uart_stop(se);
++	return same;
++}
++
++/* ---- step 4: the chip ---------------------------------------------------------------------------- */
++
++#define RSC_PHYS                0x179e0000UL    /* dt: mailbox@179e0000 apps_rsc, drv-id 2 */
++#define RSC_TCS_BASE            0xd00
++#define RSC_TCS(n)              (RSC_TCS_BASE + 672 * (n))
++#define RPMH_TCS                1               /* mi8_rproc.c's, which Wi-Fi uses early in the boot; TCS 0 is mi8_ddr's */
++
++static vm_offset_t rsc_base;
++
++/* One request, one register, through TCS 1 and waited for (mi8_rproc.c's rpmh_write); true: RPMh said done. */
++static bool
++rpmh_write(const char *what, uint32_t address, uint32_t data)
++{
++	vm_offset_t tcs;
++	bool done = false;
++
++	if (rsc_base == 0) {
++		rsc_base = ml_io_map(RSC_PHYS, 0x10000);
++	}
++	tcs = rsc_base + RSC_TCS(RPMH_TCS);
++	for (int i = 0; rd(tcs + 0x1c) != 0 || (rd(tcs + 0x14) & (1u << 24)); i++) {
++		if (i > 100) {
++			printf("bt: rpmh: TCS %u stays in use (control %#x, enable %#x): %s not asked\n", RPMH_TCS, rd(tcs + 0x14),
++			    rd(tcs + 0x1c), what);
++			return false;
++		}
++		delay_for_interval(50, NSEC_PER_MSEC);
++	}
++	wr(rsc_base + RSC_TCS_BASE + 0x08, 1u << RPMH_TCS);                    /* IRQ_CLEAR */
++	wr(tcs + 0x30, (1u << 16) | (1u << 8) | 8u);                            /* write, an answer wanted, four bytes + address */
++	wr(tcs + 0x34, address);
++	wr(tcs + 0x38, data);
++	wr(tcs + 0x10, 1);                                                      /* WAIT_FOR_DONE */
++	wr(tcs + 0x1c, 1);                                                      /* CMD_ENABLE */
++	sleep_us(100);
++	wr(tcs + 0x14, rd(tcs + 0x14) & ~(1u << 24));
++	wr(tcs + 0x14, rd(tcs + 0x14) | (1u << 16));                            /* active mode */
++	wr(tcs + 0x14, rd(tcs + 0x14) | (1u << 24));                            /* trigger */
++	for (unsigned t = 0; t < 20000 && !done; t++) {
++		done = (rd(rsc_base + RSC_TCS_BASE + 0x04) & (1u << RPMH_TCS)) || (rd(tcs + 0x3c) & (1u << 16));
++		if (!done) {
++			sleep_us(10);
++		}
++	}
++	printf("bt: rpmh: %s (%#x) = %u: %s; command status %#x\n", what, address, data, done ? "DONE" : "NOT SAID DONE", rd(tcs + 0x3c));
++	wr(rsc_base + RSC_TCS_BASE + 0x08, 1u << RPMH_TCS);
++	wr(tcs + 0x14, 0);
++	wr(tcs + 0x1c, 0);
++	sleep_us(100);
++	return done;
++}
++
++/* The device tree's bt_wcn3990 supplies: name in the command database, millivolts, is it an LDO (mode HPM) */
++static const struct bt_supply {
++	const char *name;
++	uint32_t millivolts;
++	bool ldo;
++} bt_supplies[] = {
++	{ "ldoa7", 1800, true },        /* core */
++	{ "smpa3", 1352, false },       /* io */
++	{ "smpa5", 2040, false },       /* xtal */
++	{ "ldoa17", 1304, true },       /* pa */
++	{ "ldoa25", 3312, true },       /* ldo */
++};
++
++static bool
++supplies_on(void)
++{
++	bool ok = true;
++
++	for (unsigned i = 0; i < sizeof(bt_supplies) / sizeof(bt_supplies[0]); i++) {
++		const struct bt_supply *v = &bt_supplies[i];
++		uint32_t address = rpmh_address(v->name);
++
++		if (address == 0) {
++			printf("bt: no \"%s\" in the command database: stopping\n", v->name);
++			return false;
++		}
++		ok = rpmh_write(v->name, address + 0, v->millivolts) && ok;             /* voltage, mV */
++		if (v->ldo) {
++			ok = rpmh_write(v->name, address + 8, 7) && ok;                 /* mode: HPM */
++		}
++		ok = rpmh_write(v->name, address + 4, 1) && ok;                         /* enable */
++		sleep_us(1000);
++	}
++	return ok;
++}
++
++static void
++pin_mux(void)
++{
++	/* the device tree's qupv3_se6_4uart pins: CTS and RX no pull, RTS pull down, TX pull up, function 1 (qup6), 2 mA */
++	wr(pins + 0x1000UL * (PIN_CTS - PIN_CTS), 0x004);
++	wr(pins + 0x1000UL * (PIN_RX - PIN_CTS), 0x004);
++	wr(pins + 0x1000UL * (PIN_RTS - PIN_CTS), 0x005);
++	wr(pins + 0x1000UL * (PIN_TX - PIN_CTS), 0x007);
++	sleep_us(1000);
++	pin_look("UART CTS", PIN_CTS);
++	pin_look("UART RTS", PIN_RTS);
++	pin_look("UART TX", PIN_TX);
++	pin_look("UART RX", PIN_RX);
++}
++
++static uint64_t
++now_us(void)
++{
++	uint64_t t, ns;
++
++	clock_get_uptime(&t);
++	absolutetime_to_nanoseconds(t, &ns);
++	return ns / 1000;
++}
++
++/* An H4 command out, whatever comes back in the next ms milliseconds printed; true if a Command Complete for it with status 0. */
++static bool
++hci_command(vm_offset_t se, uint16_t opcode, const uint8_t *params, uint8_t length, uint32_t ms, uint8_t *reply, uint32_t *reply_length)
++{
++	uint8_t out[16], in[64];
++	uint32_t n;
++	bool ok = false;
++
++	out[0] = 1;
++	out[1] = opcode & 0xff;
++	out[2] = opcode >> 8;
++	out[3] = length;
++	for (uint8_t i = 0; i < length; i++) {
++		out[4 + i] = params[i];
++	}
++	uart_drain(se);
++	if (!uart_tx(se, out, 4u + length)) {
++		return false;
++	}
++	n = uart_rx(se, in, sizeof(in), sizeof(in), ms);
++	dump_bytes("sent", out, 4u + length);
++	dump_bytes("answered", in, n);
++	/* 04 0e len ncmd opcode_lo opcode_hi status ... */
++	if (n >= 7 && in[0] == 4 && in[1] == 0x0e && in[4] == (opcode & 0xff) && in[5] == (opcode >> 8)) {
++		ok = in[6] == 0;
++		if (reply != NULL && reply_length != NULL) {
++			*reply_length = n;
++			memcpy(reply, in, n);
++		}
++	}
++	return ok;
++}
++
++static bool
++chip_step(vm_offset_t se, uint32_t delay_s)
++{
++	uint8_t reply[64] = { 0 }, pulse = 0xfc;
++	uint32_t reply_length = 0;
++	uint64_t t0;
++	static const uint8_t pattern[12] = { 0x01, 0x03, 0x0c, 0x00, 0x55, 0xaa, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc };
++	uint8_t got[16] = { 0 };
++
++	printf("bt: step 4: the chip. Waiting %u s for the Wi-Fi bring-up's RPMh requests to be done\n", delay_s);
++	for (uint32_t i = 0; i < delay_s; i++) {
++		delay_for_interval(1, NSEC_PER_SEC);
++	}
++	printf("bt: the supplies\n");
++	if (!supplies_on()) {
++		printf("bt: a supply request was not done: stopping before the pins and the chip\n");
++		return false;
++	}
++	delay_for_interval(20, NSEC_PER_MSEC);
++
++	if (!engine_clock_source(true)) {
++		printf("bt: the clock source does not take 100 MHz: stopping\n");
++		engine_clock_source(false);
++		return false;
++	}
++	uart_setup(se, 27, 3);
++	uart_rx_start(se);
++	t0 = now_us();
++	(void)uart_tx(se, pattern, sizeof(pattern));
++	printf("bt: loopback of 12 bytes took %llu us (115200 baud: 1042 us; 115740: 1037 us)\n", now_us() - t0);
++	(void)uart_rx(se, got, sizeof(got), sizeof(pattern), 20);
++	printf("bt: loopback %s\n", memcmp(got, pattern, sizeof(pattern)) == 0 ? "SAME" : "DIFFERENT: stopping");
++	uart_stop(se);
++	if (memcmp(got, pattern, sizeof(pattern)) != 0) {
++		return false;
++	}
++
++	printf("bt: the pins to the engine\n");
++	pin_mux();
++	uart_setup(se, 27, 0);                          /* no loopback; the CTS pin ignored (flow control off) */
++	uart_rx_start(se);
++	sleep_us(1000);
++
++	printf("bt: the power-on pulse 0xfc at 115200 baud, flow control off\n");
++	(void)uart_tx(se, &pulse, 1);
++	delay_for_interval(100, NSEC_PER_MSEC);
++	wr(se + UART_TX_TRANS_CFG, 0);                  /* flow control on: the chip's RTS is the engine's CTS */
++	printf("bt: flow control on. RX FIFO status %#x, status %#x\n", rd(se + GENI_RX_FIFO_STATUS), rd(se + GENI_STATUS));
++	pin_look("UART CTS", PIN_CTS);
++	pin_look("UART RTS", PIN_RTS);
++
++	printf("bt: HCI reset\n");
++	if (!hci_command(se, 0x0c03, NULL, 0, 500, NULL, NULL)) {
++		printf("bt: no Command Complete for HCI reset\n");
++		uart_stop(se);
++		return false;
++	}
++	printf("bt: HCI reset: Command Complete, status 0\n");
++	printf("bt: HCI read local version\n");
++	if (hci_command(se, 0x1001, NULL, 0, 500, reply, &reply_length) && reply_length >= 15) {
++		printf("bt: HCI version %u, revision %#x, LMP version %u, manufacturer %u, LMP subversion %#x\n", reply[7],
++		    reply[8] | (reply[9] << 8), reply[10], reply[11] | (reply[12] << 8), reply[13] | (reply[14] << 8));
++	}
++	uart_stop(se);
++	return true;
++}
++
++static void
++bt_thread(void *parameter, __unused wait_result_t result)
++{
++	static const char *const supplies[] = { "ldoa7", "smpa3", "smpa5", "ldoa17", "ldoa25" };
++	static const char *const supply_names[] = { "core 1.8 V", "io 1.352 V", "xtal 1.9-2.04 V", "pa 1.304 V", "ldo 3.0-3.3 V" };
++	uint32_t steps = (uint32_t)(uintptr_t)parameter, votes;
++	bool m_ahb, s_ahb, s6;
++
++	printf("bt: step 1: look (reads only; WCN3990 over serial engine 6)\n");
++	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
++	votes = rd(gcc + GCC_VOTE_APPS);
++	printf("bt: the apps processor's votes (%#x) = %#010x: wrapper-0 master AHB %s, slave AHB %s, engine 6 %s\n", GCC_VOTE_APPS,
++	    votes, (votes & VOTE_WRAP0_M_AHB) ? "voted" : "not voted", (votes & VOTE_WRAP0_S_AHB) ? "voted" : "not voted",
++	    (votes & VOTE_WRAP0_S6) ? "voted" : "not voted");
++	m_ahb = branch_on("QUPV3_WRAP_0_M_AHB", GCC_WRAP0_M_AHB_HALT);
++	s_ahb = branch_on("QUPV3_WRAP_0_S_AHB", GCC_WRAP0_S_AHB_HALT);
++	s6 = branch_on("QUPV3_WRAP0_S6 (SE6)", GCC_WRAP0_S6_HALT);
++	printf("bt: the engine's clock source (RCG at %#x): command %#010x, config %#010x\n", GCC_WRAP0_S6_RCG,
++	    rd(gcc + GCC_WRAP0_S6_RCG), rd(gcc + GCC_WRAP0_S6_RCG + 4));
++
++	pins = ml_io_map(TLMM_PHYS + TLMM_EAST + 0x1000UL * PIN_CTS, 0x4000UL);
++	pin_look("UART CTS", PIN_CTS);
++	pin_look("UART RTS", PIN_RTS);
++	pin_look("UART TX", PIN_TX);
++	pin_look("UART RX", PIN_RX);
++
++	cmd_db = ml_io_map(CMD_DB_PHYS, CMD_DB_SIZE);
++	for (unsigned i = 0; i < sizeof(supplies) / sizeof(supplies[0]); i++) {
++		printf("bt: the command database's address of %s (%s): %#x\n", supplies[i], supply_names[i], rpmh_address(supplies[i]));
++	}
++
++	if (m_ahb && s_ahb && s6) {
++		printf("bt: the AHB clocks and the engine's clock are on: reading the wrapper and the engine\n");
++		printf("bt: QUP wrapper 0 hardware version %#010x\n", rd(ml_io_map(QUP0_PHYS, QUP0_SIZE) + 4));
++		engine_look(ml_io_map(SE6_PHYS, SE6_SIZE));
++	} else {
++		printf("bt: a clock is off: the engine is not touched (an access could hang the bus)\n");
++	}
++	if (steps < 2) {
++		goto out;
++	}
++
++	if (clock_on()) {
++		vm_offset_t se = ml_io_map(SE6_PHYS, SE6_SIZE);
++
++		printf("bt: QUP wrapper 0 hardware version %#010x\n", rd(ml_io_map(QUP0_PHYS, QUP0_SIZE) + 4));
++		engine_look(se);
++		if (steps >= 3) {
++			bool same = uart_loopback(se);
++
++			if (steps >= 4 && same) {
++				uint32_t delay_s = 60;
++
++				PE_parse_boot_argn("bt_delay", &delay_s, sizeof(delay_s));
++				chip_step(se, delay_s);
++			}
++		}
++	}
++out:
++	printf("bt: stopping here (bt=%u)\n", steps);
++	thread_terminate(current_thread());
++}
++
++void
++mi8_bt_init(void)
++{
++	uint32_t steps = 0;
++	thread_t thread;
++
++	if (!PE_parse_boot_argn("bt", &steps, sizeof(steps)) || steps == 0) {
++		return;
++	}
++	if (kernel_thread_start(bt_thread, (void *)(uintptr_t)steps, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
 +}
 diff --git a/bsd/dev/mi8_fts.c b/bsd/dev/mi8_fts.c
 new file mode 100644
@@ -20053,14 +20864,15 @@ index 69391833710f9ee7c1de3e3d283e45d545faac86..2c7ebeaad0832573fdb452eeef84b86e
 +	    (en & 0x80) == 0 && (play & 0x80) == 0 ? " (stopped)" : " (NOT STOPPED)");
  }
 diff --git a/bsd/dev/redwood_input.c b/bsd/dev/redwood_input.c
-index 8076cf00b4acad69bdcca7e4ce93c6a00496e81f..28d9f93eae3355625086b4a8b768d6cfea79d986 100644
+index 8076cf00b4acad69bdcca7e4ce93c6a00496e81f..1228fa5f73b6c09d645d355d0540ca366435ff80 100644
 --- a/bsd/dev/redwood_input.c
 +++ b/bsd/dev/redwood_input.c
-@@ -218,6 +218,9 @@ redwood_input_init(void)
+@@ -218,6 +218,10 @@ redwood_input_init(void)
  	redwood_virtio_input_init();
  	redwood_goodix_init();
  	redwood_buttons_init();
 +	mi8_fts_init();
++	mi8_bt_init();
 +	mi8_adreno_init();
 +	mi8_rproc_init();
  	redwood_battery_init();
@@ -20624,20 +21436,21 @@ index 0000000000000000000000000000000000000000..ab5f8a1131075ce2afd6013fc2518c71
 +bool mi8_lx_irq_lines(uint32_t *first);                                 /* the GIC number of CE0's SPI, when interrupts are wanted */
 +#endif
 diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
-index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..a2a8623cabc49ab8689298bac8f16c1dd83b2aa3 100644
+index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..85cb2115023d02023ad2bbb077a06a93198fa05d 100644
 --- a/bsd/sys/redwood_input.h
 +++ b/bsd/sys/redwood_input.h
-@@ -42,6 +42,9 @@ void redwood_input_init(void);
+@@ -42,6 +42,10 @@ void redwood_input_init(void);
  void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
  void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
  void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
 +void mi8_fts_init(void);                /* boot-arg fts=1 fts_steps=6: the Mi 8 touch screen (ST FTM5), steps 1-5 its probe */
++void mi8_bt_init(void);                /* boot-arg bt=N: the first N steps of the Mi 8 Bluetooth (WCN3990 over serial engine 6) */
 +void mi8_adreno_init(void);             /* boot-arg mi8gpu=N: the first N steps of waking the Mi 8 GPU (Adreno 630) */
 +void mi8_rproc_init(void);              /* boot-arg mi8rp_step=N: the first N steps of the Mi 8 remote processors (SMEM, modem, ...) */
  void redwood_ufs_init(void);           /* ufs=2 to xnuloader: the phone's storage, read only, through the loader (ufs_shared_pa=) */
  void redwood_ufs_report(const char *when); /* where reading the storage has spent its time so far */
  bool redwood_ufs_dev(dev_t dev);           /* one of the storage's devices */
-@@ -122,6 +125,24 @@ void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t
+@@ -122,6 +126,24 @@ void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t
  void redwood_gpu_report(const char *why);
  bool redwood_gpu_recover(void);
  void redwood_gpu_stop(void);

@@ -111,6 +111,10 @@ python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --se
 - 清空存档：在 TWRP 把 darwin 块 2097152..3145727 清零（`dd if=/dev/zero of=/dev/block/<darwin 节点> bs=4096 seek=2097152 count=1048576`），先核对节点是 darwin；系统卷不受影响。
 - 保存期间系统仍在运行，数据库可能存到一半的状态；周期保存、异常退出和存档增长尚未测试。
 
+## 蓝牙芯片诊断（实验）
+
+`bt=N` 让内核运行蓝牙诊断到第 N 档，默认关闭，不写存储：`1` 只读摸底，`2` 再打开串口引擎时钟，`3` 引擎内部回环自检，`4` 再给芯片上电、发 HCI Reset 与读版本。第 4 档会通过 RPMh 请求五路供电并切换四个引脚，先等待 `bt_delay` 秒（默认 60）。结果从启动日志里以 `bt:` 开头的行读取；建议同时加 `loader_return_after=240` 之类的限时，结束后完整重启。这只是硬件链路诊断，iOS 里的蓝牙功能尚不可用，见[验证记录](../validation/VALIDATION.md#蓝牙芯片的-uart-链路2026-11-10)。
+
 ## 降低渲染分辨率（可选，不是默认值）
 
 在 daily 参数后显式追加 `fbscale=2 fb_dpu=1`，iOS 按 750×1624（iPhone X 的点尺寸、每点 2 像素）渲染，像素约为 1125×2436 的 44%：

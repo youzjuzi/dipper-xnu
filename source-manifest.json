@@ -5,7 +5,7 @@
     "files": [
       {
         "path": "bsd/conf/files",
-        "sha256": "21ee8dc0f57ecebacc158585eecd21db4dd3bacff2557fe640532a92186f02fa",
+        "sha256": "c51b064c3ec77d90e26ab5df96414b91e292073de09f57fbdbbeb4ba23bbf361",
         "mode": "0o664"
       },
       {
@@ -16,6 +16,11 @@
       {
         "path": "bsd/dev/mi8_adreno.c",
         "sha256": "e38cad7ac3ad71d97cd686414044862e13a3023bf9f24d26b25fad0d727b6d02",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_bt.c",
+        "sha256": "fa2fdedc9f1b172e451278ddc69e60d095230e1f5d5a05809bf1a43299c0a31f",
         "mode": "0o664"
       },
       {
@@ -110,7 +115,7 @@
       },
       {
         "path": "bsd/dev/redwood_input.c",
-        "sha256": "41092996d6ec677b4e22cb0b20100bf21a7d60474af8da856ed3d8ea080d1559",
+        "sha256": "caf4068ad0c023257ac26e0768affd0a9de74f8ff92009a35fd816a8ce872c93",
         "mode": "0o664"
       },
       {
@@ -145,7 +150,7 @@
       },
       {
         "path": "bsd/sys/redwood_input.h",
-        "sha256": "5d3e7a8bd98718e0c5da95a34b25c99068d6b9c2bd8a973067d803fb023bb27c",
+        "sha256": "49f16603f0b1ee9cd256c901d464d097395ac0c9a9733aa15edddc8b7cfaf5ee",
         "mode": "0o664"
       },
       {

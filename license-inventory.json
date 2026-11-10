@@ -8,7 +8,7 @@
       "upstream_file_exists": true,
       "license": "LicenseRef-CMU",
       "basis": "Original CMU header retained upstream; see pinned XNU file",
-      "sha256": "21ee8dc0f57ecebacc158585eecd21db4dd3bacff2557fe640532a92186f02fa"
+      "sha256": "c51b064c3ec77d90e26ab5df96414b91e292073de09f57fbdbbeb4ba23bbf361"
     },
     {
       "component": "xnu-mi8",
@@ -33,6 +33,14 @@
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
       "sha256": "e0592a354c5c0113a0edb71f0215663a0584a98d643451c10d8607a9ab2f1875"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/dev/mi8_bt.c",
+      "upstream_file_exists": false,
+      "license": "APSL-2.0",
+      "basis": "New driver for the WCN3990 Bluetooth UART, modelled on mi8_fts.c and mi8_rproc.c (same RPMh/command-database/clock structure); register offsets are hardware facts taken from Linux headers, no GPL code is copied; maintainer to confirm the file's licence",
+      "sha256": "fa2fdedc9f1b172e451278ddc69e60d095230e1f5d5a05809bf1a43299c0a31f"
     },
     {
       "component": "xnu-mi8",
@@ -168,7 +176,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "41092996d6ec677b4e22cb0b20100bf21a7d60474af8da856ed3d8ea080d1559"
+      "sha256": "caf4068ad0c023257ac26e0768affd0a9de74f8ff92009a35fd816a8ce872c93"
     },
     {
       "component": "xnu-mi8",
@@ -216,7 +224,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "5d3e7a8bd98718e0c5da95a34b25c99068d6b9c2bd8a973067d803fb023bb27c"
+      "sha256": "49f16603f0b1ee9cd256c901d464d097395ac0c9a9733aa15edddc8b7cfaf5ee"
     },
     {
       "component": "xnu-mi8",
