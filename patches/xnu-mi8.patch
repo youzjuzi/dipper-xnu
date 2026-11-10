@@ -5565,15 +5565,15 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_bt.c b/bsd/dev/mi8_bt.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e926446b383f03e060ce729b8ccf1d5e81688dbd
+index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4fc8859e1
 --- /dev/null
 +++ b/bsd/dev/mi8_bt.c
-@@ -0,0 +1,1213 @@
+@@ -0,0 +1,1294 @@
 +/*
 + * The Bluetooth of the Xiaomi Mi 8 (dipper, SDM845): a Qualcomm WCN3990 -- the chip whose Wi-Fi half
 + * redwood_wifi.c / mi8_rproc.c already run -- spoken to over a UART: serial engine 6 of the first QUP
 + * wrapper (the device tree's hsuart0, qup_uart@898000), pins 45 CTS, 46 RTS, 47 TX, 48 RX, function
-+ * qup6. Only with boot-arg bt=1; bt=N stops after N steps.
++ * qup6. Only with boot-arg bt=1; bt=N stops after N steps (bt=6 is step 5 at 3.2 Mbaud).
 + *
 + * How Linux (hci_qca.c, btqca.c) brings this chip up, which is what the later steps follow: the
 + * supplies on; at 115200 baud with the flow control off, ONE byte, 0xFC, the "power on pulse" (an
@@ -5619,13 +5619,21 @@ index 0000000000000000000000000000000000000000..e926446b383f03e060ce729b8ccf1d5e
 + *      chip a 0xfd and the wait for 0xfc; a 0xfd from the chip is answered with 0xfc; the host never
 + *      tells the chip it may sleep.
 + *
++ *   6  step 5 with the baud rate raised to 3.2 M first (Linux's qca_set_speed for this chip): after the
++ *      SoC version check the vendor command 0xFC48 with the code 0x11 at 115200; 10 ms; then the host:
++ *      the engine stopped, its clock source GPLL0's even output (300 MHz) x M/N 128/375 = 102.4 MHz
++ *      (32 x 3.2 MHz; Linux's table entry for the serial engines), the serial divider 1, flow control
++ *      on. The ROM answers HCI reset at 3.2 M, the whole download runs at that rate, and the NVM's UART
++ *      baud tag is left as it is (0x11), so that the chip stays at 3.2 M; the download takes about 1 s
++ *      instead of 21 s.
++ *
 + * Addresses: the phone's device tree (qup_uart@898000, pinctrl@3400000, gcc@100000), Linux
 + * drivers/clk/qcom/gcc-sdm845.c, drivers/pinctrl/qcom/pinctrl-sdm845.c,
 + * include/linux/soc/qcom/geni-se.h and drivers/tty/serial/qcom_geni_serial.c.
 + *
 + * Status: steps 1 and 2 run on the phone (the engine runs the UART firmware, FIFO interface on); step 3
-+
-+ * run (loopback SAME); step 4 run (the chip answers HCI reset and the version); step 5 compiled, not yet run.
++ * run (loopback SAME); step 4 run (the chip answers HCI reset and the version); steps 5 and 6 run (the
++ * firmware loads, HCI version 8 -> 9, patch version 1 -> 2).
 + */
 +#include <kern/clock.h>
 +#include <kern/kalloc.h>
@@ -5910,6 +5918,30 @@ index 0000000000000000000000000000000000000000..e926446b383f03e060ce729b8ccf1d5e
 +	}
 +	printf("bt: the engine's clock source (%s): command %#010x, config %#010x\n", pll ? "GPLL0 even / 3, 100 MHz" : "crystal",
 +	    rd(gcc + GCC_WRAP0_S6_RCG), rd(gcc + GCC_WRAP0_S6_RCG + 4));
++	return !(rd(gcc + GCC_WRAP0_S6_RCG) & 1) && !(rd(gcc + GCC_WRAP0_S6_HALT) & CBCR_OFF);
++}
++
++/*
++ * 3.2 Mbaud needs 32 x 3.2 MHz = 102.4 MHz: GPLL0's even output (300 MHz) times M/N = 128/375 (Linux's table
++ * entry for the serial engines). The RCG's registers: M at +8, N (as ~(N - M)) at +0xc, D (as ~N) at +0x10; the
++ * mode field (config bits 13:12) is 2, dual edge, once M/N is in use.
++ */
++static bool
++engine_clock_102m4(void)
++{
++	uint32_t cfg = rd(gcc + GCC_WRAP0_S6_RCG + 4);
++
++	wr(gcc + GCC_WRAP0_S6_RCG + 8, 128);
++	wr(gcc + GCC_WRAP0_S6_RCG + 0xc, ~(375u - 128u) & 0xffffu);
++	wr(gcc + GCC_WRAP0_S6_RCG + 0x10, ~375u & 0xffffu);
++	wr(gcc + GCC_WRAP0_S6_RCG + 4, (cfg & ~0x371fu) | (2u << 12) | (6u << 8) | 0u);
++	wr(gcc + GCC_WRAP0_S6_RCG, rd(gcc + GCC_WRAP0_S6_RCG) | 1);
++	for (int i = 0; i < 2000 && (rd(gcc + GCC_WRAP0_S6_RCG) & 1); i++) {
++		sleep_us(10);
++	}
++	printf("bt: the engine's clock source (GPLL0 even x 128/375, 102.4 MHz): command %#010x, config %#010x, M %u, N %#x, D %#x\n",
++	    rd(gcc + GCC_WRAP0_S6_RCG), rd(gcc + GCC_WRAP0_S6_RCG + 4), rd(gcc + GCC_WRAP0_S6_RCG + 8) & 0xffff,
++	    rd(gcc + GCC_WRAP0_S6_RCG + 0xc) & 0xffff, rd(gcc + GCC_WRAP0_S6_RCG + 0x10) & 0xffff);
 +	return !(rd(gcc + GCC_WRAP0_S6_RCG) & 1) && !(rd(gcc + GCC_WRAP0_S6_HALT) & CBCR_OFF);
 +}
 +
@@ -6266,7 +6298,7 @@ index 0000000000000000000000000000000000000000..e926446b383f03e060ce729b8ccf1d5e
 +	return ok;
 +}
 +
-+static bool firmware_step(vm_offset_t se);
++static bool firmware_step(vm_offset_t se, uint32_t steps);
 +
 +static bool
 +chip_step(vm_offset_t se, uint32_t delay_s, uint32_t steps)
@@ -6332,7 +6364,7 @@ index 0000000000000000000000000000000000000000..e926446b383f03e060ce729b8ccf1d5e
 +		    reply[8] | (reply[9] << 8), reply[10], reply[11] | (reply[12] << 8), reply[13] | (reply[14] << 8));
 +	}
 +	if (steps >= 5) {
-+		(void)firmware_step(se);
++		(void)firmware_step(se, steps);
 +	}
 +	uart_stop(se);
 +	return true;
@@ -6539,6 +6571,43 @@ index 0000000000000000000000000000000000000000..e926446b383f03e060ce729b8ccf1d5e
 +	return false;
 +}
 +
++#define QCA_SET_BAUD            0xfc48
++#define QCA_BAUD_3M2            0x11
++
++/*
++ * Raise the baud rate to 3.2 M (Linux's qca_set_speed for the WCN3990): the command at the old rate, 10 ms for
++ * the chip, then the host: engine stopped, the clock 102.4 MHz, serial divider 1, flow control on, receiver
++ * started. The chip's vendor event for the command comes at the new rate and is dropped.
++ */
++static bool
++baud_raise(vm_offset_t se)
++{
++	uint8_t code = QCA_BAUD_3M2, payload[255];
++	uint32_t length = 0;
++
++	printf("bt: raising the baud rate to 3.2 M\n");
++	if (!hci_send(se, QCA_SET_BAUD, &code, 1)) {
++		return false;
++	}
++	delay_for_interval(10, NSEC_PER_MSEC);
++	uart_stop(se);
++	if (!engine_clock_102m4()) {
++		printf("bt: the clock source does not take 102.4 MHz: the chip is at 3.2 M, the host is not\n");
++		return false;
++	}
++	uart_setup(se, 1, 0);
++	wr(se + UART_TX_TRANS_CFG, 0);
++	uart_drain(se);
++	rxq_len = 0;
++	uart_rx_start(se);
++	if (wait_event(se, 0xff, payload, &length, 300)) {
++		dump_bytes("the chip's vendor event at 3.2 M", payload, length);
++	} else {
++		printf("bt: no vendor event at 3.2 M within 300 ms (not required)\n");
++	}
++	return true;
++}
++
 +struct soc_version {
 +	uint32_t product_id;
 +	uint16_t patch_ver, rom_ver;
@@ -6613,7 +6682,7 @@ index 0000000000000000000000000000000000000000..e926446b383f03e060ce729b8ccf1d5e
 +}
 +
 +static bool
-+firmware_step(vm_offset_t se)
++firmware_step(vm_offset_t se, uint32_t steps)
 +{
 +	uint64_t patch_size = 0, nvm_size = 0;
 +	const uint8_t *patch = redwood_image_file("fw", "crbtfw21.tlv", &patch_size, NULL);
@@ -6643,6 +6712,14 @@ index 0000000000000000000000000000000000000000..e926446b383f03e060ce729b8ccf1d5e
 +		printf("bt: the rampatch's TLV type is %u, not 1: not downloading\n", hdr_type);
 +		return false;
 +	}
++	if (steps == 6) {
++		/* the ROM's own command: the whole download at 3.2 M */
++		if (!baud_raise(se) || !hci_cc(se, 0x0c03, NULL, 0, NULL, NULL)) {
++			printf("bt: no answer from the ROM at 3.2 M: stopping\n");
++			return false;
++		}
++		printf("bt: the ROM answers HCI reset at 3.2 M\n");
++	}
 +	if (!download(se, "crbtfw21.tlv", patch, (uint32_t)patch_size, mode == 1 || mode == 3)) {
 +		return false;
 +	}
@@ -6670,9 +6747,13 @@ index 0000000000000000000000000000000000000000..e926446b383f03e060ce729b8ccf1d5e
 +					break;
 +				}
 +				if (tag_id == 17 && tag_len >= 3) {
-+					printf("bt: NVM tag 17 (HCI transport): %02x %02x %02x -> baud byte 0 (115200)\n", copy[off + idx + 12],
++					printf("bt: NVM tag 17 (HCI transport): %02x %02x %02x\n", copy[off + idx + 12],
 +					    copy[off + idx + 13], copy[off + idx + 14]);
-+					copy[off + idx + 14] = 0;
++					if (steps != 6) {
++						copy[off + idx + 14] = 0;
++					} else {
++						printf("bt: (bt=6: the tag is left as it is: the chip stays at 3.2 M)\n");
++					}
 +				}
 +				idx += 12 + tag_len;
 +			}

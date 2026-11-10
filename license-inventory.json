@@ -40,7 +40,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "New driver for the WCN3990 Bluetooth UART, modelled on mi8_fts.c and mi8_rproc.c (same RPMh/command-database/clock structure); register offsets are hardware facts taken from Linux headers, no GPL code is copied; maintainer to confirm the file's licence",
-      "sha256": "ef6f800b598f17ec70992e9abc7c4c70f2905599c053bba55462169faad3902d"
+      "sha256": "88f285e04d0255be9549d1a8d0237026bed76c760f588e4f9a20fcdab82cdfe1"
     },
     {
       "component": "xnu-mi8",
