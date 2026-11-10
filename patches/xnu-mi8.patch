@@ -5565,10 +5565,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_bt.c b/bsd/dev/mi8_bt.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..19fbe25d78c96599cc809c466f1186007a57bb25
+index 0000000000000000000000000000000000000000..e926446b383f03e060ce729b8ccf1d5e81688dbd
 --- /dev/null
 +++ b/bsd/dev/mi8_bt.c
-@@ -0,0 +1,804 @@
+@@ -0,0 +1,1213 @@
 +/*
 + * The Bluetooth of the Xiaomi Mi 8 (dipper, SDM845): a Qualcomm WCN3990 -- the chip whose Wi-Fi half
 + * redwood_wifi.c / mi8_rproc.c already run -- spoken to over a UART: serial engine 6 of the first QUP
@@ -5605,15 +5605,30 @@ index 0000000000000000000000000000000000000000..19fbe25d78c96599cc809c466f118600
 + *      read local version, with every byte the chip answers printed. The chip's firmware is NOT
 + *      downloaded and the baud rate is not raised: that is the next step.
 + *
++ *   5  the firmware, at 115200 baud, after bt_delay and steps 3 and 4: the chip's SoC version (vendor
++ *      command 0xFC00, sub-command 0x19), checked against the ROM version the firmware files are for
++ *      (0x21); the rampatch crbtfw21.tlv and the NVM crnv21.bin, found in fw/ of the RAM disk as
++ *      redwood_image_file() finds the GPU's, sent as vendor commands 0xFC00 / 0x1E in segments of 243
++ *      bytes as Linux's btqca.c does (the rampatch's own header says which segments the chip
++ *      acknowledges; every NVM segment is acknowledged); the NVM's UART baud rate tag is set to
++ *      115200 and nothing else of it is changed -- Linux also turns the controller's in-band sleep
++ *      on, which needs a host side this kernel has not got; then HCI reset and the version again.
++ *      After the NVM the controller runs Qualcomm's in-band sleep protocol (the NVM's own HCI tag has
++ *      it on; the device tree's qcom,wakeup-byte is 0xfd): a lone 0xfd is "wake up", 0xfc the answer,
++ *      0xfe "I am going to sleep". The host side here is the least that works: before a packet to the
++ *      chip a 0xfd and the wait for 0xfc; a 0xfd from the chip is answered with 0xfc; the host never
++ *      tells the chip it may sleep.
++ *
 + * Addresses: the phone's device tree (qup_uart@898000, pinctrl@3400000, gcc@100000), Linux
 + * drivers/clk/qcom/gcc-sdm845.c, drivers/pinctrl/qcom/pinctrl-sdm845.c,
 + * include/linux/soc/qcom/geni-se.h and drivers/tty/serial/qcom_geni_serial.c.
 + *
 + * Status: steps 1 and 2 run on the phone (the engine runs the UART firmware, FIFO interface on); step 3
 +
-+ * run (loopback SAME); step 4 compiled, not yet run.
++ * run (loopback SAME); step 4 run (the chip answers HCI reset and the version); step 5 compiled, not yet run.
 + */
 +#include <kern/clock.h>
++#include <kern/kalloc.h>
 +#include <kern/sched_prim.h>
 +#include <kern/thread.h>
 +#include <libkern/libkern.h>
@@ -5627,6 +5642,7 @@ index 0000000000000000000000000000000000000000..19fbe25d78c96599cc809c466f118600
 +extern kern_return_t thread_terminate(thread_t thread);
 +extern void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
 +extern void loader_log_putc(char c);
++extern const uint8_t *redwood_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
 +
 +static int say(const char *format, ...) __printflike(1, 2);
 +
@@ -5981,22 +5997,42 @@ index 0000000000000000000000000000000000000000..19fbe25d78c96599cc809c466f118600
 +	}
 +}
 +
-+/* Send n bytes (the transmitter's command, then the FIFO words, four bytes to a word, first byte lowest). */
++/*
++ * Send n bytes: the transmitter's command, then the FIFO words (four bytes to a word, first byte lowest),
++ * fed as the FIFO drains -- it holds 32 words, 128 bytes, and a firmware segment is 249.
++ */
 +static bool
 +uart_tx(vm_offset_t se, const uint8_t *data, uint32_t n)
 +{
++	uint32_t sent = 0;
++
 +	wr(se + GENI_M_IRQ_CLEAR, 0xffffffffu);
 +	wr(se + UART_TX_TRANS_LEN, n);
 +	wr(se + GENI_M_CMD0, UART_START_TX << OPCODE_SHFT);
-+	for (uint32_t i = 0; i < n; i += 4) {
-+		uint32_t word = 0;
++	for (uint32_t t = 0; sent < n; t++) {
++		uint32_t used = rd(se + GENI_TX_FIFO_STATUS) & 0x0fffffffu, room = used >= 32 ? 0 : (32 - used) * 4, chunk;
 +
-+		for (uint32_t j = 0; j < 4 && i + j < n; j++) {
-+			word |= (uint32_t)data[i + j] << (8 * j);
++		if (room == 0) {
++			if (t > 200000) {
++				printf("bt: the transmitter stalls with %u of %u bytes sent (TX FIFO status %#x, M status %#x)\n", sent, n,
++				    rd(se + GENI_TX_FIFO_STATUS), rd(se + GENI_M_IRQ_STATUS));
++				return false;
++			}
++			sleep_us(20);
++			continue;
 +		}
-+		wr(se + GENI_TX_FIFOn, word);
++		chunk = n - sent < room ? n - sent : room;
++		for (uint32_t i = 0; i < chunk; i += 4) {
++			uint32_t word = 0;
++
++			for (uint32_t j = 0; j < 4 && sent + i + j < n && i + j < chunk; j++) {
++				word |= (uint32_t)data[sent + i + j] << (8 * j);
++			}
++			wr(se + GENI_TX_FIFOn, word);
++		}
++		sent += chunk;
 +	}
-+	for (int t = 0; t < 2000; t++) {
++	for (int t = 0; t < 40000; t++) {
 +		if (rd(se + GENI_M_IRQ_STATUS) & M_CMD_DONE) {
 +			wr(se + GENI_M_IRQ_CLEAR, M_CMD_DONE);
 +			return true;
@@ -6230,8 +6266,10 @@ index 0000000000000000000000000000000000000000..19fbe25d78c96599cc809c466f118600
 +	return ok;
 +}
 +
++static bool firmware_step(vm_offset_t se);
++
 +static bool
-+chip_step(vm_offset_t se, uint32_t delay_s)
++chip_step(vm_offset_t se, uint32_t delay_s, uint32_t steps)
 +{
 +	uint8_t reply[64] = { 0 }, pulse = 0xfc;
 +	uint32_t reply_length = 0;
@@ -6293,7 +6331,378 @@ index 0000000000000000000000000000000000000000..19fbe25d78c96599cc809c466f118600
 +		printf("bt: HCI version %u, revision %#x, LMP version %u, manufacturer %u, LMP subversion %#x\n", reply[7],
 +		    reply[8] | (reply[9] << 8), reply[10], reply[11] | (reply[12] << 8), reply[13] | (reply[14] << 8));
 +	}
++	if (steps >= 5) {
++		(void)firmware_step(se);
++	}
 +	uart_stop(se);
++	return true;
++}
++
++/* ---- step 5: the firmware ------------------------------------------------------------------------ */
++
++/* A queue of what the receiver has delivered, so that no byte is lost between two reads of a packet. */
++static uint8_t rxq[2048];
++static uint32_t rxq_len;
++
++static void
++rx_pump(vm_offset_t se)
++{
++	for (;;) {
++		uint32_t status = rd(se + GENI_RX_FIFO_STATUS), words = status & RX_FIFO_WC_MSK;
++
++		if (words == 0) {
++			return;
++		}
++		while (words > 0) {
++			uint32_t word = rd(se + GENI_RX_FIFOn), bytes = 4;
++
++			if (words == 1 && (status & RX_LAST_BIT)) {
++				bytes = (status >> RX_LAST_VALID_SHFT) & 7;
++				if (bytes == 0) {
++					bytes = 4;
++				}
++			}
++			for (uint32_t j = 0; j < bytes; j++) {
++				if (rxq_len < sizeof(rxq)) {
++					rxq[rxq_len++] = (word >> (8 * j)) & 0xff;
++				}
++			}
++			words--;
++		}
++	}
++}
++
++static bool
++rx_need(vm_offset_t se, uint32_t n, uint32_t timeout_ms)
++{
++	for (uint32_t t = 0; t < timeout_ms * 20; t++) {
++		rx_pump(se);
++		if (rxq_len >= n) {
++			return true;
++		}
++		sleep_us(50);
++	}
++	return rxq_len >= n;
++}
++
++static void
++rx_take(uint32_t n)
++{
++	memmove(rxq, rxq + n, rxq_len - n);
++	rxq_len -= n;
++}
++
++
++/* In-band sleep (qca_ibs in Linux's hci_qca.c): these bytes are never the first of an H4 packet (1 to 5). */
++#define IBS_WAKE_ACK            0xfc
++#define IBS_WAKE_IND            0xfd
++#define IBS_SLEEP_IND           0xfe
++
++static bool ibs_active;
++
++/* Take the in-band sleep bytes off the head of the queue; the first wake request of a run is answered. */
++static void
++ibs_eat(vm_offset_t se)
++{
++	bool answered = false;
++
++	while (rxq_len > 0 && rxq[0] >= IBS_WAKE_ACK) {
++		uint8_t b = rxq[0], ack = IBS_WAKE_ACK;
++
++		rx_take(1);
++		if (b == IBS_WAKE_IND && !answered) {
++			answered = true;
++			(void)uart_tx(se, &ack, 1);
++		}
++	}
++}
++
++/* Before a packet to the chip: wake it and wait for the answer (not needed, and not done, before the firmware). */
++static void
++ibs_wake(vm_offset_t se)
++{
++	static uint8_t wake = IBS_WAKE_IND;
++
++	if (!ibs_active) {
++		return;
++	}
++	(void)uart_tx(se, &wake, 1);
++	for (uint32_t t = 0; t < 300 * 20; t++) {
++		rx_pump(se);
++		if (rxq_len > 0 && rxq[0] == IBS_WAKE_ACK) {
++			rx_take(1);
++			dump_bytes("wake acknowledged; the queue now", rxq, rxq_len);
++			return;
++		}
++		ibs_eat(se);
++		if (rxq_len > 0 && rxq[0] < IBS_WAKE_ACK) {
++			return;         /* a packet is arriving: the chip is awake */
++		}
++		sleep_us(50);
++	}
++	printf("bt: no wake acknowledgement within 300 ms: sending anyway\n");
++}
++
++/* The next H4 event: its code, payload and length; false on a timeout or a packet that is not an event. */
++static bool
++hci_event(vm_offset_t se, uint8_t *code, uint8_t *payload, uint32_t *length, uint32_t timeout_ms)
++{
++	if (!rx_need(se, 1, timeout_ms)) {
++		return false;
++	}
++	ibs_eat(se);
++	if (!rx_need(se, 3, timeout_ms)) {
++		return false;
++	}
++	if (rxq[0] != 4) {
++		printf("bt: a byte %#04x where an event should begin: dropped\n", rxq[0]);
++		rx_take(1);
++		return false;
++	}
++	if (!rx_need(se, 3u + rxq[2], timeout_ms)) {
++		return false;
++	}
++	*code = rxq[1];
++	*length = rxq[2];
++	memcpy(payload, rxq + 3, rxq[2]);
++	if (ibs_active) {
++		dump_bytes("event, raw", rxq, 3u + rxq[2]);
++	}
++	rx_take(3u + rxq[2]);
++	return true;
++}
++
++#define QCA_OPCODE              0xfc00          /* the vendor command that carries the EDL sub-commands */
++#define EDL_PATCH_VER_REQ       0x19
++#define EDL_PATCH_TLV_REQ       0x1e
++#define SEGMENT                 243u
++
++/* A command out (no waiting). */
++static bool
++hci_send(vm_offset_t se, uint16_t opcode, const uint8_t *params, uint32_t length)
++{
++	uint8_t out[4 + 255];
++
++	out[0] = 1;
++	out[1] = opcode & 0xff;
++	out[2] = opcode >> 8;
++	out[3] = (uint8_t)length;
++	memcpy(out + 4, params, length);
++	ibs_wake(se);
++	return uart_tx(se, out, 4 + length);
++}
++
++/* Wait for an event with this code (Command Complete or Status events in between are shown and skipped). */
++static bool
++wait_event(vm_offset_t se, uint8_t want, uint8_t *payload, uint32_t *length, uint32_t timeout_ms)
++{
++	uint8_t code;
++
++	for (int i = 0; i < 8; i++) {
++		if (!hci_event(se, &code, payload, length, timeout_ms)) {
++			return false;
++		}
++		if (code == want) {
++			return true;
++		}
++		dump_bytes("skipped event payload", payload, *length);
++		printf("bt: (event code %#04x)\n", code);
++	}
++	return false;
++}
++
++
++/* A command and its Command Complete (event 0x0e): status 0, the payload after the opcode copied out. */
++static bool
++hci_cc(vm_offset_t se, uint16_t opcode, const uint8_t *params, uint32_t length, uint8_t *reply, uint32_t *reply_length)
++{
++	uint8_t payload[255], code;
++	uint32_t n = 0;
++
++	if (!hci_send(se, opcode, params, length)) {
++		return false;
++	}
++	for (int i = 0; i < 8; i++) {
++		if (!hci_event(se, &code, payload, &n, 1000)) {
++			printf("bt: no Command Complete for opcode %#06x\n", opcode);
++			return false;
++		}
++		if (code == 0x0e && n >= 4 && payload[1] == (opcode & 0xff) && payload[2] == (opcode >> 8)) {
++			if (reply != NULL && reply_length != NULL) {
++				memcpy(reply, payload + 3, n - 3);
++				*reply_length = n - 3;
++			}
++			return payload[3] == 0;
++		}
++		printf("bt: (an event, code %#04x, that is not the answer to opcode %#06x: skipped)\n", code, opcode);
++	}
++	return false;
++}
++
++struct soc_version {
++	uint32_t product_id;
++	uint16_t patch_ver, rom_ver;
++	uint32_t soc_id;
++};
++
++static bool
++read_soc_version(vm_offset_t se, struct soc_version *v, uint32_t *rom_byte)
++{
++	uint8_t cmd = EDL_PATCH_VER_REQ, payload[255];
++	uint32_t length = 0, soc_ver;
++
++	uart_drain(se);
++	rxq_len = 0;
++	if (!hci_send(se, QCA_OPCODE, &cmd, 1) || !wait_event(se, 0xff, payload, &length, 1000)) {
++		printf("bt: no vendor event for the SoC version request\n");
++		return false;
++	}
++	dump_bytes("SoC version event payload", payload, length);
++	if (length != 2 + 12 || payload[0] != 0 || payload[1] != 0x02) {
++		printf("bt: the SoC version event is not what Linux expects (length %u, %02x %02x)\n", length, payload[0], payload[1]);
++		return false;
++	}
++	memcpy(v, payload + 2, sizeof(*v));
++	soc_ver = ((uint32_t)v->soc_id << 16) | v->rom_ver;
++	*rom_byte = ((soc_ver & 0x00000f00) >> 4) | (soc_ver & 0x0000000f);
++	printf("bt: product id %#x, SoC id %#x, ROM version %#x, patch version %#x; the firmware files for ROM %#04x\n", v->product_id,
++	    v->soc_id, v->rom_ver, v->patch_ver, *rom_byte);
++	return true;
++}
++
++/* One TLV file in 243 byte segments; skip: segments but the last are not acknowledged. */
++static bool
++download(vm_offset_t se, const char *name, const uint8_t *data, uint32_t size, bool skip)
++{
++	uint8_t cmd[2 + SEGMENT], payload[255];
++	uint32_t length, remain = size, segments = 0, sent = 0;
++	uint64_t t0 = now_us();
++
++	printf("bt: downloading %s: %u bytes, %s\n", name, size, skip ? "only the last segment is acknowledged" : "every segment is acknowledged");
++	while (remain > 0) {
++		uint32_t seg = remain < SEGMENT ? remain : SEGMENT;
++		bool last = remain == seg;
++
++		cmd[0] = EDL_PATCH_TLV_REQ;
++		cmd[1] = (uint8_t)seg;
++		memcpy(cmd + 2, data + sent, seg);
++		if (!hci_send(se, QCA_OPCODE, cmd, 2 + seg)) {
++			printf("bt: segment %u could not be sent\n", segments);
++			return false;
++		}
++		if (!skip || last) {
++			if (!wait_event(se, 0xff, payload, &length, 2000)) {
++				printf("bt: no vendor event after segment %u (%u of %u bytes)\n", segments, sent + seg, size);
++				return false;
++			}
++			if (length != 3 || payload[0] != 0 || payload[1] != 0x04 || payload[2] != 0) {
++				dump_bytes("segment answer", payload, length);
++				printf("bt: segment %u was refused\n", segments);
++				return false;
++			}
++		}
++		sent += seg;
++		remain -= seg;
++		segments++;
++		if (segments % 100 == 0) {
++			printf("bt: %s: %u segments, %u of %u bytes, %llu ms\n", name, segments, sent, size, (now_us() - t0) / 1000);
++		}
++	}
++	printf("bt: %s done: %u segments in %llu ms\n", name, segments, (now_us() - t0) / 1000);
++	return true;
++}
++
++static bool
++firmware_step(vm_offset_t se)
++{
++	uint64_t patch_size = 0, nvm_size = 0;
++	const uint8_t *patch = redwood_image_file("fw", "crbtfw21.tlv", &patch_size, NULL);
++	const uint8_t *nvm = redwood_image_file("fw", "crnv21.bin", &nvm_size, NULL);
++	struct soc_version ver;
++	uint32_t rom_byte = 0, hdr_type, mode;
++	uint8_t *copy;
++	bool ok;
++
++	if (patch == NULL || nvm == NULL || patch_size < 40 || nvm_size < 16) {
++		printf("bt: the firmware is not in fw/ of the RAM disk (crbtfw21.tlv %s, crnv21.bin %s): not downloading\n",
++		    patch ? "found" : "missing", nvm ? "found" : "missing");
++		return false;
++	}
++	printf("bt: step 5: the firmware. crbtfw21.tlv %llu bytes, crnv21.bin %llu bytes\n", patch_size, nvm_size);
++	if (!read_soc_version(se, &ver, &rom_byte)) {
++		return false;
++	}
++	if (rom_byte != 0x21) {
++		printf("bt: the chip wants the files for ROM %#04x, not 0x21: not downloading\n", rom_byte);
++		return false;
++	}
++	/* the rampatch's header: type 1, and at offset 14 the download mode (Linux: 1 and 3 skip the acknowledgements) */
++	hdr_type = patch[0];
++	mode = patch[14];
++	if (hdr_type != 1) {
++		printf("bt: the rampatch's TLV type is %u, not 1: not downloading\n", hdr_type);
++		return false;
++	}
++	if (!download(se, "crbtfw21.tlv", patch, (uint32_t)patch_size, mode == 1 || mode == 3)) {
++		return false;
++	}
++	delay_for_interval(10, NSEC_PER_MSEC);
++
++	/* the NVM, in a copy: only the UART baud rate tag is set (Linux: data[2] of tag 17 for this chip) */
++	copy = kalloc_data((vm_size_t)nvm_size, Z_WAITOK);
++	if (copy == NULL) {
++		return false;
++	}
++	memcpy(copy, nvm, nvm_size);
++	{
++		uint32_t type_len = copy[0] | (copy[1] << 8) | (copy[2] << 16) | ((uint32_t)copy[3] << 24), off = 4, length = type_len >> 8, idx = 0;
++
++		if ((type_len & 0xff) == 4) {
++			type_len = copy[4] | (copy[5] << 8) | (copy[6] << 16) | ((uint32_t)copy[7] << 24);
++			off = 8;
++			length = type_len >> 8;
++		}
++		if ((type_len & 0xff) == 2) {
++			while (idx + 12 <= length && off + idx + 12 <= nvm_size) {
++				uint32_t tag_id = copy[off + idx] | (copy[off + idx + 1] << 8), tag_len = copy[off + idx + 2] | (copy[off + idx + 3] << 8);
++
++				if (off + idx + 12 + tag_len > nvm_size) {
++					break;
++				}
++				if (tag_id == 17 && tag_len >= 3) {
++					printf("bt: NVM tag 17 (HCI transport): %02x %02x %02x -> baud byte 0 (115200)\n", copy[off + idx + 12],
++					    copy[off + idx + 13], copy[off + idx + 14]);
++					copy[off + idx + 14] = 0;
++				}
++				idx += 12 + tag_len;
++			}
++		}
++	}
++	ok = download(se, "crnv21.bin", copy, (uint32_t)nvm_size, false);
++	kfree_data(copy, (vm_size_t)nvm_size);
++	if (!ok) {
++		return false;
++	}
++	delay_for_interval(100, NSEC_PER_MSEC);
++
++	printf("bt: HCI reset after the download (in-band sleep handshake from here on)\n");
++	ibs_active = true;
++	rx_pump(se);
++	dump_bytes("receive queue before the reset (kept)", rxq, rxq_len);
++	if (!hci_cc(se, 0x0c03, NULL, 0, NULL, NULL)) {
++		printf("bt: HCI reset after the download failed\n");
++		return false;
++	}
++	{
++		uint8_t reply[64] = { 0 };
++		uint32_t reply_length = 0;
++
++		if (hci_cc(se, 0x1001, NULL, 0, reply, &reply_length) && reply_length >= 9) {
++			printf("bt: HCI version %u, revision %#x, LMP version %u, manufacturer %u, LMP subversion %#x (before the firmware: 0x2be)\n",
++			    reply[1], reply[2] | (reply[3] << 8), reply[4], reply[5] | (reply[6] << 8), reply[7] | (reply[8] << 8));
++		}
++	}
++	(void)read_soc_version(se, &ver, &rom_byte);
 +	return true;
 +}
 +
@@ -6351,7 +6760,7 @@ index 0000000000000000000000000000000000000000..19fbe25d78c96599cc809c466f118600
 +				uint32_t delay_s = 60;
 +
 +				PE_parse_boot_argn("bt_delay", &delay_s, sizeof(delay_s));
-+				chip_step(se, delay_s);
++				chip_step(se, delay_s, steps);
 +			}
 +		}
 +	}

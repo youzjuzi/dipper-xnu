@@ -40,7 +40,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "New driver for the WCN3990 Bluetooth UART, modelled on mi8_fts.c and mi8_rproc.c (same RPMh/command-database/clock structure); register offsets are hardware facts taken from Linux headers, no GPL code is copied; maintainer to confirm the file's licence",
-      "sha256": "fa2fdedc9f1b172e451278ddc69e60d095230e1f5d5a05809bf1a43299c0a31f"
+      "sha256": "ef6f800b598f17ec70992e9abc7c4c70f2905599c053bba55462169faad3902d"
     },
     {
       "component": "xnu-mi8",
@@ -480,7 +480,7 @@
       "upstream_file_exists": true,
       "license": "MIT",
       "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "08984454214525134adbb3b38460f0942600a69efbb43f9869b17840c3b701bb"
+      "sha256": "a23bc727d4ed492ed0e6c9c90e902c84518ac4d2b3a8e8818c485366876b3a6e"
     },
     {
       "component": "hackios-userland",

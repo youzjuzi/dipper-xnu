@@ -212,6 +212,17 @@ Wi-Fi 分两类输入：
 
 所有输入齐备后，按[用户空间教程](../build/USERLAND.md)配置 Theos/SDK 并执行 `bash tools/build/build-userland.sh`，再在新目录用 `tools/build/build-payload.py` 打包。载荷工具会回读 APFS 内固件并检查输入；提取到磁盘上不等于旧启动镜像自动更新。设备配置和启动顺序见[启动教程](STARTUP.md)。
 
+## 5. 蓝牙固件（实验）
+
+WCN3990 的蓝牙固件在手机的 `bluetooth` 分区（FAT 文件系统，Android 里挂载为 `/bt_firmware`），目录 `image/` 下有多个版本。本机芯片的 ROM 版本为 0x21，用到两个文件，其余版本（`crbtfw11/20`、`apbtfw*`、`crnv11/20` 等）不用：
+
+| 文件 | 大小 | SHA256（MIUI V12.5.2.0.QEACNXM 的这台手机） |
+| --- | --- | --- |
+| crbtfw21.tlv | 222988 | 2ce84e4dc3267f8401e2f4dbf6137c3902a734ee0011541a3b4d7385bbc07dce |
+| crnv21.bin | 4591 | cf5eef9879a381d1edd0be8aedbe41c765b82ce1edb18eed96ff314c66406a2d |
+
+在 Android root 或 TWRP 中用 `adb pull` 取出（TWRP 里先以只读方式挂载该分区；用 `/dev/block/by-name/bluetooth`，不要猜设备节点），在手机端和电脑端各算一次 SHA256 并核对，放到 `work/hackios/fw-bt/`。它们是厂商文件，不进 Git。`userland/build.sh` 在构建启动卷（`FLASHBOOT=1`）时把两个文件放进 `fw/`，内核 `bt=5` 从 RAM 盘的 `fw/` 读取。ROM 版本不是 0x21 的手机需要换对应文件名，驱动会先读芯片版本并在不符时拒绝下载。
+
 ## 验证范围
 
 2026-10-31 已在 Android 10 / MIUI V12.5.2.0.QEACNXM 上使用已有 root 验证提取流程。4 个 GPU 固件的手机端前后摘要、主机端摘要和固定 SHA256 均一致，与已有构建输入逐字节相同。测试未覆盖或修改原有构建输入。
