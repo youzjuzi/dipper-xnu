@@ -377,7 +377,7 @@
       },
       {
         "path": "userland/src/inject_sb.c",
-        "sha256": "3cd5550555305d9b24306c97a8f4165341f5720edd6724560ba217ffe450680b",
+        "sha256": "7c8dcdcd644581b41d790778dea85c0f2de1a97de7e79e8bd6a6da14521fca96",
         "mode": "0o644"
       },
       {

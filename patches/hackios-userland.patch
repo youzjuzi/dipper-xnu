@@ -1904,7 +1904,7 @@ index c5e9d9020cc05b698313e88984117c43df8d141e..37eaa73f23525deb7653ce944ad5585a
  		 * brightness_fixes() is not used for now: with it backboardd no longer took our touch
  		 * screen service for its own ("still waiting for a main screen digitizer"), whether the
 diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
-index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..3dd6622476bc85d731385218811b2a5425160194 100644
+index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..b2d02bf74f34122347c7adbf82cd149c465ffd35 100644
 --- a/userland/src/inject_sb.c
 +++ b/userland/src/inject_sb.c
 @@ -35,7 +35,11 @@
@@ -2406,7 +2406,7 @@ index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..3dd6622476bc85d731385218811b2a54
  /*
   * Open the tweak loader of the package manager's prefix, when there is one. Nothing here depends on
   * it: without a prefix (or without ElleKit in it) the file is not there and this does nothing.
-@@ -1071,6 +1529,332 @@ load_tweaks(void)
+@@ -1071,6 +1529,440 @@ load_tweaks(void)
  	}
  }
  
@@ -2736,19 +2736,128 @@ index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..3dd6622476bc85d731385218811b2a54
 +	    copied, depth);
 +}
 +
++/*
++ * A still wallpaper where the live one is not drawn (fbscale=2: UIKit has no screen class for the display, and PosterBoard draws
++ * nothing on it, so the wallpaper window shows its own black). A picture (/redwood/etc/wallpaper.jpg) or, without one, a gradient is put over everything the window holds (it is black there). On a screen UIKit
++ * knows the poster covers it, so the layer is only added with fbscale, or with still_wall=1 for a still wallpaper at the full size (kern.bootargs).
++ */
++#define WALLPAPER_PICTURE "/redwood/etc/wallpaper.jpg"
++
++struct wall_point {
++	double x, y;
++};
++struct wall_rect {
++	double x, y, w, h;
++};
++
++static void
++wallpaper_still_hook(void)
++{
++	static int tries;
++	static bool done;
++	char args[1024] = "";
++	size_t size = sizeof(args) - 1;
++	const char *arg;
++
++	if (done) {
++		return;
++	}
++	/* fbscale=N with N other than 0 and 3 (3 is the iPhone X's own), or still_wall=1 on the screen the model has */
++	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) {
++		return;
++	}
++	arg = strstr(args, "fbscale=");
++	bool scaled = arg != NULL && (arg == args || arg[-1] == ' ') && arg[8] != '0' && arg[8] != '3' && arg[8] != ' ' && arg[8] != '\0';
++
++	arg = strstr(args, "still_wall=");
++	bool still = arg != NULL && (arg == args || arg[-1] == ' ') && arg[11] == '1' && (arg[12] == ' ' || arg[12] == '\0');
++	if (!scaled && !still) {
++		return;
++	}
++	Class window_class = objc_getClass("_SBWallpaperSecureWindow"), application = objc_getClass("UIApplication");
++	id app = application ? SEND(id, application, "sharedApplication") : NULL;
++	id windows = app ? SEND(id, app, "windows") : NULL;
++	unsigned long count = windows ? SEND(unsigned long, windows, "count") : 0;
++
++	for (unsigned long i = 0; window_class != NULL && i < count; i++) {
++		id window = SEND1(id, windows, "objectAtIndex:", unsigned long, i);
++
++		if (!SEND1(bool, window, "isKindOfClass:", Class, window_class)) {
++			continue;
++		}
++		id layer = SEND(id, window, "layer");
++		Class gradient_class = objc_getClass("CAGradientLayer"), plain_class = objc_getClass("CALayer");
++		void *(*color_create)(double, double, double, double) = dlsym(RTLD_DEFAULT, "CGColorCreateGenericRGB");
++		void *(*source_create)(CFURLRef, CFDictionaryRef) = dlsym(RTLD_DEFAULT, "CGImageSourceCreateWithURL");
++		void *(*image_create)(void *, size_t, CFDictionaryRef) = dlsym(RTLD_DEFAULT, "CGImageSourceCreateImageAtIndex");
++
++		if (layer == NULL || gradient_class == NULL || plain_class == NULL || color_create == NULL) {
++			break;
++		}
++		struct wall_rect bounds = ((struct wall_rect (*)(id, SEL))objc_msgSend)(layer, sel_registerName("bounds"));
++		id still = NULL;
++		void *picture = NULL;
++
++		/* a picture, if there is one at WALLPAPER_PICTURE (jpeg or png): drawn to fill the screen */
++		if (source_create != NULL && image_create != NULL) {
++			CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)WALLPAPER_PICTURE, strlen(WALLPAPER_PICTURE), false);
++			void *source = url ? source_create(url, NULL) : NULL;
++
++			picture = source ? image_create(source, 0, NULL) : NULL;
++			if (source) {
++				CFRelease(source);
++			}
++			if (url) {
++				CFRelease(url);
++			}
++		}
++		if (picture != NULL) {
++			still = SEND(id, SEND(id, (id)plain_class, "alloc"), "init");
++			SEND1(void, still, "setContents:", void *, picture);
++			SEND1(void, still, "setContentsGravity:", CFStringRef, CFSTR("resizeAspectFill"));
++			SEND1(void, still, "setMasksToBounds:", bool, true);
++		} else {
++			still = SEND(id, SEND(id, (id)gradient_class, "alloc"), "init");
++			const void *colors[3] = { color_create(0.10, 0.17, 0.42, 1.0), color_create(0.30, 0.20, 0.56, 1.0),
++				                  color_create(0.62, 0.30, 0.52, 1.0) };
++			CFArrayRef list = CFArrayCreate(NULL, colors, 3, &kCFTypeArrayCallBacks);
++
++			((void (*)(id, SEL, struct wall_point))objc_msgSend)(still, sel_registerName("setStartPoint:"), (struct wall_point){ 0.5, 0.0 });
++			((void (*)(id, SEL, struct wall_point))objc_msgSend)(still, sel_registerName("setEndPoint:"), (struct wall_point){ 0.5, 1.0 });
++			SEND1(void, still, "setColors:", CFArrayRef, list);
++			CFRelease(list);
++		}
++		((void (*)(id, SEL, struct wall_rect))objc_msgSend)(still, sel_registerName("setFrame:"), bounds);
++		SEND1(void, still, "setOpaque:", bool, true);
++		/* on top: what the window holds below it is its own black, and nothing is drawn above it where there is no poster */
++		SEND1(void, layer, "addSublayer:", id, still);
++		done = true;
++		say("redwood: wallpaper: a still %s is over the wallpaper window (%.0f x %.0f)\n", picture ? "picture" : "gradient", bounds.w, bounds.h);
++		return;
++	}
++	if (tries++ < 90) {
++		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++			wallpaper_still_hook();
++		});
++	} else {
++		say("redwood: wallpaper: no wallpaper window to put a still picture under\n");
++	}
++}
++
  __attribute__((constructor))
  static void
  redwood_springboard_init(void)
-@@ -1097,6 +1881,8 @@ redwood_springboard_init(void)
+@@ -1097,6 +1989,9 @@ redwood_springboard_init(void)
  		});
  		return;
  	}
 +	wifi_signal_view_hook();
 +	status_bar_fallback_hook();
++	wallpaper_still_hook();
  	/*
  	 * The tweaks of the package manager's prefix, if one is installed: ElleKit's loader
  	 * (/var/jb/usr/lib/TweakLoader.dylib) reads /var/jb/usr/lib/TweakInject and opens the tweaks
-@@ -1196,6 +1982,7 @@ redwood_springboard_init(void)
+@@ -1196,6 +2091,7 @@ redwood_springboard_init(void)
  		if (device && class_getInstanceMethod(object_getClass(device), monitoring)) {
  			((void (*)(id, SEL, BOOL))objc_msgSend)(device, monitoring, YES);
  		}
@@ -2756,7 +2865,7 @@ index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..3dd6622476bc85d731385218811b2a54
  		watch_main_loop();
  		{
  			char arguments[1024] = "";
-@@ -1203,6 +1990,8 @@ redwood_springboard_init(void)
+@@ -1203,6 +2099,8 @@ redwood_springboard_init(void)
  
  			if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
  				control_center_fades(arguments);
