@@ -1904,7 +1904,7 @@ index c5e9d9020cc05b698313e88984117c43df8d141e..37eaa73f23525deb7653ce944ad5585a
  		 * brightness_fixes() is not used for now: with it backboardd no longer took our touch
  		 * screen service for its own ("still waiting for a main screen digitizer"), whether the
 diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
-index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..9408972f0eb3aec38d8ebc8c970d6e427e6ad060 100644
+index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..3dd6622476bc85d731385218811b2a5425160194 100644
 --- a/userland/src/inject_sb.c
 +++ b/userland/src/inject_sb.c
 @@ -35,7 +35,11 @@
@@ -2406,7 +2406,7 @@ index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..9408972f0eb3aec38d8ebc8c970d6e42
  /*
   * Open the tweak loader of the package manager's prefix, when there is one. Nothing here depends on
   * it: without a prefix (or without ElleKit in it) the file is not there and this does nothing.
-@@ -1071,6 +1529,246 @@ load_tweaks(void)
+@@ -1071,6 +1529,332 @@ load_tweaks(void)
  	}
  }
  
@@ -2650,18 +2650,105 @@ index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..9408972f0eb3aec38d8ebc8c970d6e42
 +	}
 +}
 +
++/*
++ * The status bar at a screen UIKit has no layout for (fbscale=2: the iPhone X's 375 x 812 points at two pixels a point). UIKit asks
++ * which "visual provider" draws the bar on this screen, finds none and puts up its fallback, a red bar that says "rdar:45025538". The
++ * fallback is made the iPhone X's provider: the class methods of the split provider are copied onto the fallback's metaclass, and
++ * the fallback's alloc makes an instance of the split class. (Replacing the answer of +visualProviderSubclassForScreen:... alone does
++ * not do it: the fallback is made on another path too.)
++ */
++static void
++status_bar_fallback_hook(void)
++{
++	static int tries;
++	static Class split_class;
++	Class fallback = objc_getClass("_UIStatusBarVisualProvider_Fallback");
++	Class split = objc_getClass("_UIStatusBarVisualProvider_Split1125");
++
++	if (fallback == NULL || split == NULL) {
++		if (tries++ < 6) {
++			dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
++				status_bar_fallback_hook();
++			});
++			return;
++		}
++		unsigned count = 0;
++		Class *all = objc_copyClassList(&count);
++
++		say("redwood: status bar: no %s: the provider classes are:", fallback == NULL ? "fallback provider" : "split provider 1125");
++		for (unsigned i = 0; i < count; i++) {
++			const char *name = class_getName(all[i]);
++
++			if (strncmp(name, "_UIStatusBarVisualProvider", 26) == 0) {
++				say(" %s", name);
++			}
++		}
++		say("\n");
++		free(all);
++		return;
++	}
++	split_class = split;
++
++	/* the classes between the split provider and what it has in common with the fallback, base first so that the derived one wins */
++	Class chain[8];
++	unsigned depth = 0, copied = 0;
++
++	for (Class c = split; c != NULL && depth < 8; c = class_getSuperclass(c)) {
++		bool shared = false;
++
++		for (Class f = fallback; f != NULL; f = class_getSuperclass(f)) {
++			if (f == c) {
++				shared = true;
++				break;
++			}
++		}
++		if (shared) {
++			break;
++		}
++		chain[depth++] = c;
++	}
++	Class meta = object_getClass(fallback);
++
++	for (unsigned i = depth; i > 0; i--) {
++		unsigned count = 0;
++		Method *methods = class_copyMethodList(object_getClass(chain[i - 1]), &count);
++
++		for (unsigned m = 0; m < count; m++) {
++			const char *name = sel_getName(method_getName(methods[m]));
++
++			if (strcmp(name, "load") == 0 || strcmp(name, "initialize") == 0 || strcmp(name, "alloc") == 0 ||
++			    strcmp(name, "allocWithZone:") == 0) {
++				continue;
++			}
++			class_replaceMethod(meta, method_getName(methods[m]), method_getImplementation(methods[m]),
++			    method_getTypeEncoding(methods[m]));
++			copied++;
++		}
++		free(methods);
++	}
++	class_replaceMethod(meta, sel_registerName("alloc"), imp_implementationWithBlock((id)^id(__unused id self) {
++		return ((id (*)(Class, SEL))objc_msgSend)(split_class, sel_registerName("alloc"));
++	}), "@16@0:8");
++	class_replaceMethod(meta, sel_registerName("allocWithZone:"), imp_implementationWithBlock((id)^id(__unused id self, void *zone) {
++		return ((id (*)(Class, SEL, void *))objc_msgSend)(split_class, sel_registerName("allocWithZone:"), zone);
++	}), "@24@0:8^{_NSZone=}16");
++	say("redwood: status bar: the fallback provider is %s from now on (%u class methods, %u class(es) of it)\n", class_getName(split),
++	    copied, depth);
++}
++
  __attribute__((constructor))
  static void
  redwood_springboard_init(void)
-@@ -1097,6 +1795,7 @@ redwood_springboard_init(void)
+@@ -1097,6 +1881,8 @@ redwood_springboard_init(void)
  		});
  		return;
  	}
 +	wifi_signal_view_hook();
++	status_bar_fallback_hook();
  	/*
  	 * The tweaks of the package manager's prefix, if one is installed: ElleKit's loader
  	 * (/var/jb/usr/lib/TweakLoader.dylib) reads /var/jb/usr/lib/TweakInject and opens the tweaks
-@@ -1196,6 +1895,7 @@ redwood_springboard_init(void)
+@@ -1196,6 +1982,7 @@ redwood_springboard_init(void)
  		if (device && class_getInstanceMethod(object_getClass(device), monitoring)) {
  			((void (*)(id, SEL, BOOL))objc_msgSend)(device, monitoring, YES);
  		}
@@ -2669,7 +2756,7 @@ index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..9408972f0eb3aec38d8ebc8c970d6e42
  		watch_main_loop();
  		{
  			char arguments[1024] = "";
-@@ -1203,6 +1903,8 @@ redwood_springboard_init(void)
+@@ -1203,6 +1990,8 @@ redwood_springboard_init(void)
  
  			if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
  				control_center_fades(arguments);

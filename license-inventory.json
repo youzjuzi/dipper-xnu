@@ -1,5 +1,5 @@
 {
-  "review_date": "2026-11-06",
+  "review_date": "2026-11-10",
   "original_code_authorization": "Maintainer confirmed original human/AI-authored portions may use MIT; excludes third-party derivatives.",
   "files": [
     {
@@ -224,7 +224,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "946fca470628b7fcd1ad09ab576b6d8ee00b803daaa835b002d9186f20dcf566"
+      "sha256": "5c642832f368fa17d0f8ee9927bd7a8a26dc5d7097ce2779939ba763c0f4c046"
     },
     {
       "component": "xnu-mi8",
@@ -504,7 +504,7 @@
       "upstream_file_exists": true,
       "license": "MIT",
       "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "ad66224d210942825cd6ff42440e4c3532f40a62e55f14e3092a48c3f22a1622"
+      "sha256": "3cd5550555305d9b24306c97a8f4165341f5720edd6724560ba217ffe450680b"
     },
     {
       "component": "hackios-userland",

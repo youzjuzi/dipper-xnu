@@ -20677,7 +20677,7 @@ index ef79d87b9f76879ecf49ccc4035241306681caef..9b94e1d51739019c2c9c00fdfc1805f7
  void	 lx_os_free(void *memory, unsigned long size);
  /*
 diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
-index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d5025c470 100644
+index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8aded362e6 100644
 --- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
 +++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
 @@ -77,13 +77,14 @@ enum {
@@ -20696,7 +20696,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  #define SWAP_HELD_MS            700                     /* a swap that cannot be taken by then is not shown at all */
  
  #define FOURCC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
-@@ -162,6 +163,250 @@ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
+@@ -162,6 +163,255 @@ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
   * to 10 (the phone, 15 October; fb_threads=1 is how it was).
   */
  static TUNABLE(uint32_t, gThreads, "fb_threads", 3);
@@ -20785,6 +20785,11 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
 + * them in one flush, when the kernel goes back to the loader (MiniIOFlipQuiesce), and the boot framebuffer is cleared.
 + */
 +static TUNABLE(uint32_t, gNative, "fb_native", 0);
++/*
++ * fb_dpu=1 (with fb_native=1 and a display smaller than 1125 x 2436, fbscale=2): the flip buffers are pictures of the display's own size
++ * and the DPU's scaler (QSEED3) enlarges them to the panel itself, so that the frame is only copied, not scaled by the processors.
++ */
++static TUNABLE(uint32_t, gDpuScale, "fb_dpu", 0);
 +static const uint32_t gScalePipeRegs[] = { 0x00, 0x08, 0x0c, 0x10, 0x14, 0x24, 0x100, 0x104, 0x108, 0x110, 0x114, 0x118,
 +	                                   0x120, 0x124, 0x128 };
 +static const uint32_t gScalerRegs[] = { 0x04, 0x10, 0x14, 0x18, 0x1c, 0x20, 0x40, 0x44, 0x48, 0x90, 0x94, 0x98, 0x9c };
@@ -20947,7 +20952,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
  static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
  static inline unsigned
-@@ -231,6 +476,24 @@ class IOMobileFramebuffer : public IOService
+@@ -231,6 +481,25 @@ class IOMobileFramebuffer : public IOService
  public:
  	IOLock *        fLock;
  	uint8_t *       fBase;                  /* the boot framebuffer: the panel */
@@ -20959,6 +20964,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
 +	bool            fNativeOn;              /* fb_native: the flip buffers are the splash region's, 1125 x 2436 */
 +	bool            fNativeADone;           /* ... buffer 0 has been cleared once the DPU let go of it */
 +	size_t          fNativeBytes;           /* ... one buffer's size */
++	uint32_t        fNativeSrcW, fNativeSrcH, fNativeStride;        /* the size and row of the picture the DPU scales (fb_dpu) */
 +	IOMemoryDescriptor * fNativeRegion;
 +	IOMemoryMap *   fNativeMap;
 +	volatile uint32_t * fDpuPipe;           /* SSPP0 (VIG0) registers of the DPU */
@@ -20972,7 +20978,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	uint32_t        fPanelWidth, fPanelHeight, fRowBytes;
  	uint32_t        fWidth, fHeight;        /* the display as user space sees it */
  	MiniIOSurface * fDefaultSurface;
-@@ -289,6 +552,11 @@ public:
+@@ -289,6 +558,11 @@ public:
  	uint16_t *      fColumnWeight;          /* ... with fb_filter: how much of the column after it, of 256 */
  	uint32_t *      fBlendRow;              /* ... and a row of the picture blended from two (fBlendRowSize pixels) */
  	uint32_t        fBlendRowSize;
@@ -20984,7 +20990,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	uint8_t *       fRecBase;
  	uint64_t        fRecSize, fRecUsed;
  	uint64_t        fFirstFrame, fRecFirst; /* when the first frame was shown, and the first recorded */
-@@ -300,10 +568,15 @@ public:
+@@ -300,10 +574,15 @@ public:
  	MiniIOSurface * defaultSurface(void);
  	void present(const uint8_t * swap);
  	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
@@ -21000,7 +21006,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	void drawRows(const struct RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow);
  	static void helperMain(void * self, wait_result_t result);
  	/* the scaling shared out (fb_threads): fThreads drawers, the presenter and fThreads - 1 helpers */
-@@ -389,6 +662,542 @@ IOMobileFramebuffer::publishModes(void)
+@@ -389,6 +668,551 @@ IOMobileFramebuffer::publishModes(void)
  	OSSafeReleaseNULL(color);
  }
  
@@ -21156,18 +21162,18 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
 +}
 +
 +static void
-+scaleSet(volatile uint32_t * pipe, uint32_t phys, uint32_t outW, uint32_t outX, uint32_t outH)
++scaleSet(volatile uint32_t * pipe, uint32_t phys, uint32_t srcW, uint32_t srcH, uint32_t stride, uint32_t outW, uint32_t outX, uint32_t outH)
 +{
 +	volatile uint32_t * scaler = pipe + 0xa00 / 4;
-+	uint32_t src = (SCALE_SRC_H << 16) | SCALE_SRC_W, out = (outH << 16) | outW;
-+	uint32_t stepX = (uint32_t) (((uint64_t) SCALE_SRC_W << 21) / outW), stepY = (uint32_t) (((uint64_t) SCALE_SRC_H << 21) / outH);
++	uint32_t src = (srcH << 16) | srcW, out = (outH << 16) | outW;
++	uint32_t stepX = (uint32_t) (((uint64_t) srcW << 21) / outW), stepY = (uint32_t) (((uint64_t) srcH << 21) / outH);
 +
 +	pipe[0x00 / 4] = src;                   /* SRC_SIZE */
 +	pipe[0x08 / 4] = 0;                     /* SRC_XY */
 +	pipe[0x0c / 4] = out;                   /* OUT_SIZE */
 +	pipe[0x10 / 4] = outX;                  /* OUT_XY */
 +	pipe[0x14 / 4] = phys;                  /* SRC0_ADDR */
-+	pipe[0x24 / 4] = SCALE_STRIDE;          /* SRC_YSTRIDE0 */
++	pipe[0x24 / 4] = stride;                /* SRC_YSTRIDE0 */
 +	for (uint32_t off = 0x100; off <= 0x120; off += 0x10) {
 +		pipe[off / 4] = 0;              /* SW_PIX_EXT LR */
 +		pipe[off / 4 + 1] = 0;          /* ... TB */
@@ -21245,7 +21251,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
 +		if ((gScaleTest & (1u << part)) == 0) {
 +			continue;
 +		}
-+		scaleSet(pipe, (uint32_t) phys, outW, outX, 2248);
++		scaleSet(pipe, (uint32_t) phys, SCALE_SRC_W, SCALE_SRC_H, SCALE_STRIDE, outW, outX, 2248);
 +		us = scaleFlush(ctl);
 +		flipLog("mi8scale: %s %ux2248 at x %u: flush %s %llu us; read back SRC %#x OUT %#x XY %#x ADDR %#x STRIDE %#x "
 +		    "REQ %#x, scaler op %#x step %#x/%#x preload %#x src %#x dst %#x\n", part == 0 ? "stretched" : "same scale", outW,
@@ -21361,9 +21367,18 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
 +				fFlipPhys[i] = 0x9d400000u + (uint32_t) (i * piece);
 +			}
 +			bzero(fFlipVirt[1], 2 * piece);         /* (buffer 0 is what is on the panel until the first flip) */
-+			fPanelWidth = 1125;
-+			fPanelHeight = 2436;
-+			fRowBytes = 4608;
++			fNativeSrcW = 1125;
++			fNativeSrcH = 2436;
++			fNativeStride = 4608;
++			if (gDpuScale != 0 && fWidth <= 1125 && fHeight <= 2436 && (fWidth != 1125 || fHeight != 2436)) {
++				/* a smaller picture, row padded to 64 bytes: the DPU enlarges it (the pieces keep their places, only their top is used) */
++				fNativeSrcW = fWidth;
++				fNativeSrcH = fHeight;
++				fNativeStride = (fWidth * 4 + 63) & ~63u;
++			}
++			fPanelWidth = fNativeSrcW;
++			fPanelHeight = fNativeSrcH;
++			fRowBytes = fNativeStride;
 +			fNativeOn = true;
 +			fFlipShown = 0;
 +			fFlipOn = true;
@@ -21371,8 +21386,8 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
 +			fFlipLatched = 0;
 +			fFlipPending = -1;
 +			fFlipDraw = 1;
-+			flipLog("MiniIOMobileFramebuffer: fb_native=1: three buffers of 1125 x 2436 at %#x %#x %#x (%lu bytes each), the DPU "
-+			    "reads %#x until the first flip and then scales\n", fFlipPhys[0], fFlipPhys[1], fFlipPhys[2], (unsigned long) piece,
++			flipLog("MiniIOMobileFramebuffer: fb_native=1: three buffers of %u x %u at %#x %#x %#x (%lu bytes each), the DPU "
++			    "reads %#x until the first flip and then scales\n", fNativeSrcW, fNativeSrcH, fFlipPhys[0], fFlipPhys[1], fFlipPhys[2], (unsigned long) piece,
 +			    fFlipOriginal);
 +			return;
 +		}
@@ -21457,7 +21472,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
 +		}
 +		__asm__ volatile ("dsb sy" ::: "memory");
 +		if (fNativeOn && !gNativeChanged) {
-+			scaleSet(fDpuPipe, fFlipPhys[drawn], 1080, 0, 2248);    /* (the size, the row, the scaler and the address: one flush) */
++			scaleSet(fDpuPipe, fFlipPhys[drawn], fNativeSrcW, fNativeSrcH, fNativeStride, 1080, 0, 2248);    /* (the size, the row, the scaler and the address: one flush) */
 +			gNativeChanged = true;
 +		} else {
 +			fDpuPipe[0x14 / 4] = fFlipPhys[drawn];
@@ -21543,7 +21558,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  bool
  IOMobileFramebuffer::start(IOService * provider)
  {
-@@ -403,6 +1212,7 @@ IOMobileFramebuffer::start(IOService * provider)
+@@ -403,6 +1227,7 @@ IOMobileFramebuffer::start(IOService * provider)
  		return false;
  	}
  	fLock = IOLockAlloc();
@@ -21551,7 +21566,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	fSwapLock = IOLockAlloc();
  	if (kernel_thread_start(&IOMobileFramebuffer::presenterMain, this, &thread) != KERN_SUCCESS) {
  		IOLog("MiniIOMobileFramebuffer: no thread to put frames on the panel with\n");
-@@ -424,6 +1234,8 @@ IOMobileFramebuffer::start(IOService * provider)
+@@ -424,6 +1249,8 @@ IOMobileFramebuffer::start(IOService * provider)
  	fPanelWidth = vinfo.v_width;
  	fPanelHeight = vinfo.v_height;
  	fRowBytes = vinfo.v_rowbytes;
@@ -21560,7 +21575,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
  	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
  	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
-@@ -442,12 +1254,15 @@ IOMobileFramebuffer::start(IOService * provider)
+@@ -442,12 +1269,15 @@ IOMobileFramebuffer::start(IOService * provider)
  			}
  		}
  	}
@@ -21578,7 +21593,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  
  	if (gRecSeconds != 0) {
  		/* one piece of physical memory: the loader will send it over USB as it lies */
-@@ -595,10 +1410,35 @@ sample_at(int64_t i, int64_t in, int64_t out)
+@@ -595,10 +1425,35 @@ sample_at(int64_t i, int64_t in, int64_t out)
  struct RowJob {
  	const uint8_t * pixels;
  	uint32_t        stride;
@@ -21616,7 +21631,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  void
  IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow)
  {
-@@ -607,6 +1447,62 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -607,6 +1462,62 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  	int32_t sx = job->sx, sy = job->sy, sw = job->sw, sh = job->sh;
  	int32_t px0 = job->px0, py0 = job->py0, px1 = job->px1, py1 = job->py1, cx0 = job->cx0, cx1 = job->cx1;
  	bool filter = job->filter;
@@ -21679,7 +21694,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  
  	for (int32_t y = y0; y < y1; y++) {
  		const uint32_t * from;
-@@ -615,6 +1511,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -615,6 +1526,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  		if (y < 0 || (uint32_t) y >= fPanelHeight) {
  			continue;
  		}
@@ -21687,7 +21702,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
  		if (job->unscaled) {
  			/* not scaled at all */
-@@ -634,13 +1531,31 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -634,13 +1546,31 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  
  				uint32_t * __restrict mixed = blendRow;
  
@@ -21696,11 +21711,11 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
 +				/* two pixels to a 64-bit word, no branch (EXP-0125: the branchy one cost 11 us a row, most of the frame) */
 +				const uint64_t M = 0x00ff00ff00ff00ffull;
 +				uint32_t c = first;
-+
-+				for (; c + 1 <= last; c += 2) {
-+					uint64_t a, b, rb, ga;
  
 -					mixed[c] = a == b ? a : blend(a, b, weight);           /* (most of a screen is the same as next to it) */
++				for (; c + 1 <= last; c += 2) {
++					uint64_t a, b, rb, ga;
++
 +					memcpy(&a, upper + c, 8);
 +					memcpy(&b, lower + c, 8);
 +					rb = ((a & M) * (256 - weight) + (b & M) * weight) >> 8 & M;
@@ -21722,7 +21737,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  		} else {
  			from = (const uint32_t *) (pixels + (size_t) (sy + (int64_t) (y - py0) * sh / (py1 - py0)) * stride);
  		}
-@@ -661,7 +1576,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -661,7 +1591,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  		if (filter) {
  			const uint32_t * __restrict column = fColumn + cx0;
  			const uint16_t * __restrict weights = fColumnWeight + cx0;
@@ -21731,7 +21746,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  
  			for (uint32_t i = 0, n = (uint32_t) (cx1 - cx0); i < n; i++) {
  				uint32_t c = column[i], w = weights[i], a = from[c];
-@@ -670,9 +1585,26 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -670,9 +1600,26 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  			}
  		} else {
  			for (int32_t x = cx0; x < cx1; x++) {
@@ -21759,7 +21774,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	}
  }
  
-@@ -687,6 +1619,7 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
+@@ -687,6 +1634,7 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  	IOLockLock(fb->fHelperLock);
  	index = fb->fHelpersStarted++;
  	IOLockUnlock(fb->fHelperLock);
@@ -21767,7 +21782,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	for (;;) {
  		const RowJob * job;
  		int32_t rows, y0, y1;
-@@ -700,9 +1633,9 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
+@@ -700,9 +1648,9 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  		job = fb->fHelperJob;
  		IOLockUnlock(fb->fHelperLock);
  		/* share index + 1 of fThreads (the presenter takes share 0) */
@@ -21780,7 +21795,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  		blend = fb->fHelperBlend[index];
  		fb->drawRows(job, y0, y1, blend);
  		IOLockLock(fb->fHelperLock);
-@@ -714,6 +1647,38 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
+@@ -714,6 +1662,38 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  	}
  }
  
@@ -21819,7 +21834,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  /*
   * Put a rectangle of a 32-bit surface on the screen. `dst` is in display coordinates; the
   * panel may be of another size, and the layer itself may be scaled: both are done in one
-@@ -741,6 +1706,33 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
+@@ -741,6 +1721,33 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  	if (sx < 0 || sy < 0 || (uint32_t) (sx + sw) > s->info.width || (uint32_t) (sy + sh) > s->info.height) {
  		return;
  	}
@@ -21853,25 +21868,29 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	/* the rectangle on the panel */
  	px0 = (int32_t) ((int64_t) dx * fPanelWidth / fWidth);
  	py0 = (int32_t) ((int64_t) dy * fPanelHeight / fHeight);
-@@ -750,7 +1742,7 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
+@@ -750,7 +1757,11 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  		return;
  	}
  	/* (blending, a row of the picture mixed from two: room for it, for every one who draws rows) */
 -	if (filter && fBlendRowSize < (uint32_t) sw) {
-+	if (fBlendRowSize < 2 * (uint32_t) sw) {
++	/* each half of the row buffer must hold the wider of the picture's row and the panel's row: the second half takes the panel row
++	 * whole, and a picture drawn smaller than the panel (fbscale) is enlarged into it */
++	uint32_t rowWords = (uint32_t) sw > fPanelWidth ? (uint32_t) sw : fPanelWidth;
++
++	if (fBlendRowSize < 2 * rowWords) {
  		if (fBlendRow != NULL) {
  			IODelete(fBlendRow, uint32_t, fBlendRowSize);
  		}
-@@ -759,7 +1751,7 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
+@@ -759,7 +1770,7 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  				IODelete(fHelperBlend[i], uint32_t, fBlendRowSize);
  			}
  		}
 -		fBlendRowSize = (uint32_t) sw;
-+		fBlendRowSize = 2 * (uint32_t) sw;
++		fBlendRowSize = 2 * rowWords;
  		fBlendRow = IONew(uint32_t, fBlendRowSize);
  		for (unsigned i = 0; i + 1 < fThreads; i++) {
  			fHelperBlend[i] = IONew(uint32_t, fBlendRowSize);
-@@ -776,6 +1768,24 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
+@@ -776,6 +1787,24 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  	/* which pixel of a source row each pixel of a panel row takes: worked out once, not 2.6 million times */
  	cx0 = px0 < 0 ? 0 : px0;
  	cx1 = (uint32_t) px1 > fPanelWidth ? (int32_t) fPanelWidth : px1;
@@ -21896,7 +21915,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	for (int32_t x = cx0; x < cx1; x++) {
  		if (filter) {
  			int64_t at = sample_at(x - px0, sw, px1 - px0);
-@@ -798,25 +1808,34 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
+@@ -798,25 +1827,34 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  	job.py1 = py1;
  	job.cx0 = cx0;
  	job.cx1 = cx1;
@@ -21934,7 +21953,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  }
  
  /*
-@@ -880,6 +1899,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
+@@ -880,6 +1918,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
  		if (IOLockSleepDeadline(fSwapLock, &fSwapsWaiting, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
  		    fSwapsWaiting >= swapQueue()) {
  			fStatLost++;                    /* (the GPU has stopped answering: the frame before is waiting for it) */
@@ -21942,7 +21961,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  			IOLockUnlock(fSwapLock);
  			return;
  		}
-@@ -897,9 +1917,21 @@ IOMobileFramebuffer::present(const uint8_t * swap)
+@@ -897,9 +1936,21 @@ IOMobileFramebuffer::present(const uint8_t * swap)
  	IOLockUnlock(fSwapLock);
  }
  
@@ -21964,7 +21983,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	((IOMobileFramebuffer *) self)->presenter();
  }
  
-@@ -927,6 +1959,17 @@ IOMobileFramebuffer::presenter(void)
+@@ -927,6 +1978,17 @@ IOMobileFramebuffer::presenter(void)
  	}
  }
  
@@ -21982,7 +22001,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  /* A swap's surfaces onto the panel, once the GPU is done with them. */
  void
  IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
-@@ -935,17 +1978,54 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -935,17 +1997,54 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  	uint64_t began = mach_absolute_time(), nanos, ready, shown, drawn;
  	uint32_t layers = 0;
  	MiniIOSurface * recorded = NULL;
@@ -22041,7 +22060,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  		uint64_t period, aim, next;
  
  		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
-@@ -971,11 +2051,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -971,11 +2070,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  	}
  	shown = began;
  	/* its turn has come: the swap after it may be handed over */
@@ -22054,7 +22073,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	IOLockLock(fLock);
  	if (fLastFrame != 0) {
  		absolutetime_to_nanoseconds(began - fLastFrame, &nanos);
-@@ -1010,9 +2086,11 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -1010,9 +2105,11 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  		if (sid == 0) {
  			/* the bottom layer taken away: nothing is shown, the screen is black */
  			if (layer == 0 && (set & 1) && fGraphics) {
@@ -22066,7 +22085,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  			}
  			continue;
  		}
-@@ -1036,7 +2114,82 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -1036,7 +2133,82 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  				fGraphics = true;
  				PE_initialize_console(NULL, kPEGraphicsMode);
  			}
@@ -22150,7 +22169,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  			if (layer == 0) {
  				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
  			}
-@@ -1046,6 +2199,14 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -1046,6 +2218,14 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  	if (recorded != NULL) {
  		record(recorded);
  	}
@@ -22165,7 +22184,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	fSwapsShown++;
  	if (gTouchLat) {
  		redwood_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
-@@ -1072,7 +2233,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -1072,7 +2252,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  		absolutetime_to_nanoseconds(fStatDrawing, &drawing);
  		absolutetime_to_nanoseconds(fStatWaiting, &waiting);
  		absolutetime_to_nanoseconds(fStatBeatWait, &beat);
@@ -22174,7 +22193,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  		    "waiting for the GPU and, %u of them, %llu us for the next refresh; %u swaps waited for the frame before, "
  		    "%u gave up; %u swaps came a refresh late themselves\n", fStatFrames, nanos / NSEC_PER_MSEC,
  		    fStatFrames * NSEC_PER_SEC / nanos, drawing / fStatFrames / NSEC_PER_USEC,
-@@ -1127,6 +2288,11 @@ class IOMobileFramebufferUserClient : public IOUserClient
+@@ -1127,6 +2307,11 @@ class IOMobileFramebufferUserClient : public IOUserClient
  	uint64_t                fVSyncTime;             /* when the refresh being waited for is due */
  	bool                    fVSyncRunning;
  	bool                    fClosed;
@@ -22186,7 +22205,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  
  	static void vsyncFired(thread_call_param_t self, thread_call_param_t unused);
  	void vsync(void);
-@@ -1237,6 +2403,20 @@ IOMobileFramebufferUserClient::armVSync(void)
+@@ -1237,6 +2422,20 @@ IOMobileFramebufferUserClient::armVSync(void)
  
  	/* one refresh after the last, not after whenever we got round to this: the rate does not drift */
  	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
@@ -22207,7 +22226,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	fVSyncTime += period;
  	if (fVSyncTime <= now || fVSyncTime > now + 2 * period) {
  		fVSyncTime = now + period;
-@@ -1244,38 +2424,74 @@ IOMobileFramebufferUserClient::armVSync(void)
+@@ -1244,38 +2443,74 @@ IOMobileFramebufferUserClient::armVSync(void)
  	thread_call_enter_delayed(fVSyncCall, fVSyncTime);
  }
  
@@ -22298,7 +22317,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  }
  
  IOReturn
-@@ -1291,11 +2507,22 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1291,11 +2526,22 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  
  		gFBCalls[selector]++;
  		proc_selfname(procname, sizeof(procname));
@@ -22324,7 +22343,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  	}
  
  	switch (selector) {
-@@ -1353,6 +2580,20 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1353,6 +2599,20 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  		return kIOReturnSuccess;
  
  	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
@@ -22345,7 +22364,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  		if (gTouchLat) {
  			redwood_tl("tl: w %llu %#llx %#llx at %llu\n", args->scalarInputCount > 0 ? in[0] : 0,
  			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
-@@ -1362,7 +2603,19 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1362,7 +2622,19 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  	case kFBMethodSwapCancel:
  	case kFBMethodSwapCancelAll:
  	case kFBMethodRequestPowerChange:
@@ -22366,7 +22385,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  		return kIOReturnSuccess;
  
  	case kFBMethodNotifications:                    /* in: callback (0 = off), its argument, type, 0 */
-@@ -1372,22 +2625,25 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1372,22 +2644,25 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  		IOLockLock(fLock);
  		fCallbacks[in[2]] = in[0];
  		fRefcons[in[2]] = in[1];
@@ -22396,7 +22415,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..0889674bcd9c05fbdb1423885975018d
  
  	case kFBMethodGetBlock:                         /* in: which block; out: its bytes */
  		if (args->structureOutput == NULL) {
-@@ -1416,7 +2672,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1416,7 +2691,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  
  	if (selector < 128 && !(gFBLogged[selector / 64] & (1ULL << (selector % 64)))) {
  		gFBLogged[selector / 64] |= 1ULL << (selector % 64);

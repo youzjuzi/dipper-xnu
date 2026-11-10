@@ -123,13 +123,13 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 接手顺序固定为：AGENTS → docs/README（文档导航）→ STATUS（功能与设备边界）→ 本文（开发流程和现场交接）。每项任务结束更新下面的现场交接，不另建多个 current/latest 状态文件。设备标识、原始日志和私人配置只引用本机位置，不复制到公共文档。
 
-### 当前开发现场交接（2026-11-06，覆盖更新，接手时重新核对）
+### 当前开发现场交接（2026-11-10，覆盖更新，接手时重新核对）
 
-- **分支/基线**：`feat/bootargs-defaults`，来自 `perf/cpu-load` 的 `263326e`；工具修复为 `158a897`，随后本地提交集中默认值及短载荷支持，未 push。
-- **源码对应**：唯一 work 树的四个 XNU 文件已由 patchtool 导出，其他五组件补丁不变；用户态及 loader 源码不变。新默认值仅按现有 `/arm-io/device_type=dipper` 生效；原 loader 核心和存储参数保留。
-- **验证**：315 项主机断言、补丁重放、干净内核 build、载荷容器及脚本校验通过。日志在 `work/runs/20261106-bootargs-01/revision-1/`，首次编译失败日志保留。完整 all 未验证。
-- **产物**：`work/runs/20261106-bootargs-01/S-slim/`；daily/bench 参数在同一运行目录，私有值保持本地。bench 加保守前缀共 252 字节。旧载荷和日常原生构建产物保持。
-- **下一步**：持有人按运行目录 device-test-plan.md 做一次冒烟，再核对配置日志、场景帧数/标记/结束和返回。设备结果 Pending；本轮未操作设备。
+- **分支/基线**：`feat/render-scale`，来自 `feat/bootargs-defaults`（`299b9f2`）；本地提交，未 push。
+- **源码对应**：`iokit/Kernel/MiniIOMobileFramebuffer.cpp`（行缓冲大小修复、`fb_dpu`）和用户态 `src/inject_sb.c`（状态栏后备样式替换）已由 patchtool 导出写回 `xnu-mi8.patch`、`hackios-userland.patch` 与清单，干净树重放通过；work 源码与补丁一致。其余四个补丁不变。
+- **验证**：内核在干净树增量构建、用户态库单独编译通过；设备上已验证 `fbscale=2 fb_dpu=1` 进桌面、状态栏正常、更流畅，数据与限制见[验证记录](../validation/VALIDATION.md#降低渲染分辨率与状态栏2026-11-10)。最终提交内容没有再上机。
+- **产物**：`work/runs/20261109-fbscale-01/B-1`（含状态栏修复的根镜像 + DPU 放大内核，参数 `fbscale=2 fb_dpu=1`，无测量开关）；`D-1` 带测量开关。内核构建目录在同一运行目录的 `kernel/`，干净树在 `../experiments/bootargs-20261106/clean`。运行目录里还有多个已分析完的载荷和日志，可按本机清理约定处理。
+- **下一步**：最终内容上机冒烟并做 Wi-Fi、触摸、按键回归；黑壁纸（屏幕类别查不到时壁纸进程不绘制，可参考冻结为静态图的做法）；是否把降分辨率纳入默认值再定。
 - **边界**：wifi plist、loader 本机身份字段及 edk2 11 项维持原样，krb5 辅助子模块基线不可用仍为已知例外。GPU/基带退出恢复、首次安装外设收尾和完整 all 待验；设备轮次间完整重启。禁止重跑分区脚本。
 - **私人配置**：沿用 local/README.md 和 local/index.json，切换源码版本前重新核对 work 与目标提交的对应关系。
 
