@@ -1,8 +1,8 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..65c3425a649ea1462927f933b40c54a4ca245273 100644
+index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..dd9365c44222f50dd3cf8ea761aaffe4eaa33eca 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -113,6 +113,14 @@ bsd/dev/redwood_input.c		standard
+@@ -113,6 +113,15 @@ bsd/dev/redwood_input.c		standard
  bsd/dev/redwood_virtio_input.c	standard
  bsd/dev/redwood_goodix.c	standard
  bsd/dev/redwood_buttons.c	standard
@@ -11,6 +11,7 @@ index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..65c3425a649ea1462927f933b40c54a4
 +bsd/dev/mi8_adreno.c	standard
 +bsd/dev/mi8_rproc.c	standard
 +bsd/dev/mi8_glink.c	standard
++bsd/dev/mi8_audio.c	standard
 +bsd/dev/mi8_hostsvc_k.c	standard
 +bsd/dev/mi8_wlfw_k.c	standard
 +bsd/dev/mi8_wlfw_v01.c	standard
@@ -5563,6 +5564,299 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +	}
 +	thread_terminate(current_thread());
 +}
+diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e6d17134daeafdfa6f524799361b16826a218a71
+--- /dev/null
++++ b/bsd/dev/mi8_audio.c
+@@ -0,0 +1,257 @@
++/* SPDX-License-Identifier: MIT */
++/* Mi 8 ADSP core handshake over APR. Independently written from protocol
++ * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
++ * This module never starts AFE/ASM/ADM or accesses audio hardware registers. */
++#include "mi8_audio.h"
++#ifdef MI8_GLINK_HOST_TEST
++#include <string.h>
++#include <errno.h>
++#else
++#include <libkern/libkern.h>
++#include <sys/errno.h>
++#endif
++
++#define GET_STATE       0x0001290cu
++#define STATE_REPLY     0x0001290du
++#define GET_FWK         0x0001292cu
++#define FWK_REPLY       0x0001292du
++#define GET_VERSIONS    0x00012905u
++#define VERSIONS_REPLY  0x00012906u
++#define BASIC_REPLY     0x000110e8u
++
++struct mi8_apr_header {
++	uint16_t field, bytes;
++	uint8_t source_service, source_domain;
++	uint16_t source_port;
++	uint8_t target_service, target_domain;
++	uint16_t target_port;
++	uint32_t token, opcode;
++} __attribute__((packed));
++_Static_assert(sizeof(struct mi8_apr_header) == 20, "APR v2 header must be 20 bytes");
++
++static uint32_t
++read32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
++}
++
++static void
++write32(uint8_t *p, uint32_t value)
++{
++	p[0] = value; p[1] = value >> 8; p[2] = value >> 16; p[3] = value >> 24;
++}
++
++static uint32_t
++response_for(uint32_t request)
++{
++	switch (request) {
++	case GET_STATE: return STATE_REPLY;
++	case GET_FWK: return FWK_REPLY;
++	case GET_VERSIONS: return VERSIONS_REPLY;
++	default: return 0;
++	}
++}
++
++int
++mi8_apr_encode_request(uint8_t packet[20], uint32_t token, uint32_t opcode)
++{
++	if (!packet || !token || !response_for(opcode)) return EINVAL;
++	memset(packet, 0, 20);
++	packet[0] = 0x50; packet[1] = 2; packet[2] = 20;
++	packet[4] = packet[8] = 3; /* core service */
++	packet[5] = 5; packet[9] = 4; /* APPS -> ADSP */
++	write32(packet + 12, token); write32(packet + 16, opcode);
++	return 0;
++}
++
++void
++mi8_apr_begin(struct mi8_apr_reply *reply, uint32_t request, uint32_t token)
++{
++	memset(reply, 0, sizeof(*reply));
++	reply->request = request; reply->response = response_for(request); reply->token = token;
++}
++
++int
++mi8_apr_receive(struct mi8_apr_reply *reply, const void *data, size_t length)
++{
++	const uint8_t *p = data;
++	uint32_t opcode, count, base, width;
++	if (!reply || !p || reply->done || !reply->token || !reply->response) return EINVAL;
++	if (length < 20 || length > 4096 || p[0] != 0x50 || p[1] != 1 ||
++	    ((size_t)p[2] | (size_t)p[3] << 8) != length ||
++	    p[4] != 3 || p[5] != 4 || p[6] || p[7] ||
++	    p[8] != 3 || p[9] != 5 || p[10] || p[11] || read32(p + 12) != reply->token) return EPROTO;
++	opcode = read32(p + 16);
++	if (opcode == BASIC_REPLY) {
++		if (length != 28 || read32(p + 20) != reply->request) return EPROTO;
++		/* A successful basic ACK is not the requested state/version payload. */
++		if (!read32(p + 24)) return 0;
++		reply->dsp_status = read32(p + 24);
++		reply->error = reply->dsp_status == 3 ? ENOTSUP : EIO;
++		reply->done = true;
++		return 0;
++	}
++	if (opcode != reply->response) return EPROTO;
++	if (opcode == STATE_REPLY) {
++		if (length != 24) return EPROTO;
++		reply->state = read32(p + 20); reply->done = true;
++		return 0;
++	}
++	base = opcode == FWK_REPLY ? 40 : 28;
++	width = opcode == FWK_REPLY ? 12 : 8;
++	if (length < base) return EPROTO;
++	count = read32(p + base - 4);
++	/* Check division before multiplication; never accept a truncated list. */
++	if (!count || count > MI8_APR_MAX_SERVICES || count != (length - base) / width ||
++	    (length - base) % width) return EPROTO;
++	for (uint32_t i = 0; i < count; i++) {
++		const uint8_t *entry = p + base + width * i;
++		/* Duplicate service IDs make the version ambiguous. Validate the
++		 * entire list before publishing any entry into the result. */
++		for (uint32_t j = 0; j < i; j++)
++			if (read32(p + base + width * j) == read32(entry)) return EPROTO;
++	}
++	for (uint32_t i = 0; i < count; i++) {
++		const uint8_t *entry = p + base + width * i;
++		reply->services[i].id = read32(entry);
++		reply->services[i].version = read32(entry + 4);
++		reply->services[i].branch = width == 12 ? read32(entry + 8) : 0;
++	}
++	reply->num_services = count; reply->done = true;
++	return 0;
++}
++
++struct audio_session {
++	const struct mi8_glink_cfg *io;
++	struct mi8_glink *link;
++	struct mi8_apr_reply reply;
++	bool (*alive)(void *);
++	void *alive_ctx;
++	uint32_t token, rejected;
++};
++
++static void
++receive(void *ctx, const void *packet, size_t length)
++{
++	struct audio_session *session = ctx;
++	if (mi8_apr_receive(&session->reply, packet, length)) session->rejected++;
++}
++
++static bool
++still_alive(struct audio_session *session)
++{
++	return !session->alive || session->alive(session->alive_ctx);
++}
++
++static uint64_t
++time_us(struct audio_session *session)
++{
++	return session->io->now_us(session->io->ctx);
++}
++
++static int
++ask(struct audio_session *session, uint32_t request, uint64_t deadline)
++{
++	uint8_t packet[20];
++	int error;
++	uint64_t now = time_us(session);
++	uint32_t ms;
++	if (now >= deadline || !still_alive(session)) return ETIMEDOUT;
++	ms = (uint32_t)((deadline - now) / 1000);
++	if (!ms) return ETIMEDOUT;
++	if (ms > 1000) ms = 1000;
++	mi8_apr_begin(&session->reply, request, ++session->token);
++	mi8_apr_encode_request(packet, session->token, request);
++	error = mi8_glink_raw_send(session->link, packet, sizeof(packet), ms);
++	if (error) return error;
++	while (!session->reply.done && time_us(session) < deadline && still_alive(session)) {
++		struct mi8_glink_channel_status status;
++		mi8_glink_poll_once(session->link);
++		error = mi8_glink_raw_status(session->link, &status);
++		if (error) return error;
++		if (!session->reply.done) session->io->sleep_us(session->io->ctx, 1000);
++	}
++	return session->reply.done ? session->reply.error : ETIMEDOUT;
++}
++
++#define TELL(s, ...) do { if ((s).io->log) (s).io->log((s).io->ctx, __VA_ARGS__); } while (0)
++
++bool
++mi8_audio_run(const struct mi8_glink_cfg *cfg, bool (*alive)(void *), void *alive_ctx)
++{
++	static const uint32_t intents[20] = {
++		512, 512, 512, 512, 512, 512, 512, 512, 512, 512,
++		512, 512, 512, 512, 512, 512, 512, 512, 512, 512
++	};
++	struct audio_session session;
++	struct mi8_glink_cfg transport;
++	struct mi8_glink_channel_status status = { 0 };
++	uint64_t deadline, core_end, now;
++	int error, closed;
++	bool success = false;
++	const char *phase = "create";
++	unsigned found = 0;
++	if (!cfg || !cfg->now_us || !cfg->sleep_us) return false;
++	memset(&session, 0, sizeof(session));
++	session.io = cfg; session.alive = alive; session.alive_ctx = alive_ctx;
++	transport = *cfg;
++	/* Low-level per-intent logs would fill the loader's 32 KiB log. Report
++	 * the phase and status here once; never print a packet in a retry loop. */
++	transport.log = NULL;
++	transport.raw.name = "apr_audio_svc"; transport.raw.local_cid = 2;
++	transport.raw.intent_sizes = intents; transport.raw.intent_count = 20;
++	transport.raw.receive = receive; transport.raw.ctx = &session;
++	session.link = mi8_glink_create(&transport);
++	if (!session.link) { TELL(session, "mi8rp: 9: create failed\n"); return false; }
++	error = mi8_glink_start(session.link);
++	if (error) goto out;
++	phase = "GLINK version/open";
++	deadline = time_us(&session) + 8000000ull;
++	do {
++		mi8_glink_poll_once(session.link);
++		error = mi8_glink_raw_status(session.link, &status);
++		if (error != EAGAIN || !still_alive(&session)) break;
++		cfg->sleep_us(cfg->ctx, 1000);
++	} while (time_us(&session) < deadline);
++	if (error || !still_alive(&session)) { if (!error || error == EAGAIN) error = ETIMEDOUT; goto out; }
++	TELL(session, "mi8rp: 9: apr_audio_svc open both ways (local %u remote %u)\n", status.local_cid, status.remote_cid);
++	core_end = time_us(&session) + 5000000ull;
++	phase = "GET_STATE/intent";
++	do {
++		now = time_us(&session);
++		deadline = now + 500000;
++		if (deadline > core_end - 2000000) deadline = core_end - 2000000;
++		error = ask(&session, GET_STATE, deadline);
++		if (!error && session.reply.state == 1) break;
++		if (error && error != ETIMEDOUT) goto out;
++		if (time_us(&session) + 200000 >= core_end - 2000000) break;
++		cfg->sleep_us(cfg->ctx, 200000);
++	} while (still_alive(&session));
++	if (error || session.reply.state != 1) { if (!error) error = ETIMEDOUT; goto out; }
++	TELL(session, "mi8rp: 9: core state=1\n");
++	phase = "GET_FWK_VERSION/intent";
++	deadline = time_us(&session) + 1000000;
++	if (deadline > core_end) deadline = core_end;
++	error = ask(&session, GET_FWK, deadline);
++	if (error == ENOTSUP) {
++		phase = "GET_VERSIONS/intent";
++		error = ask(&session, GET_VERSIONS, core_end);
++	}
++	if (error) goto out;
++	for (uint32_t i = 0; i < session.reply.num_services; i++) {
++		const struct mi8_audio_service *service = &session.reply.services[i];
++		const char *name = service->id == 4 ? "AFE" : service->id == 7 ? "ASM" : service->id == 8 ? "ADM" : NULL;
++		if (!name) continue;
++		TELL(session, "mi8rp: 9: service %s=%u version=%#x branch=%#x\n", name, service->id, service->version, service->branch);
++		found++;
++	}
++	if (found != 3) { phase = "required services missing"; error = ENOENT; goto out; }
++	TELL(session, "mi8rp: 9: parsed %u complete service entries, rejected %u unrelated/bad packets\n", session.reply.num_services, session.rejected);
++	success = true;
++out:
++	if (!success) TELL(session, "mi8rp: 9: failed at %s errno=%d version=%u peer=%u rejected=%u\n", phase, error, status.negotiated, status.remote_cid, session.rejected);
++	closed = mi8_glink_raw_close(session.link, 1000);
++	TELL(session, "mi8rp: 9: channel close errno=%d; DSP shutdown follows\n", closed);
++	mi8_glink_destroy(session.link);
++	return success && !closed;
++}
+diff --git a/bsd/dev/mi8_audio.h b/bsd/dev/mi8_audio.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..83e1c1b33dfb3a05add4a0db67ca5a880a457250
+--- /dev/null
++++ b/bsd/dev/mi8_audio.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: MIT */
++/* Core-service APR only. No audio ports, buffers or amplifier operations. */
++#ifndef MI8_AUDIO_H
++#define MI8_AUDIO_H
++#include "mi8_glink.h"
++
++#define MI8_APR_MAX_SERVICES 256u
++struct mi8_audio_service {
++	uint32_t id, version, branch;
++};
++struct mi8_apr_reply {
++	uint32_t request, response, token, state, num_services, dsp_status;
++	bool done;
++	int error;
++	struct mi8_audio_service services[MI8_APR_MAX_SERVICES];
++};
++int mi8_apr_encode_request(uint8_t packet[20], uint32_t token, uint32_t opcode);
++void mi8_apr_begin(struct mi8_apr_reply *, uint32_t request, uint32_t token);
++/* Invalid/unrelated replies leave the pending request untouched. */
++int mi8_apr_receive(struct mi8_apr_reply *, const void *, size_t);
++/* Synchronous and bounded; caller owns DSP boot/shutdown. cfg callbacks must
++ * remain valid until return. alive is polled for fatal/lifecycle cancellation. */
++bool mi8_audio_run(const struct mi8_glink_cfg *, bool (*alive)(void *), void *);
++#endif
 diff --git a/bsd/dev/mi8_bt.c b/bsd/dev/mi8_bt.c
 new file mode 100644
 index 0000000000000000000000000000000000000000..f981e222e65f8e0962084898975176f0c9a5fa8d
@@ -9412,10 +9706,10 @@ index 0000000000000000000000000000000000000000..f860b0c6c5f0ec72ee9ddbeef1191daf
 +}
 diff --git a/bsd/dev/mi8_glink.c b/bsd/dev/mi8_glink.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8ede0de3b8
+index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b089a2e6c51
 --- /dev/null
 +++ b/bsd/dev/mi8_glink.c
-@@ -0,0 +1,979 @@
+@@ -0,0 +1,1082 @@
 +#include "mi8_glink.h"
 +
 +#ifdef MI8_GLINK_HOST_TEST
@@ -9494,11 +9788,15 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +	uint32_t length, offset, iid;
 +	uint64_t since;
 +	int error;
-+	bool requested, answered, granted, synchronous, done;
++	bool requested, answered, granted, synchronous, done, intent_selected;
++	uint64_t timeout_us;
 +	uint8_t bytes[];
 +};
 +struct mi8_glink {
 +	struct mi8_glink_cfg cfg;
++	char raw_name[32];
++	uint32_t raw_sizes[INTENTS];
++	bool raw_stopping;
 +	uintptr_t owner;
 +	unsigned depth, slot;
 +	uint32_t desc, tx, tx_size, rx, rx_size;
@@ -9518,6 +9816,12 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +static void progress(struct mi8_glink *);
 +static void qrtr_input(struct mi8_glink *, const uint8_t *, uint32_t);
 +static void drop_servers(struct mi8_glink *, uint32_t);
++
++static uint16_t
++local_cid(struct mi8_glink *g)
++{
++	return g->cfg.raw.name ? g->cfg.raw.local_cid : 1;
++}
 +
 +static uint32_t
 +get32(const void *v)
@@ -9712,9 +10016,9 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +	g->local[i].there = true;
 +	g->local[i].size = size;
 +	g->local[i].id = ++g->next_intent;
-+	g->local[i].reusable = reusable;
++	g->local[i].reusable = reusable && (!g->cfg.raw.name || (g->features & 1));
 +	put32(pair, size); put32(pair + 4, g->local[i].id);
-+	return say(g, INTENT, 1, 1, pair, 8);
++	return say(g, INTENT, local_cid(g), 1, pair, 8);
 +}
 +
 +static struct outgoing *
@@ -9728,6 +10032,7 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +	o->length = len;
 +	o->synchronous = synchronous;
 +	o->since = g->cfg.now_us(g->cfg.ctx);
++	o->timeout_us = WAIT_US;
 +	put32(o->bytes, 1); put32(o->bytes + 4, type);
 +	put32(o->bytes + 8, g->cfg.local_node); put32(o->bytes + 12, from);
 +	put32(o->bytes + 20, n); put32(o->bytes + 24, node); put32(o->bytes + 28, port);
@@ -9764,7 +10069,7 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +{
 +	struct outgoing *o = g->outgoing;
 +	unsigned i;
-+	if (error && !o->offset && o->iid) for (i = 0; i < INTENTS; i++)
++	if (error && !o->offset && (o->iid || (g->cfg.raw.name && o->intent_selected))) for (i = 0; i < INTENTS; i++)
 +		if (g->foreign[i].there && g->foreign[i].id == o->iid) g->foreign[i].busy = false;
 +	if (error && o->length > 1000) LOG(g, "mi8gl: send of %u bytes FAILED (%d), offset %u, intent %u\n", o->length, error, o->offset, o->iid);
 +	g->outgoing = o->next;
@@ -9792,13 +10097,13 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +			finish(g, ENOTCONN);
 +			continue;
 +		}
-+		if (g->cfg.now_us(g->cfg.ctx) - o->since >= WAIT_US) {
++		if (g->cfg.now_us(g->cfg.ctx) - o->since >= o->timeout_us) {
 +			if (o->offset) broken(g, "partial transmit timed out");
 +			finish(g, ETIMEDOUT);
 +			continue;
 +		}
 +		if (g->commands) return;
-+		if (!o->iid) {
++		if (g->cfg.raw.name ? !o->intent_selected : !o->iid) {
 +			for (i = 0; i < INTENTS; i++) {
 +				struct intent *v = &g->foreign[i];
 +				if (v->there && !v->busy && v->size >= o->length &&
@@ -9809,12 +10114,13 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +				if (!o->requested) {
 +					o->requested = true;
 +					if (o->length > 1000) LOG(g, "mi8gl: no remote intent for %u bytes: asks for one\n", o->length);
-+					say(g, INTENT_REQ, 1, o->length, NULL, 0);
++					say(g, INTENT_REQ, local_cid(g), o->length, NULL, 0);
 +				}
 +				return;
 +			}
 +			g->foreign[best].busy = true;
 +			o->iid = g->foreign[best].id;
++			o->intent_selected = true;
 +			if (o->length > 1000) LOG(g, "mi8gl: sends %u bytes in remote intent %u (size %u)\n", o->length, o->iid, g->foreign[best].size);
 +		}
 +		available = room(g, true);
@@ -9822,7 +10128,7 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +		n = o->length - o->offset;
 +		if (n > 8192) n = 8192;
 +		if (n > available - 16) n = (available - 16) & ~7u;
-+		header(h, o->offset ? DATA_MORE : DATA, 1, o->iid);
++		header(h, o->offset ? DATA_MORE : DATA, local_cid(g), o->iid);
 +		put32(h + 8, n); put32(h + 12, o->length - o->offset - n);
 +		if (!emit(g, h, 16, o->bytes + o->offset, n, true)) return;
 +		o->offset += n;
@@ -9994,14 +10300,22 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +{
 +	static const uint32_t sizes[10] = { 0x800, 0x800, 0x800, 0x800, 0x800, 0x2000, 0x2000, 0x2000, 0x4400, 0x4400 };
 +	unsigned i;
-+	if (!g->agreed || !g->remote || g->closing) return;
++	if (!g->agreed || !g->remote || g->closing || g->raw_stopping) return;
 +	if (!g->asked) {
 +		g->asked = true;
-+		say(g, OPEN, 1, 7, "IPCRTR", 7);
++		if (g->cfg.raw.name) {
++			uint32_t n = (uint32_t)strlen(g->cfg.raw.name) + 1;
++			say(g, OPEN, local_cid(g), n, g->cfg.raw.name, n);
++		} else say(g, OPEN, 1, 7, "IPCRTR", 7);
 +	}
 +	if (!g->acked || g->opened) return;
 +	g->opened = true;
-+	LOG(g, "mi8gl: IPCRTR open both ways\n");
++	if (!g->cfg.raw.name) LOG(g, "mi8gl: IPCRTR open both ways\n");
++	if (g->cfg.raw.name) {
++		for (i = 0; i < g->cfg.raw.intent_count; i++)
++			if (!offer(g, g->cfg.raw.intent_sizes[i], true)) { broken(g, "raw intent allocation failed"); break; }
++		return;
++	}
 +	for (i = 0; i < 10; i++) if (!offer(g, sizes[i], true)) {
 +		broken(g, "initial intent allocation failed");
 +		break;
@@ -10081,11 +10395,13 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +			}
 +			write_word(g, g->desc + 8, (tail + n) % g->rx_size);
 +			if (!left) {
-+				say(g, v->reusable ? DONE_REUSE : DONE, 1, arg, NULL, 0);
++				say(g, v->reusable ? DONE_REUSE : DONE, local_cid(g), arg, NULL, 0);
 +				if (!v->reusable) {
 +					MI8_FREE(v->data, v->size); memset(v, 0, sizeof(*v));
 +				}
-+				qrtr_input(g, packet, total);
++				if (g->cfg.raw.name) {
++					if (!g->raw_stopping) g->cfg.raw.receive(g->cfg.raw.ctx, packet, total);
++				} else qrtr_input(g, packet, total);
 +				MI8_FREE(packet, total);
 +			}
 +			continue;
@@ -10104,19 +10420,21 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +			break;
 +		case OPEN:
 +			say(g, OPEN_ACK, cid, 0, NULL, 0);
-+			if ((arg & 0xffff) == 7 && !memcmp(extra, "IPCRTR", 7)) {
++			if ((g->cfg.raw.name && (arg & 0xffff) == strlen(g->cfg.raw.name) + 1 &&
++			    !memcmp(extra, g->cfg.raw.name, arg & 0xffff)) ||
++			    (!g->cfg.raw.name && (arg & 0xffff) == 7 && !memcmp(extra, "IPCRTR", 7))) {
 +				if (g->remote && g->remote != cid) { broken(g, "IPCRTR channel changed without close"); break; }
 +				g->remote = cid;
 +			} else LOG(g, "mi8gl: unsupported remote channel %u %s: acknowledged, data ignored\n", cid, extra);
 +			break;
 +		case OPEN_ACK:
-+			if (cid == 1 && g->asked && !g->closing) g->acked = true;
++			if (cid == local_cid(g) && g->asked && !g->closing) g->acked = true;
 +			break;
 +		case INTENT: break;
 +		case INTENT_REQ:
 +			if (cid == g->remote && g->opened) {
 +				bool granted = offer(g, arg, false);
-+				say(g, INTENT_ACK, 1, granted ? 1 : 0, NULL, 0);
++				say(g, INTENT_ACK, local_cid(g), granted ? 1 : 0, NULL, 0);
 +			}
 +			break;
 +		case INTENT_ACK:
@@ -10142,13 +10460,13 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +			say(g, CLOSE_ACK, cid, 0, NULL, 0);
 +			if (cid == g->remote) {
 +				g->remote = 0; g->opened = false; g->hello = false;
-+				if (g->asked && !g->closing) { g->closing = true; say(g, CLOSE, 1, 0, NULL, 0); }
++				if (g->asked && !g->closing) { g->closing = true; say(g, CLOSE, local_cid(g), 0, NULL, 0); }
 +				while (g->outgoing) finish(g, ENOTCONN);
 +				clear_intents(g); drop_servers(g, BCAST);
 +			}
 +			break;
 +		case CLOSE_ACK:
-+			if (cid == 1 && g->closing) { g->closing = false; g->asked = false; g->acked = false; }
++			if (cid == local_cid(g) && g->closing) { g->closing = false; g->asked = false; g->acked = false; }
 +			break;
 +		case DATA:
 +		case DATA_MORE:
@@ -10267,6 +10585,22 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +	g = MI8_ALLOC(sizeof(*g));
 +	if (!g) return NULL;
 +	memset(g, 0, sizeof(*g)); g->cfg = *cfg;
++	if (cfg->raw.name) {
++		if (!cfg->raw.receive || !cfg->raw.local_cid || !cfg->raw.intent_count ||
++		    cfg->raw.intent_count > INTENTS || !cfg->raw.intent_sizes ||
++		    strlen(cfg->raw.name) == 0 || strlen(cfg->raw.name) >= sizeof(g->raw_name)) {
++			MI8_FREE(g, sizeof(*g)); return NULL;
++		}
++		for (i = 0; i < cfg->raw.intent_count; i++) {
++			if (!cfg->raw.intent_sizes[i] || cfg->raw.intent_sizes[i] > MAX_PACKET) {
++				MI8_FREE(g, sizeof(*g)); return NULL;
++			}
++			g->raw_sizes[i] = cfg->raw.intent_sizes[i];
++		}
++		memcpy(g->raw_name, cfg->raw.name, strlen(cfg->raw.name) + 1);
++		g->cfg.raw.name = g->raw_name;
++		g->cfg.raw.intent_sizes = g->raw_sizes;
++	}
 +	if (!g->cfg.local_node) g->cfg.local_node = 1;
 +	if (g->cfg.local_node >= CTRL) { MI8_FREE(g, sizeof(*g)); return NULL; }
 +	for (i = 0; i < INSTANCES; i++) {
@@ -10340,7 +10674,7 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +		g->ports[i].live = false; g->ports[i].generation++;
 +		memset(g->ports[i].lookups, 0, sizeof(g->ports[i].lookups));
 +	}
-+	if (g->up && g->asked && !g->closing) say(g, CLOSE, 1, 0, NULL, 0);
++	if (g->up && g->asked && !g->closing) say(g, CLOSE, local_cid(g), 0, NULL, 0);
 +	g->up = false;
 +	while (g->outgoing) finish(g, ENOTCONN);
 +	while ((c = g->commands) != NULL) { g->commands = c->next; MI8_FREE(c, sizeof(*c)); }
@@ -10364,7 +10698,7 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +const struct redwood_qrtr_ops *
 +mi8_glink_qrtr_ops(struct mi8_glink *g)
 +{
-+	return g ? &all_ops[g->slot] : NULL;
++	return g && !g->cfg.raw.name ? &all_ops[g->slot] : NULL;
 +}
 +
 +int
@@ -10395,12 +10729,75 @@ index 0000000000000000000000000000000000000000..ecc76fc021e9e878ed0017ae5d849a8e
 +	leave(g);
 +	return (int)count;
 +}
++
++
++int
++mi8_glink_raw_status(struct mi8_glink *g, struct mi8_glink_channel_status *out)
++{
++	int error;
++	if (!g || !out || !g->cfg.raw.name) return EINVAL;
++	enter(g);
++	out->local_cid = local_cid(g); out->remote_cid = (uint16_t)g->remote;
++	out->negotiated = g->agreed;
++	out->open = g->up && !g->broken && g->opened && !g->closing && !g->raw_stopping;
++	error = g->broken ? EIO : !g->up || g->raw_stopping ? ENOTCONN : out->open ? 0 : EAGAIN;
++	leave(g);
++	return error;
++}
++
++int
++mi8_glink_raw_send(struct mi8_glink *g, const void *data, size_t length, uint32_t timeout_ms)
++{
++	struct outgoing *o;
++	int error;
++	if (!g || !g->cfg.raw.name || !data || !length || !timeout_ms || timeout_ms > 5000) return EINVAL;
++	if (length > MAX_PACKET) return EMSGSIZE;
++	enter(g);
++	if (!g->up || !g->opened || g->broken || g->closing || g->raw_stopping) { leave(g); return ENOTCONN; }
++	if (g->outgoing_count == 64 || !(o = MI8_ALLOC(sizeof(*o) + length))) { leave(g); return ENOMEM; }
++	memset(o, 0, sizeof(*o) + length);
++	o->length = (uint32_t)length; o->synchronous = true;
++	o->since = g->cfg.now_us(g->cfg.ctx); o->timeout_us = (uint64_t)timeout_ms * 1000;
++	memcpy(o->bytes, data, length);
++	if (g->outgoing_last) g->outgoing_last->next = o; else g->outgoing = o;
++	g->outgoing_last = o; g->outgoing_count++;
++	do {
++		pump(g); progress(g);
++		if (!o->done) g->cfg.sleep_us(g->cfg.ctx, 1000);
++	} while (!o->done);
++	error = o->error;
++	MI8_FREE(o, sizeof(*o) + length);
++	leave(g);
++	return error;
++}
++
++int
++mi8_glink_raw_close(struct mi8_glink *g, uint32_t timeout_ms)
++{
++	uint64_t start;
++	int error = 0;
++	if (!g || !g->cfg.raw.name || !timeout_ms || timeout_ms > 5000) return EINVAL;
++	enter(g);
++	g->raw_stopping = true;
++	start = g->cfg.now_us(g->cfg.ctx);
++	if (g->up && g->asked && !g->closing) { g->closing = true; say(g, CLOSE, local_cid(g), 0, NULL, 0); }
++	while (g->asked && !g->broken && g->cfg.now_us(g->cfg.ctx) - start < (uint64_t)timeout_ms * 1000) {
++		pump(g); progress(g);
++		if (g->asked) g->cfg.sleep_us(g->cfg.ctx, 1000);
++	}
++	if (g->asked) error = g->broken ? EIO : ETIMEDOUT;
++	/* stop must not send a second close after a timeout. */
++	g->up = false;
++	leave(g);
++	mi8_glink_stop(g);
++	return error;
++}
 diff --git a/bsd/dev/mi8_glink.h b/bsd/dev/mi8_glink.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..69bb59573a328ee2407dd04e61c74fd489ff49fc
+index 0000000000000000000000000000000000000000..e54bdf680bf9937a9b4bfc0f3628e18f43aeb82b
 --- /dev/null
 +++ b/bsd/dev/mi8_glink.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,82 @@
 +#ifndef MI8_GLINK_H
 +#define MI8_GLINK_H
 +
@@ -10422,6 +10819,21 @@ index 0000000000000000000000000000000000000000..69bb59573a328ee2407dd04e61c74fd4
 +#include <sys/redwood_qrtr.h>
 +#endif
 +
++/* Optional raw mode: one named channel per independent link instance. NULL name
++ * preserves the original IPCRTR/QRTR mode. Callbacks run under the instance gate;
++ * data is borrowed for the duration of receive. Lifecycle calls are not callbacks. */
++struct mi8_glink_raw_cfg {
++	const char *name;
++	uint16_t local_cid;
++	const uint32_t *intent_sizes;
++	unsigned intent_count;
++	void (*receive)(void *, const void *, size_t);
++	void *ctx;
++};
++struct mi8_glink_channel_status {
++	uint16_t local_cid, remote_cid;
++	bool negotiated, open;
++};
 +struct mi8_glink_cfg {
 +	const char *name;
 +	uint32_t remote_pid;
@@ -10435,6 +10847,7 @@ index 0000000000000000000000000000000000000000..69bb59573a328ee2407dd04e61c74fd4
 +	void (*log)(void *, const char *, ...);
 +	void *ctx;
 +	uint32_t local_node; /* Zero selects the default node 1. */
++	struct mi8_glink_raw_cfg raw;
 +};
 +
 +struct mi8_qrtr_server {
@@ -10449,6 +10862,12 @@ index 0000000000000000000000000000000000000000..69bb59573a328ee2407dd04e61c74fd4
 +void mi8_glink_stop(struct mi8_glink *);
 +/* Quiesce callers and discard all port/ops handles before destroying an instance. */
 +void mi8_glink_destroy(struct mi8_glink *);
++int mi8_glink_raw_status(struct mi8_glink *, struct mi8_glink_channel_status *);
++/* timeout_ms is a bounded total send budget, including intent/FIFO waits. */
++int mi8_glink_raw_send(struct mi8_glink *, const void *, size_t, uint32_t timeout_ms);
++/* Wait for our CLOSE_ACK, then stop delivery even on timeout. Always destroy
++ * the link afterwards; this raw instance is not implicitly reopened. */
++int mi8_glink_raw_close(struct mi8_glink *, uint32_t timeout_ms);
 +const struct redwood_qrtr_ops *mi8_glink_qrtr_ops(struct mi8_glink *);
 +/* Returns the number copied, or a positive errno negated for invalid arguments. */
 +int mi8_glink_qrtr_servers(struct mi8_glink *, struct mi8_qrtr_server *, unsigned);
@@ -11287,10 +11706,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18bf361858
+index 0000000000000000000000000000000000000000..06f4d3541220f70ab3f7074000606fb73ed9705f
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4011 @@
+@@ -0,0 +1,4174 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -11355,6 +11774,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +#include <sys/errno.h>
 +#include <sys/param.h>
 +#include "mi8_glink.h"
++#include "mi8_audio.h"
 +#include "mi8_hostsvc.h"
 +#include "mi8_wlfw.h"
 +#include <sys/mi8_lx.h>
@@ -11729,6 +12149,12 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +#define MUTEX_STRIDE            0x1000u
 +#define LOCK_US                 1u              /* the application processor's number (qcom_hwspinlock.c) */
 +
++/* Only the explicit ADSP/GLINK experiment adds AP-thread serialization.
++ * The hardware SMEM owner number alone cannot distinguish two AP threads. */
++static bool adsp_shared_serial;
++static LCK_GRP_DECLARE(remote_lock_group, "mi8-remote-shared");
++static LCK_MTX_DECLARE(remote_shared_lock, &remote_lock_group);
++
 +static vm_offset_t mutex_base;
 +
 +static vm_offset_t
@@ -11755,7 +12181,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +
 +/* Takes SMEM's lock (for a second at most), as Linux does: write our number until it reads back. */
 +static bool
-+lock_take(void)
++lock_take_unserialized(void)
 +{
 +	vm_offset_t lock = mutex_map() + MUTEX_SMEM * MUTEX_STRIDE;
 +	uint32_t owner = ~0u;
@@ -11772,10 +12198,21 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +	return false;
 +}
 +
++static bool
++lock_take(void)
++{
++	bool took;
++	if (adsp_shared_serial) lck_mtx_lock(&remote_shared_lock);
++	took = lock_take_unserialized();
++	if (!took && adsp_shared_serial) lck_mtx_unlock(&remote_shared_lock);
++	return took;
++}
++
 +static void
 +lock_give(void)
 +{
 +	wr(mutex_map() + MUTEX_SMEM * MUTEX_STRIDE, 0);
++	if (adsp_shared_serial) lck_mtx_unlock(&remote_shared_lock);
 +}
 +
 +static void
@@ -11785,7 +12222,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +
 +	announce(3, "takes SMEM's lock (write 1 at 0x1f43000, reads back 1 when ours) and gives it back (write 0)");
 +	took = lock_take();
-+	lock_give();
++	if (took || !adsp_shared_serial) lock_give();
 +	say("mi8rp: 3: lock %s; after giving it back it reads %u\n", took ? "taken" : "NOT taken", rd(mutex_map() + MUTEX_SMEM * MUTEX_STRIDE));
 +}
 +
@@ -11819,14 +12256,17 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +static uint32_t
 +item_find(uint32_t partition, uint32_t cacheline, uint32_t item, uint32_t *size)
 +{
-+	unsigned count = smem_items(partition, cacheline, found, MAX_ITEMS);
-+	const struct smem_item *it = find_item(count, item);
++	/* Concurrent edges must never share the survey's scratch array. */
++	struct smem_item items[MAX_ITEMS];
++	unsigned count = smem_items(partition, cacheline, items, MAX_ITEMS);
 +
-+	if (it == NULL) {
-+		return 0;
++	for (unsigned i = 0; i < count && i < MAX_ITEMS; i++) {
++		if (items[i].item == item) {
++			*size = items[i].size;
++			return items[i].offset;
++		}
 +	}
-+	*size = it->size;
-+	return it->offset;
++	return 0;
 +}
 +
 +/* Linux's qcom_smem_alloc_private() for an item at the bottom of the partition; the lock is ours when this is called. */
@@ -12335,6 +12775,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +#define APCS_IPC                0x0c
 +#define IPC_AOP                 (1u << 0)       /* dt: qcom,qmp-aop qcom,irq-mask */
 +#define IPC_SMP2P_ADSP          (1u << 10)      /* dt: qcom,smp2p-adsp qcom,irq-bitmask 0x400 */
++#define IPC_GLINK_ADSP          (1u << 8)       /* SDM845 lpass GLINK irq-mask 0x100 */
 +#define IPC_SMP2P_MODEM         (1u << 14)
 +#define IPC_GLINK_MODEM         (1u << 12)
 +#define AOSS_PHYS               0x0c300000ul
@@ -12445,7 +12886,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +
 +/* Linux's qmp_send(). */
 +static bool
-+qmp_send(const char *text)
++qmp_send_unserialized(const char *text)
 +{
 +	uint32_t words[QMP_MESSAGE / 4] = { 0 };
 +
@@ -12471,6 +12912,16 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +	}
 +	say("mi8rp: qmp: the AOP has taken it\n");
 +	return true;
++}
++
++static bool
++qmp_send(const char *text)
++{
++	bool ok;
++	if (adsp_shared_serial) lck_mtx_lock(&remote_shared_lock);
++	ok = qmp_send_unserialized(text);
++	if (adsp_shared_serial) lck_mtx_unlock(&remote_shared_lock);
++	return ok;
 +}
 +
 +/* ---- RPMh: a rail's level, as Linux's rpmh-rsc.c asks for one (apps_rsc DRV 2; TCS 1: TCS 0 is mi8_ddr's) ---- */
@@ -12577,7 +13028,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +
 +/* One request, one rail, through TCS 1 and waited for; true: RPMh said done. */
 +static bool
-+rpmh_write(const char *what, uint32_t address, uint32_t data)
++rpmh_write_unserialized(const char *what, uint32_t address, uint32_t data)
 +{
 +	vm_offset_t tcs;
 +	uint32_t done = 0;
@@ -12614,6 +13065,16 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +	wr(tcs + 0x1c, 0);
 +	settle();
 +	return done != 0;
++}
++
++static bool
++rpmh_write(const char *what, uint32_t address, uint32_t data)
++{
++	bool ok;
++	if (adsp_shared_serial) lck_mtx_lock(&remote_shared_lock);
++	ok = rpmh_write_unserialized(what, address, data);
++	if (adsp_shared_serial) lck_mtx_unlock(&remote_shared_lock);
++	return ok;
 +}
 +
 +static bool
@@ -12850,13 +13311,17 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +}
 +
 +/* SMP2P with the audio DSP: its item (443), ours (429). */
-+static uint32_t our_item;
-+/* Which remote processor the SMP2P helpers below talk to: the audio DSP unless W2f points them at the modem. */
-+static struct {
++struct mi8_remote {
 +	uint16_t remote;
-+	uint32_t theirs_item, doorbell;
-+} rem = { SMEM_ADSP, ITEM_SMP2P_THEIRS, IPC_SMP2P_ADSP };
-+static bool smp2p_agreed, smp2p_restart_acks, smp2p_restart_acked;
++	uint32_t theirs_item, doorbell, our_item;
++	bool agreed, restart_acks, restart_acked;
++};
++static struct mi8_remote adsp_remote = {
++	.remote = SMEM_ADSP, .theirs_item = ITEM_SMP2P_THEIRS, .doorbell = IPC_SMP2P_ADSP
++};
++static struct mi8_remote modem_remote = {
++	.remote = SMEM_MODEM, .theirs_item = ITEM_SMP2P_THEIRS_ALT, .doorbell = IPC_SMP2P_MODEM
++};
 +#define SMP2P_AT_FLAGS          16
 +#define SMP2P_AT_VALUE(i)       (36 + 20 * (i))
 +#define SMP2P_RESTART_DONE      (1u << 0)
@@ -12869,17 +13334,17 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +#define DSP_STOP                (1u << 0)
 +
 +static uint32_t
-+adsp_item(uint32_t item, uint32_t *size)
++remote_item(struct mi8_remote *r, uint32_t item, uint32_t *size)
 +{
-+	uint32_t cacheline = 0, psize = 0, partition = smem_partition(SMEM_US, rem.remote, &cacheline, &psize);
++	uint32_t cacheline = 0, psize = 0, partition = smem_partition(SMEM_US, r->remote, &cacheline, &psize);
 +
 +	return partition ? item_find(partition, cacheline, item, size) : 0;
 +}
 +
 +static bool
-+dsp_words(struct smp2p *words)
++remote_words(struct mi8_remote *r, struct smp2p *words)
 +{
-+	uint32_t size = 0, at = adsp_item(rem.theirs_item, &size);
++	uint32_t size = 0, at = remote_item(r, r->theirs_item, &size);
 +
 +	if (at == 0 || size < sizeof(*words)) {
 +		return false;
@@ -12922,34 +13387,53 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +
 +/* What Linux does when the DSP rings for SMP2P: agree on the features once, and answer a restart. */
 +static void
-+dsp_listen(const struct smp2p *theirs)
++remote_listen(struct mi8_remote *r, const struct smp2p *theirs)
 +{
 +	struct smp2p ours;
 +
-+	if (our_item == 0 || !smem_peek(our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC) {
++	if (r->our_item == 0 || !smem_peek(r->our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC) {
 +		return;
 +	}
-+	if (!smp2p_agreed) {
++	if (!r->agreed) {
 +		uint32_t features = (ours.version >> 8) & (theirs->version >> 8);
 +
 +		if ((theirs->version & 0xff) != (ours.version & 0xff)) {
 +			return;
 +		}
 +		if (features != ours.version >> 8) {
-+			smem_poke(our_item + SMP2P_AT_VERSION, features << 8 | (ours.version & 0xff));
++			smem_poke(r->our_item + SMP2P_AT_VERSION, features << 8 | (ours.version & 0xff));
 +		}
-+		smp2p_restart_acks = features & SMP2P_RESTART_ACKS;
-+		smp2p_agreed = true;
++		r->restart_acks = features & SMP2P_RESTART_ACKS;
++		r->agreed = true;
 +		say("mi8rp: 8: the DSP and we agree on SMP2P: version %u, features %#x\n", ours.version & 0xff, features);
 +	}
-+	if (smp2p_restart_acks && ((theirs->flags & SMP2P_RESTART_DONE) != 0) != smp2p_restart_acked) {
-+		smp2p_restart_acked = !smp2p_restart_acked;
++	if (r->restart_acks && ((theirs->flags & SMP2P_RESTART_DONE) != 0) != r->restart_acked) {
++		r->restart_acked = !r->restart_acked;
 +		say("mi8rp: 8: the DSP's flags say it has restarted (%#x): answered in our flags (bit 1 = %u), and its doorbell\n", theirs->flags,
-+		    smp2p_restart_acked);
-+		smem_poke(our_item + SMP2P_AT_FLAGS, (ours.flags & ~SMP2P_RESTART_ACK) | (smp2p_restart_acked ? SMP2P_RESTART_ACK : 0));
++		    r->restart_acked);
++		smem_poke(r->our_item + SMP2P_AT_FLAGS, (ours.flags & ~SMP2P_RESTART_ACK) | (r->restart_acked ? SMP2P_RESTART_ACK : 0));
 +		settle();
-+		ring(rem.doorbell);
++		ring(r->doorbell);
 +	}
++}
++
++/* Existing modem callers keep their call sites, messages and polling order. */
++static uint32_t
++adsp_item(uint32_t item, uint32_t *size)
++{
++	return remote_item(&modem_remote, item, size);
++}
++
++static bool
++dsp_words(struct smp2p *words)
++{
++	return remote_words(&modem_remote, words);
++}
++
++static void
++dsp_listen(const struct smp2p *words)
++{
++	remote_listen(&modem_remote, words);
 +}
 +
 +static uint64_t
@@ -12970,11 +13454,11 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +	uint64_t asked, now;
 +	int entry;
 +
-+	if (our_item == 0 || !smem_peek(our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC || (entry = smp2p_entry(&ours, "master-kernel")) < 0) {
++	if (adsp_remote.our_item == 0 || !smem_peek(adsp_remote.our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC || (entry = smp2p_entry(&ours, "master-kernel")) < 0) {
 +		say("mi8rp: the DSP is not asked to stop: there is no item of ours to ask it with\n");
 +		return false;
 +	}
-+	if (!dsp_words(&theirs) || smp2p_entry(&theirs, "slave-kernel") < 0) {
++	if (!remote_words(&adsp_remote, &theirs) || smp2p_entry(&theirs, "slave-kernel") < 0) {
 +		say("mi8rp: the DSP is not asked to stop: its item has no entry to answer in\n");
 +		return false;
 +	}
@@ -12983,46 +13467,52 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +		say("mi8rp: the DSP is not asked to stop first: its entry says %#x, not \"up\"\n", state);
 +		return false;
 +	}
-+	value_at = our_item + SMP2P_AT_VALUE((uint32_t)entry);
++	value_at = adsp_remote.our_item + SMP2P_AT_VALUE((uint32_t)entry);
 +	say("mi8rp: asking the DSP to stop: bit 0 of our \"master-kernel\" at %#lx, and its doorbell\n", SMEM_PHYS + value_at);
 +	smem_poke(value_at, ours.entry[entry].value | DSP_STOP);
 +	settle();
-+	ring(rem.doorbell);
++	ring(adsp_remote.doorbell);
 +	asked = now = now_us();
 +	while (now - asked < bound_ms * 1000ull) {
-+		if (dsp_words(&theirs) && (dsp_state(&theirs) & (DSP_STOP_ACK | DSP_FATAL))) {
++		if (remote_words(&adsp_remote, &theirs) && (dsp_state(&theirs) & (DSP_STOP_ACK | DSP_FATAL))) {
 +			break;
 +		}
 +		delay_for_interval(200, NSEC_PER_USEC);
 +		now = now_us();
 +	}
-+	state = dsp_words(&theirs) ? dsp_state(&theirs) : 0;
++	state = remote_words(&adsp_remote, &theirs) ? dsp_state(&theirs) : 0;
 +	say("mi8rp: %s after %llu.%03llu ms; its entry says %#x\n", state & DSP_STOP_ACK ? "THE AUDIO DSP ACKNOWLEDGES THE STOP" :
 +	    "THE AUDIO DSP DOES NOT ACKNOWLEDGE THE STOP", (now - asked) / 1000, (now - asked) % 1000, state);
 +	smem_poke(value_at, ours.entry[entry].value & ~DSP_STOP);
 +	settle();
-+	ring(rem.doorbell);
++	ring(adsp_remote.doorbell);
 +	return (state & DSP_STOP_ACK) != 0;
++}
++
++static void
++remote_crash_reason(struct mi8_remote *r)
++{
++	char text[81];
++	uint32_t size = 0, at = remote_item(r, ITEM_CRASH_REASON + r->remote, &size);     /* 421 + remote pid */
++
++	if (at == 0) {
++		uint32_t cacheline = 0, psize = 0, global = smem_partition(SMEM_GLOBAL, SMEM_GLOBAL, &cacheline, &psize);
++
++		at = global ? item_find(global, cacheline, ITEM_CRASH_REASON + r->remote, &size) : 0;
++	}
++	if (at == 0 || size == 0) {
++		say("mi8rp: item %u, the DSP's last words: not there\n", ITEM_CRASH_REASON + r->remote);
++		return;
++	}
++	memset(text, 0, sizeof(text));
++	smem_peek(at, text, size < sizeof(text) - 1 ? size : sizeof(text) - 1);
++	say("mi8rp: THE AUDIO DSP'S LAST WORDS (item %u, %u bytes): \"%s\"\n", ITEM_CRASH_REASON + r->remote, size, text);
 +}
 +
 +static void
 +show_crash_reason(void)
 +{
-+	char text[81];
-+	uint32_t size = 0, at = adsp_item(ITEM_CRASH_REASON + rem.remote, &size);     /* 421 + remote pid */
-+
-+	if (at == 0) {
-+		uint32_t cacheline = 0, psize = 0, global = smem_partition(SMEM_GLOBAL, SMEM_GLOBAL, &cacheline, &psize);
-+
-+		at = global ? item_find(global, cacheline, ITEM_CRASH_REASON + rem.remote, &size) : 0;
-+	}
-+	if (at == 0 || size == 0) {
-+		say("mi8rp: item %u, the DSP's last words: not there\n", ITEM_CRASH_REASON + rem.remote);
-+		return;
-+	}
-+	memset(text, 0, sizeof(text));
-+	smem_peek(at, text, size < sizeof(text) - 1 ? size : sizeof(text) - 1);
-+	say("mi8rp: THE AUDIO DSP'S LAST WORDS (item %u, %u bytes): \"%s\"\n", ITEM_CRASH_REASON + rem.remote, size, text);
++	remote_crash_reason(&modem_remote);
 +}
 +
 +static bool
@@ -13062,7 +13552,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +		say("mi8rp: 8: the image is not in place\n");
 +		return false;
 +	}
-+	if (dsp_words(&words) && !again) {
++	if (remote_words(&adsp_remote, &words) && !again) {
 +		show_words("8: the DSP's item (443) is already there: a start before this one", &words);
 +		say("mi8rp: 8: NOT STARTED: mi8rp_again=1 to try after a start before this one\n");
 +		return false;
@@ -13072,18 +13562,18 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +	if (partition == 0) {
 +		return false;
 +	}
-+	our_item = item_find(partition, cacheline, ITEM_SMP2P_OURS, &size);
-+	if (our_item == 0) {
++	adsp_remote.our_item = item_find(partition, cacheline, ITEM_SMP2P_OURS, &size);
++	if (adsp_remote.our_item == 0) {
 +		make_our_item(SMEM_ADSP, ITEM_SMP2P_OURS, names, 1);
-+		our_item = item_find(partition, cacheline, ITEM_SMP2P_OURS, &size);
-+		if (our_item == 0) {
++		adsp_remote.our_item = item_find(partition, cacheline, ITEM_SMP2P_OURS, &size);
++		if (adsp_remote.our_item == 0) {
 +			say("mi8rp: 8: our SMP2P item is not there\n");
 +			return false;
 +		}
 +	} else {
-+		smp2p_fill(our_item, SMEM_ADSP, names, 1);
++		smp2p_fill(adsp_remote.our_item, SMEM_ADSP, names, 1);
 +	}
-+	smp2p_agreed = smp2p_restart_acks = smp2p_restart_acked = false;
++	adsp_remote.agreed = adsp_remote.restart_acks = adsp_remote.restart_acked = false;
 +	/* GLINK's marks of ours to zero, if its descriptor is there from before (no descriptor yet is normal) */
 +	{
 +		uint32_t d = item_find(partition, cacheline, ITEM_GLINK_DESCRIPTOR, &size);
@@ -13120,7 +13610,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +		if (now >= limit) {
 +			break;
 +		}
-+		if (dsp_words(&words) && (!have || memcmp(&words, &last, sizeof(words)) != 0)) {
++		if (remote_words(&adsp_remote, &words) && (!have || memcmp(&words, &last, sizeof(words)) != 0)) {
 +			char when[64];
 +
 +			snprintf(when, sizeof(when), "8: +%llu.%03llu ms: the DSP's item %s", (now - started) / 1000, (now - started) % 1000,
@@ -13130,7 +13620,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +			}
 +			last = words;
 +			have = spoke = true;
-+			dsp_listen(&words);
++			remote_listen(&adsp_remote, &words);
 +			state = dsp_state(&words);
 +			if ((state & DSP_READY) && ready_at == 0) {
 +				ready_at = now;
@@ -13144,19 +13634,19 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +			}
 +			if (state & DSP_FATAL) {
 +				say("mi8rp: 8: THE AUDIO DSP SAYS IT HAS GIVEN UP\n");
-+				show_crash_reason();
++				remote_crash_reason(&adsp_remote);
 +				break;
 +			}
 +		}
 +		delay_for_interval(200, NSEC_PER_USEC);
 +	}
 +	say("mi8rp: 8: the watch is over after %llu ms\n", (now_us() - started) / 1000);
-+	if (our_item != 0 && smem_peek(our_item, &ours, sizeof(ours))) {
++	if (adsp_remote.our_item != 0 && smem_peek(adsp_remote.our_item, &ours, sizeof(ours))) {
 +		show_words("8: our item (429) now", &ours);
 +	}
 +	if (ready_at == 0) {
 +		say("mi8rp: 8: %s\n", spoke ? "THE AUDIO DSP RUNS BUT HAS NOT SAID \"UP\"" : "NOT A WORD FROM THE AUDIO DSP");
-+		show_crash_reason();
++		remote_crash_reason(&adsp_remote);
 +	}
 +	return ready_at != 0;
 +}
@@ -14591,21 +15081,21 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +	static const char *const names[] = { "master-kernel", "ipa-ap-to-modem" };
 +	uint32_t cacheline = 0, psize = 0, size = 0, partition = smem_partition(SMEM_US, SMEM_MODEM, &cacheline, &psize);
 +
-+	rem.remote = SMEM_MODEM;
-+	rem.theirs_item = ITEM_SMP2P_THEIRS_ALT;
-+	rem.doorbell = IPC_SMP2P_MODEM;
++	modem_remote.remote = SMEM_MODEM;
++	modem_remote.theirs_item = ITEM_SMP2P_THEIRS_ALT;
++	modem_remote.doorbell = IPC_SMP2P_MODEM;
 +	if (partition == 0) {
 +		return false;
 +	}
-+	our_item = item_find(partition, cacheline, ITEM_SMP2P_OURS_ALT, &size);
-+	if (our_item == 0) {
++	modem_remote.our_item = item_find(partition, cacheline, ITEM_SMP2P_OURS_ALT, &size);
++	if (modem_remote.our_item == 0) {
 +		make_our_item(SMEM_MODEM, ITEM_SMP2P_OURS_ALT, names, 2);
-+		our_item = item_find(partition, cacheline, ITEM_SMP2P_OURS_ALT, &size);
++		modem_remote.our_item = item_find(partition, cacheline, ITEM_SMP2P_OURS_ALT, &size);
 +	} else {
-+		smp2p_fill(our_item, SMEM_MODEM, names, 2);
++		smp2p_fill(modem_remote.our_item, SMEM_MODEM, names, 2);
 +	}
-+	smp2p_agreed = smp2p_restart_acks = smp2p_restart_acked = false;
-+	say("mi8rp: mss: our SMP2P item for the modem (428) is %s\n", our_item ? "ready" : "NOT THERE");
++	modem_remote.agreed = modem_remote.restart_acks = modem_remote.restart_acked = false;
++	say("mi8rp: mss: our SMP2P item for the modem (428) is %s\n", modem_remote.our_item ? "ready" : "NOT THERE");
 +	/* Linux's qcom_glink_smem_register() allocates the GLINK descriptor (478, 32 bytes) and the first FIFO (479, 16 KB) itself;
 +	 * the modem makes 480 and waits for ours (EXP-0200: without 479 it gave up after 37 s). Made before the modem starts, zeroed. */
 +	{
@@ -14627,7 +15117,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +			say("mi8rp: mss: GLINK item %u of the modem: %s (%u bytes)\n", glink[i].item, at ? "ours, zeroed" : "NOT MADE", at ? size : 0);
 +		}
 +	}
-+	return our_item != 0;
++	return modem_remote.our_item != 0;
 +}
 +
 +/* Wait for MBA_STATUS to be `want` (or negative): returns the status, or 0 on timeout. */
@@ -14678,7 +15168,7 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +	bool have = false;
 +
 +	bzero(&last, sizeof(last));
-+	ring(rem.doorbell);
++	ring(modem_remote.doorbell);
 +	for (;;) {
 +		now = now_us();
 +		if (now >= limit) {
@@ -15079,6 +15569,80 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +	thread_terminate(current_thread());
 +}
 +
++/* Only a fresh ADSP edge is prepared: never reset a descriptor/FIFO that
++ * another boot or peer may own. A complete reboot is the recovery path. */
++static bool
++adsp_glink_prepare(void)
++{
++	static const struct { uint32_t item, size; } items[] = { { 478, 32 }, { 479, 16384 } };
++	uint32_t cacheline = 0, psize = 0, partition, size = 0;
++	bool ok = false;
++	partition = smem_partition(SMEM_US, SMEM_ADSP, &cacheline, &psize);
++	if (!partition || !lock_take()) return false;
++	for (unsigned i = 0; i < 2; i++) {
++		if (item_find(partition, cacheline, items[i].item, &size)) {
++			say("mi8rp: 9: existing GLINK item %u left untouched; reboot required\n", items[i].item);
++			goto out;
++		}
++	}
++	for (unsigned i = 0; i < 2; i++) {
++		uint32_t offset;
++		if (!item_make_locked(partition, items[i].item, items[i].size)) goto out;
++		offset = item_find(partition, cacheline, items[i].item, &size);
++		if (!offset || size != items[i].size) goto out;
++		for (uint32_t n = 0; n < size; n += 4) smem_poke(offset + n, 0);
++	}
++	settle();
++	ok = true;
++out:
++	lock_give();
++	say("mi8rp: 9: ADSP GLINK descriptor/TX FIFO %s\n", ok ? "prepared" : "not prepared");
++	return ok;
++}
++
++static bool
++audio_item(void *ctx, uint32_t item, uint32_t *offset, uint32_t *size)
++{
++	*offset = remote_item(ctx, item, size);
++	return *offset != 0;
++}
++
++static void
++audio_ring(__unused void *ctx)
++{
++	ring(IPC_GLINK_ADSP);
++}
++
++static bool
++audio_alive(void *ctx)
++{
++	struct mi8_remote *r = ctx;
++	struct smp2p words;
++	if (!remote_words(r, &words)) return false;
++	remote_listen(r, &words);
++	return (dsp_state(&words) & (DSP_READY | DSP_FATAL)) == DSP_READY;
++}
++
++static bool
++adsp_audio_handshake(void)
++{
++	uint64_t until = now_us() + 4000000ull;
++	uint32_t offset = 0, size = 0;
++	struct mi8_glink_cfg cfg;
++	while (!audio_item(&adsp_remote, 480, &offset, &size)) {
++		if (now_us() >= until || !audio_alive(&adsp_remote)) {
++			say("mi8rp: 9: ADSP RX FIFO missing or DSP stopped\n");
++			return false;
++		}
++		delay_for_interval(1000, NSEC_PER_USEC);
++	}
++	bzero(&cfg, sizeof(cfg));
++	cfg.name = "lpass"; cfg.remote_pid = SMEM_ADSP; cfg.ctx = &adsp_remote;
++	cfg.smem_item = audio_item; cfg.smem_read = svc_read; cfg.smem_write32 = svc_write32;
++	cfg.ring = audio_ring; cfg.sleep_us = svc_sleep_us; cfg.now_us = svc_now_us; cfg.log = svc_log;
++	return mi8_audio_run(&cfg, audio_alive, &adsp_remote);
++}
++
 +/* The partitions are there some time after the system starts; steps 5 and on run on a thread that waits for them. */
 +static void
 +steps_from_five(void *parameter, __unused wait_result_t wr)
@@ -15099,11 +15663,25 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +		step_aop();
 +	}
 +	if (last >= 7 && step_header() && step_image() && last >= 8) {
-+		bool up = step_start();
++		bool up, apr = false;
 +
-+		if (adsp_started) {
-+			dsp_shutdown(up ? "the watch is over" : "it did not come up");
++		if (last >= 9 && !adsp_glink_prepare()) {
++			say("mi8rp: 9: preparation failed; ADSP not started\n");
++			qmp_send("{class: image, res: load_state, name: adsp, val: off}");
++			thread_terminate(current_thread());
++			return;
 +		}
++		up = step_start();
++		if (up && last >= 9) apr = adsp_audio_handshake();
++		if (adsp_started) {
++			bool down = dsp_shutdown(up ? "the watch is over" : "it did not come up");
++			/* The established step8 failure behavior is unchanged. Step9
++			 * always also attempts AOP off when TrustZone refuses shutdown. */
++			if (last >= 9 && !down) qmp_send("{class: image, res: load_state, name: adsp, val: off}");
++		} else if (last >= 9) {
++			qmp_send("{class: image, res: load_state, name: adsp, val: off}");
++		}
++		if (last >= 9) say("mi8rp: step 9 APR %s; see channel/stop/PAS results above\n", apr ? "completed" : "FAILED");
 +		say("mi8rp: step 8 done%s\n", up ? ": the audio DSP came up and was stopped" : ": THE AUDIO DSP DID NOT COME UP");
 +	}
 +	thread_terminate(current_thread());
@@ -15229,7 +15807,11 @@ index 0000000000000000000000000000000000000000..ade65efc70188a82ae05059d48b90c18
 +	uint32_t last = 0;
 +
 +	uint32_t mss = 0;
++	uint32_t shared_step = 0;
 +
++	/* Set once before starting either worker; default calls take no new lock. */
++	PE_parse_boot_argn("mi8rp_step", &shared_step, sizeof(shared_step));
++	adsp_shared_serial = shared_step >= 9;
 +	PE_parse_boot_argn("mi8rp_pause", &pause_ms, sizeof(pause_ms));
 +	{
 +		uint32_t pre = 0;

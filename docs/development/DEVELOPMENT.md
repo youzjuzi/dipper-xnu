@@ -125,12 +125,11 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-11，覆盖更新，接手时重新核对）
 
-- **分支/基线**：`feat/bluetooth`，来自 `feat/persist-var-store`（持久保存，已提交 `b175b06`）；本地提交，未 push。
-- **本分支内容**：蓝牙驱动 `bsd/dev/mi8_bt.c`（`bt=1..7`，`bt=7` 为交给 iOS 的桥接）与 IOKit 垫片 `iokit/Kernel/RedwoodBT.cpp`（接入 `iokit/conf/files`）；用户态 `userland/build.sh` 的 `BT=1`（构建入口默认开启）、`mkjobs.py` 给 `bluetoothd` 的传输环境变量、注入库 `src/inject_bt.c`、`src/init.c` 绑定 `/etc/bluetool`；打包工具 `build-payload.py --bluetooth`（需 `--wifi`）。补丁与清单由 patchtool 导出写回，许可清单已加新文件；`work/` 源码与补丁一致。
-- **设备证据**：设置里蓝牙开关、搜索、配对和连接耳机（免提与 A2DP 通道）、关开后自动重连都在真机上通过；开机早期打开"设置"不再显示"不可用"。细节见[验证记录](../validation/VALIDATION.md#ios-蓝牙2026-11-11)。内核增量构建复用降分辨率那轮的目标目录，不另建源码副本；蓝牙固件按教程放在 `work/hackios/fw-bt/`。
-- **下一步**：蓝牙音频要等音频子系统；配对记录与 `--persist` 的组合；芯片睡眠省电（主机目前从不让芯片睡）；缩短 `bt_delay`（需确认不影响 Wi-Fi）；BLE 设备连接与 HID 设备测试。
-- **边界**：只测过一副耳机、一次开机内；GPU/基带退出恢复、首次安装外设收尾和完整 all 待验；设备轮次间完整重启。禁止重跑分区脚本。
-- **私人配置**：沿用 local/README.md 和 local/index.json；蓝牙固件原件在 `local/devices/mi8/bt-firmware/`，不进 Git。
+- **分支/基线**：`feat/audio-adsp-apr`，基于本地 `main` 的 `d96d9d5`，单次本地功能提交，未 push。
+- **源码对应**：`work/` 的音频增量已由 patchtool 导出到 `xnu-mi8` 补丁和源码清单；新增 `mi8_audio.c/h`，扩展 raw GLINK；ADSP/modem 使用独立 SMP2P 状态，SMEM 查找不共用暂存。显式 `mi8rp_step>=9` 才启用 AP 线程间共享 SMEM/QMP/RPMh 互斥，默认 IPCRTR/QRTR 与 modem 操作流程保持原样。本机 loader 身份仍由导出器恢复公开占位值；其他原有清单外文件未纳入此次导出。
+- **主机证据**：合成对端测试、状态/并发与收尾测试、既有目标目录内核增量构建、干净补丁重放与隐私扫描见 `work/runs/20261111-audio-apr-01/`。P 载荷已换入新内核，参数仅将既有 ADSP 候选的 step 8 改为 9；169 字节加 80 字节前缀为 249 字节。源码没有未导出的本轮变更。
+- **下一步/边界**：持有人验证 `apr_audio_svc` 双向 open、core state=1、实际 AFE/ASM/ADM 服务版本、通道关闭、stop-ack 和 PAS shutdown；全部为设备 Pending。只发 core 查询，不设置音频端口、SMMU、功放或时钟；主机通过不证明音频或 ADSP 协议在设备上成功。既有蓝牙设备结论见[验证记录](../validation/VALIDATION.md#ios-蓝牙2026-11-11)，GPU/基带退出恢复、首次安装和完整 all 仍待验。设备轮次间完整重启。
+- **私人输入**：沿用现有 `local/` 配置与固件，本轮未修改；未操作手机。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

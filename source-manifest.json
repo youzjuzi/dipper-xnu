@@ -5,7 +5,7 @@
     "files": [
       {
         "path": "bsd/conf/files",
-        "sha256": "c51b064c3ec77d90e26ab5df96414b91e292073de09f57fbdbbeb4ba23bbf361",
+        "sha256": "47223ac9efa1c6e37448b809cca11a420f4b7be1c61c3ab8d82c155499d86a2f",
         "mode": "0o664"
       },
       {
@@ -16,6 +16,16 @@
       {
         "path": "bsd/dev/mi8_adreno.c",
         "sha256": "e38cad7ac3ad71d97cd686414044862e13a3023bf9f24d26b25fad0d727b6d02",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_audio.c",
+        "sha256": "8a36238666b4ef95f01cad8ccdf20ae17fa800d202985fd55c1c617ea6218896",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_audio.h",
+        "sha256": "eaf9c9a449a7a93cbc440ea6ed52c55445d554b682f4a37119f13d20f2b79fd4",
         "mode": "0o664"
       },
       {
@@ -30,12 +40,12 @@
       },
       {
         "path": "bsd/dev/mi8_glink.c",
-        "sha256": "5fbf242bd38cd60a603f84df9901017edf409cb4ac4f5c4efe805671527817ae",
+        "sha256": "75925396d4638b2aa5124801b621494cddd9d817005345679105279ca792756b",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_glink.h",
-        "sha256": "a84f7be7574c8bd26452108d463fb314f659cdde506c3c1fe221f3dd293017ab",
+        "sha256": "e04cce36c3af8d2a6559857494c94b16ec3c68e378b6c97b0131553b00b4cb26",
         "mode": "0o664"
       },
       {
@@ -55,7 +65,7 @@
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "46e8f91014491e534db10f6b08d5393c92a03e5b56bafc2af47a6b3571c45c08",
+        "sha256": "e17569d071adfa53f803ea73802facd090dc86dafe8af1b562106c3b99b4b84b",
         "mode": "0o664"
       },
       {

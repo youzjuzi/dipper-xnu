@@ -8,7 +8,7 @@
       "upstream_file_exists": true,
       "license": "LicenseRef-CMU",
       "basis": "Original CMU header retained upstream; see pinned XNU file",
-      "sha256": "c51b064c3ec77d90e26ab5df96414b91e292073de09f57fbdbbeb4ba23bbf361"
+      "sha256": "47223ac9efa1c6e37448b809cca11a420f4b7be1c61c3ab8d82c155499d86a2f"
     },
     {
       "component": "xnu-mi8",
@@ -48,7 +48,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original modules; third-party portions excluded",
-      "sha256": "5fbf242bd38cd60a603f84df9901017edf409cb4ac4f5c4efe805671527817ae"
+      "sha256": "75925396d4638b2aa5124801b621494cddd9d817005345679105279ca792756b"
     },
     {
       "component": "xnu-mi8",
@@ -56,7 +56,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original modules; third-party portions excluded",
-      "sha256": "a84f7be7574c8bd26452108d463fb314f659cdde506c3c1fe221f3dd293017ab"
+      "sha256": "e04cce36c3af8d2a6559857494c94b16ec3c68e378b6c97b0131553b00b4cb26"
     },
     {
       "component": "xnu-mi8",
@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "46e8f91014491e534db10f6b08d5393c92a03e5b56bafc2af47a6b3571c45c08"
+      "sha256": "e17569d071adfa53f803ea73802facd090dc86dafe8af1b562106c3b99b4b84b"
     },
     {
       "component": "xnu-mi8",
@@ -705,6 +705,22 @@
       "license": "APSL-2.0",
       "basis": "Pinned Apple XNU build list (no file header); one line added for RedwoodBT.cpp; no relicense",
       "sha256": "571ec0a4ed75ec0c78119110d98fbc139df179aebaab5f14407400a56364bc3b"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/dev/mi8_audio.c",
+      "upstream_file_exists": false,
+      "license": "MIT",
+      "basis": "本项目新写，参考 Linux apr.c/q6core.c 的协议，未复制代码",
+      "sha256": "8a36238666b4ef95f01cad8ccdf20ae17fa800d202985fd55c1c617ea6218896"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/dev/mi8_audio.h",
+      "upstream_file_exists": false,
+      "license": "MIT",
+      "basis": "本项目新写，参考 Linux apr.c/q6core.c 的协议，未复制代码",
+      "sha256": "eaf9c9a449a7a93cbc440ea6ed52c55445d554b682f4a37119f13d20f2b79fd4"
     }
   ]
 }

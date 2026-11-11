@@ -46,6 +46,10 @@ python3 tools/prepare/patchtool.py scan
 
 `python3 tools/tests/test-boot-defaults.py` 编译准备树中的实际 ARM 默认值代码和 XNU 解析器，以合成设备树测试配置等价、平台隔离和覆盖语义；需要本机 C 编译器。`--tree` 可指定干净 XNU 源码树，`--old-cmdline` 可读取本地完整参数文件，测试将 MAC 替换为零占位值且不打印输入。它不操作设备。公开短参数和打包选项见[启动教程](../docs/install/STARTUP.md#dipper-短启动参数与默认值)。
 
+## ADSP GLINK/APR 主机测试
+
+`python3 tools/tests/test-mi8-audio-apr.py` 用 `MI8_GLINK_HOST_TEST` 编译实际 GLINK/APR 源码，合成 SMEM 环形 FIFO 对端，测试 raw open、分片、intent 请求与关闭、APR 坏包拒绝、完整版本列表和默认 IPCRTR/QRTR 兼容性。`python3 tools/tests/test-mi8-rproc-state.py` 提取实际远端状态、查找、调度与互斥代码，检查 ADSP/modem 隔离、嵌套查询、失败收尾与共享事务互斥。两者需要本机 C 编译器与 pthread，输出 `SELFTEST PASS n/n`；`--tree` 指向准备树根目录（包含 `hackios/`）。这些检查不操作设备，不能代替真实固件的通道、APR 或停机验证。
+
 ## 路径迁移说明（2026-10-31）
 
 原先直接位于 tools/ 根目录的脚本已移入上述分类，文件名不变，不保留第二套脚本或旧入口。当前教程使用新路径。历史验证记录和 work/runs/ 中的原始命令保留当时路径，不修改既有证据；需要再次运行时按本页选择新入口并新建轮次，不直接重跑历史脚本。历史源码/生成器摘要仍指向当时版本，不为目录整理刷新旧实验的来源记录。
