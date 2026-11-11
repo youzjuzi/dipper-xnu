@@ -5566,10 +5566,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e52d10f993652edeb4087ea40231af847ff4e13d
+index 0000000000000000000000000000000000000000..ac13e61dea1bed3ebfb5e4102063a9fd6a15234f
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,578 @@
+@@ -0,0 +1,576 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
@@ -6090,7 +6090,6 @@ index 0000000000000000000000000000000000000000..e52d10f993652edeb4087ea40231af84
 +#include <mach/vm_param.h>
 +#include <vm/vm_kern.h>
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
-+extern void ml_io_unmap(vm_offset_t, vm_size_t);
 +struct native_audio_pins { vm_offset_t pages[7]; };
 +static const unsigned native_pin_numbers[] = { 58, 59, 60, 61, 76, 87, 30 };
 +
@@ -6137,13 +6136,12 @@ index 0000000000000000000000000000000000000000..e52d10f993652edeb4087ea40231af84
 +    const struct mi8_audio_pin_ops *pins)
 +{
 +#ifndef MI8_GLINK_HOST_TEST
-+	struct native_audio_pins native = { 0 };
++	/* ml_io_map gives permanent, not page-aligned mappings (16 KB kernel pages): they are never unmapped (ml_io_unmap
++	 * panics in pmap on them, run 20261111-audio-afe-01), only kept for the next call. */
++	static struct native_audio_pins native;
 +	struct mi8_audio_pin_ops ops = { native_pin_read, native_pin_write, &native };
-+	bool result;
 +	if (pins) return audio_run(cfg, alive, ctx, pins);
-+	result = audio_run(cfg, alive, ctx, &ops);
-+	for (unsigned i = 0; i < 7; i++) if (native.pages[i]) ml_io_unmap(native.pages[i], 0x1000);
-+	return result;
++	return audio_run(cfg, alive, ctx, &ops);
 +#else
 +	return pins && audio_run(cfg, alive, ctx, pins);
 +#endif

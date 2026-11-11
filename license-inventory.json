@@ -712,7 +712,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 Linux/Android apr/q6core/q6afe 协议与 SDM845 设备树寄存器字段，未复制驱动实现",
-      "sha256": "829f3cb7159a1bafd215aa874f12bebaed48e7f4ba567be0c8e04e4ed1fcd4d1"
+      "sha256": "ca60d07bd6e9cd0d27e19017cb571142c7bc75508360691b77f83f2f29a6fae3"
     },
     {
       "component": "xnu-mi8",
