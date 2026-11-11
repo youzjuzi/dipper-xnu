@@ -20,7 +20,7 @@ def sha256(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def build_cmdline(seconds, epoch, wifi_mac=None, peripherals=False, persist=False):
+def build_cmdline(seconds, epoch, wifi_mac=None, peripherals=False, persist=False, bluetooth=False):
     """Use kernel defaults; preserve the packager's opt-in radio profile."""
     cmdline = (f'loader_return_after={seconds} epoch={epoch} '
                'bootcpu=7 cpus=7 ufs=2 root_apfs=ufs_darwin')
@@ -33,6 +33,9 @@ def build_cmdline(seconds, epoch, wifi_mac=None, peripherals=False, persist=Fals
     if persist:
         # The data volume is read back at boot and saved when the run ends (darwin blocks >= 2042368 only).
         cmdline += ' ufs_write=1 var_store=1 var_save_ms=120000'
+    if bluetooth:
+        # WCN3990 firmware download at 3.2 Mbaud, then the AppleBTHci bridge for bluetoothd (bsd/dev/mi8_bt.c).
+        cmdline += ' bt=7'
     return cmdline
 
 
@@ -44,7 +47,12 @@ def main():
     parser.add_argument('--peripherals', action='store_true', help='enable battery reporting, iOS torch and haptics')
     parser.add_argument('--persist', action='store_true',
                         help='keep /private/var in darwin: read it back at boot, save it when the run ends (writes storage)')
+    parser.add_argument('--bluetooth', action='store_true',
+                        help='with --wifi: bring up the WCN3990 Bluetooth controller for iOS (bt=7)')
     args = parser.parse_args()
+    if args.bluetooth and not args.wifi:
+        # The chip shares its supplies with the Wi-Fi side and takes its address from wifi_mac.
+        raise SystemExit('--bluetooth needs --wifi')
     if args.persist and args.seconds < 180:
         raise SystemExit('--persist needs --seconds >= 180: the desktop must come up before the run ends')
     if not 60 <= args.seconds <= 1800:
@@ -95,6 +103,23 @@ def main():
         if hashlib.sha256(data).hexdigest() != expected:
             raise SystemExit('WCN3990 firmware-5.bin missing or stale in root.apfs; rebuild userland')
         wifi_firmware[name] = expected
+    bt_firmware = {}
+    if args.bluetooth:
+        # The bring-up's firmware (pulled from the phone into fw-bt, see docs/install/DEVICE_PREPARATION.md)
+        # in the boot volume, and the iOS side (userland/build.sh BT=1) in root.apfs.
+        for name in ('crbtfw21.tlv', 'crnv21.bin'):
+            source = k / 'fw-bt' / name
+            if not source.is_file():
+                raise SystemExit('Missing Bluetooth firmware fw-bt/' + name + '; see docs/install/DEVICE_PREPARATION.md')
+            data = subprocess.check_output([str(reader), 'cat', str(inputs['flashboot.apfs']), '/fw/' + name])
+            if hashlib.sha256(data).hexdigest() != sha256(source):
+                raise SystemExit('Bluetooth firmware missing or stale in flashboot.apfs: ' + name)
+            bt_firmware[name] = sha256(source)
+        for path in ('/LaunchDaemons/com.apple.bluetoothd.plist', '/LaunchDaemons/com.apple.BlueTool.plist',
+                     '/lib/libredwood-bt.dylib', '/etc/bluetool/BCM4357B1_placeholder.hcd'):
+            if subprocess.run([str(reader), 'stat', str(inputs['root.apfs']), path],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+                raise SystemExit('root.apfs has no ' + path + '; rebuild userland with BT=1')
     mac = None
     if args.wifi:
         mac_file = ROOT / 'local/wifi-mac'
@@ -108,7 +133,7 @@ def main():
         mac = mac_file.read_text().strip()
         if not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', mac) or int(mac[:2], 16) & 3 != 2:
             raise SystemExit('local/wifi-mac must contain a locally administered unicast MAC')
-    cmdline = build_cmdline(args.seconds, int(time.time()), mac, args.peripherals, args.persist)
+    cmdline = build_cmdline(args.seconds, int(time.time()), mac, args.peripherals, args.persist, args.bluetooth)
     # Maximum generated prefix for this fixed dipper profile (cpus supplied,
     # no serial UART), including the optional watchdog and battery address.
     prefix = 'debug=0x8 rd=md0 vtimer_intid=19 hv_wdt_pet=1 ufs_shared_pa=0x' + '0' * 16 + ' '
@@ -140,10 +165,10 @@ def main():
         'scope': 'host package, device GPT and system hash must be checked separately',
         'storage_writes': args.persist, 'restore_old_var_store': args.persist,
         'wifi_enabled': args.wifi, 'seconds': args.seconds, 'cmdline': cmdline,
-        'peripherals_enabled': args.peripherals,
+        'peripherals_enabled': args.peripherals, 'bluetooth_enabled': args.bluetooth,
         'maximum_bootargs_bytes': len(cmdline.encode()) + len(prefix),
         'artifacts': records, 'gpu_firmware': firmware,
-        'wifi_feature_metadata': wifi_firmware,
+        'wifi_feature_metadata': wifi_firmware, 'bluetooth_firmware': bt_firmware,
     }, indent=2) + '\n')
     print(str(out))
     print('Host package only. Verify the device layout and installed system before RAM boot.')

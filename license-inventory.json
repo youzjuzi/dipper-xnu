@@ -1,5 +1,5 @@
 {
-  "review_date": "2026-11-10",
+  "review_date": "2026-11-11",
   "original_code_authorization": "Maintainer confirmed original human/AI-authored portions may use MIT; excludes third-party derivatives.",
   "files": [
     {
@@ -40,7 +40,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "New driver for the WCN3990 Bluetooth UART, modelled on mi8_fts.c and mi8_rproc.c (same RPMh/command-database/clock structure); register offsets are hardware facts taken from Linux headers, no GPL code is copied; maintainer to confirm the file's licence",
-      "sha256": "88f285e04d0255be9549d1a8d0237026bed76c760f588e4f9a20fcdab82cdfe1"
+      "sha256": "e7fd384464ce0e60643a26f7cc3a1e085682f54fa0cbb290bb141ae1b022cfc0"
     },
     {
       "component": "xnu-mi8",
@@ -480,7 +480,7 @@
       "upstream_file_exists": true,
       "license": "MIT",
       "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "a23bc727d4ed492ed0e6c9c90e902c84518ac4d2b3a8e8818c485366876b3a6e"
+      "sha256": "f3f9b3f2c6df75d1896b6f561552f73af03511443be990db6d8c57b9fce59144"
     },
     {
       "component": "hackios-userland",
@@ -488,7 +488,7 @@
       "upstream_file_exists": true,
       "license": "MIT",
       "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "19f5e9d85495a92f8faa597aea05703b13b32896690e9a52f4407daa0d6bb2bf"
+      "sha256": "5bdc28cac47021fa5af6ba759ab86a02ca125891e1f52b26943635a932307e02"
     },
     {
       "component": "hackios-userland",
@@ -627,6 +627,22 @@
       "sha256": "092f011f0674b73b23c46a38a3df895314ab1ef1fa777c0e816887d6aacf8e25"
     },
     {
+      "component": "hackios-userland",
+      "path": "userland/src/inject_bt.c",
+      "upstream_file_exists": false,
+      "license": "MIT",
+      "basis": "New injection library in the pinned userland tree (MIT root license); interposes one MobileGestalt query",
+      "sha256": "185030780362eef015dbfa587222137777d161ca84d2457364343b8d6640eb36"
+    },
+    {
+      "component": "hackios-userland",
+      "path": "userland/src/init.c",
+      "upstream_file_exists": true,
+      "license": "MIT",
+      "basis": "Pinned userland root MIT license; one bind of /etc/bluetool added",
+      "sha256": "04b40b62dbcb7a0538e50967011473ab0685fb5a65c0895bf74f32176ff30516"
+    },
+    {
       "component": "xnu-mi8",
       "path": "bsd/dev/redwood_battery.c",
       "upstream_file_exists": true,
@@ -673,6 +689,22 @@
       "license": "APSL-2.0",
       "basis": "Pinned Apple XNU derivative; existing Apple copyright and applicable upstream license notices retained; no relicense",
       "sha256": "de0e639eedad269818348ef1186d11554239a49bd57f22dba724e2782108914d"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "iokit/Kernel/RedwoodBT.cpp",
+      "upstream_file_exists": false,
+      "license": "APSL-2.0",
+      "basis": "New IOKit shim (AppleBTHci, AppleBTMgmt and the \"bluetooth\" node) in the HackiOS/XNU tree, modelled on RedwoodGPU.cpp; the interface is described from observed behaviour and disassembly of iOS bluetoothd/BlueTool, no Apple code copied",
+      "sha256": "1f34a7237cb865b400a79d3e8e84b2ca1c4402043979f74ba1f7f5c51bc57bab"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "iokit/conf/files",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "Pinned Apple XNU build list (no file header); one line added for RedwoodBT.cpp; no relicense",
+      "sha256": "571ec0a4ed75ec0c78119110d98fbc139df179aebaab5f14407400a56364bc3b"
     }
   ]
 }

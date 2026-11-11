@@ -101,10 +101,21 @@ index 4f0aa3944cc2b3fd647e6693f6fb605455e01333..027a28f9e83bcd08baf302f0d292d858
  	install_name_tool -id /redwood/lib/libredwoodair.dylib out/libredwoodair.dylib
  	echo "mk-mesa.sh: $B/out/libredwoodair.dylib ($(stat -c %s out/libredwoodair.dylib) bytes," \
 diff --git a/userland/build.sh b/userland/build.sh
-index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d6d16fc57 100755
+index 582866f82497f32c86226f6a095e0a8e0c9dc791..28aa7e90de5ebb6764d8468fd20e9898ed8ec87d 100755
 --- a/userland/build.sh
 +++ b/userland/build.sh
-@@ -60,6 +60,7 @@
+@@ -17,6 +17,10 @@
+ #                                   (default: src/inject.c in backboardd, src/inject_sb.c in SpringBoard,
+ #                                   src/inject_media.c in mediaserverd);
+ #                                   init hands the list to the kernel (etc/inject.conf -> sysctl kern.exec_inject)
++#                      BT=1         with iOS's Bluetooth: the jobs bluetoothd and BlueTool, src/inject_bt.c inside
++#                                   both, and the placeholder of the controller's firmware in etc/bluetool. For a
++#                                   kernel booted with bt=7, which makes the services they talk to (bsd/dev/mi8_bt.c,
++#                                   iokit/Kernel/RedwoodBT.cpp); the WCN3990's own firmware comes from ../fw-bt
+ #                      STOREFRONT=1 ... and src/inject_store.c inside appstored: the storefront answered,
+ #                                   and a bag request watched for (an experiment; see that file)
+ #                      EXTRA="..."  more programs for /redwood/bin (files on this machine): one-off
+@@ -60,6 +64,7 @@
  #                    `xl ramdisk userland/system.apfs`. Rebuilt when missing, when its inputs
  #                    (stage0, the manifest, the cryptex files) are newer, or with SYSTEM=1 (after
  #                    changing the recipe below).
@@ -112,7 +123,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d
  #   flashboot.apfs   FLASHBOOT=1: the RAM part of a boot whose root is the iOS volume on the phone's
  #                    flash (see below); with CRYPTEXES=flash the boot volume alone, the cryptexes being
  #                    on the flash. FLASHBOOT=1 also decides what goes into root.apfs: the job list is
-@@ -68,13 +69,15 @@
+@@ -68,13 +73,15 @@
  #                    That root.apfs is for a flash boot; a RAM boot wants one built without FLASHBOOT=1,
  #                    or launchd will fail to start those few when something asks for them.
  #
@@ -131,7 +142,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d
  cd "$(dirname "$(readlink -f "$0")")"
  source ../xnu-env.sh
  
-@@ -103,7 +106,7 @@ IOS_JOBS=${JOBS-"
+@@ -103,7 +110,7 @@ IOS_JOBS=${JOBS-"
  	com.apple.backboardd com.apple.mobile.usermanagerd com.apple.mobilegestalt.xpc com.apple.lsd
  	com.apple.powerd com.apple.analyticsd com.apple.logd_helper
  	com.apple.iconservices.iconservicesagent com.apple.pluginkit.pkd
@@ -140,8 +151,23 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d
  "}
  # iOS's own Wi-Fi daemon, for Settings to have a Wi-Fi to show: the kernel answers it in
  # bsd/dev/redwood_apple80211.c. With the radio (wifi=1) Settings then shows Wi-Fi on, the network joined and the
-@@ -140,7 +143,10 @@ INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd cont
+@@ -116,6 +123,9 @@ IOS_JOBS=${JOBS-"
+ # (Count a QEMU run log with its duplicate lines removed: run-ios.sh prints launchd's log twice.)
+ # WIFID=0 leaves it out.
+ [ "${WIFID-1}" != 0 ] && IOS_JOBS="$IOS_JOBS com.apple.wifid"
++# BT=1: iOS's Bluetooth daemon and the program that boots the controller for it (mkjobs.py gives bluetoothd its
++# transport, the kernel's AppleBTHci).
++[ -n "$BT" ] && IOS_JOBS="$IOS_JOBS com.apple.bluetoothd com.apple.BlueTool"
+ # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
+ # (src/inject.c is libredwood.dylib, src/inject_sb.c is libredwood-sb.dylib, src/inject_media.c is
+ # libredwood-media.dylib).
+@@ -138,9 +148,15 @@ INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd cont
+ [ -n "$STOREFRONT" ] && INJECT="$INJECT
+ /redwood/lib/libredwood-store.dylib appstored AppStore
  /redwood/lib/libredwood-fairplay.dylib fairplayd.H2"
++# BT=1: BlueTool and bluetoothd with src/inject_bt.c, which tells BlueTool the module's maker it boots by.
++[ -n "$BT" ] && INJECT="$INJECT
++/redwood/lib/libredwood-bt.dylib BlueTool bluetoothd"
  mkdir -p obj
  
 -if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
@@ -152,7 +178,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d
  if [ -n "$PREBUILT" ]; then
  	echo "build.sh: not compiling, using the programs in prebuilt/userland"
  	for f in ../prebuilt/userland/*; do
-@@ -270,7 +276,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+@@ -270,7 +286,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
  		$DYN -o obj/vol_ls src/vol_ls.c
  		$DYN -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o obj/snap_test src/snap_test.c
  		$DYN -framework CoreFoundation -framework CoreGraphics -framework CoreText -o obj/font_test src/font_test.c
@@ -161,7 +187,17 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d
  		# (the account database answers only a client with the entitlements its own daemons hold: src/store_test.m)
  		$DYN -fobjc-arc -framework Foundation -framework Accounts -o obj/store_test src/store_test.m &&
  			{ ${LDID:-ldid} -Ssrc/store_test.entitlements obj/store_test 2>/dev/null ||
-@@ -362,7 +368,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+@@ -296,6 +312,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+ 		# program either as the one library the kernel inserts or opened by a library of ours
+ 		$DYN -dynamiclib -install_name /redwood/lib/libredwood-tweaks.dylib -framework CoreFoundation -lobjc \
+ 			-o obj/libredwood-tweaks.dylib src/inject_tweaks.c
++		# ... inside BlueTool and bluetoothd (BT=1): the Wi-Fi/Bluetooth module's maker answered (src/inject_bt.c)
++		$DYN -dynamiclib -install_name /redwood/lib/libredwood-bt.dylib -framework CoreFoundation -lMobileGestalt \
++			-o obj/libredwood-bt.dylib src/inject_bt.c
+ 		# ... and inside an application, to say what killed it (src/inject_app.c)
+ 		$DYN -dynamiclib -install_name /redwood/lib/libredwood-app.dylib -lobjc \
+ 			-o obj/libredwood-app.dylib src/inject_app.c
+@@ -362,7 +381,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
  		fi
  	fi
  	# (drawable_test is built in the same block as surf_test, so it is copied with it)
@@ -171,7 +207,23 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d
  	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
  	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
  	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
-@@ -491,7 +498,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+@@ -449,6 +469,15 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+ 	[ -f obj/libredwood-fairplay.dylib ] && cp obj/libredwood-fairplay.dylib root/lib/
+ 	[ -f obj/libredwood-app.dylib ] && cp obj/libredwood-app.dylib root/lib/
+ 	[ -f obj/libredwood-tweaks.dylib ] && cp obj/libredwood-tweaks.dylib root/lib/
++	if [ -n "$BT" ]; then
++		[ -f obj/libredwood-bt.dylib ] && cp obj/libredwood-bt.dylib root/lib/
++		# BlueTool sends the controller the firmware file of its chip's name from /etc/bluetool (init binds this
++		# directory there). The Broadcom file of the iPhone means nothing to the Qualcomm chip, and the kernel
++		# answers BlueTool's vendor commands itself: one Launch RAM command (0xfc4e, address 0xffffffff) is
++		# enough for BlueTool to find a file and finish its script.
++		mkdir -p root/etc/bluetool
++		printf '\x4e\xfc\x04\xff\xff\xff\xff' > root/etc/bluetool/BCM4357B1_placeholder.hcd
++	fi
+ 	[ -f obj/libredwoodmetal.dylib ] && cp obj/libredwoodmetal.dylib root/lib/
+ 	[ -f obj/libredwoodair.dylib ] && cp obj/libredwoodair.dylib root/lib/
+ 	if [ -f obj/RedwoodAudio ]; then
+@@ -491,7 +520,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
  	cp $IOS/var.skel root/etc/var.skel              # the directories init creates in /private/var
  	# time zones: the template's links go in a circle until the time zone daemon has run (/usr/share/zoneinfo
  	# points back into /var); point them at the data that ships with the system, and use this machine's zone
@@ -182,7 +234,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d
  	sed -i -e 's|^l\t/usr/share/zoneinfo\t/private/var/db/timezone/zoneinfo$|l\t/usr/share/zoneinfo.default\t/private/var/db/timezone/zoneinfo|' \
  		-e "s|^l\t/var/db/timezone/zoneinfo/[^\t]*\t/private/var/db/timezone/localtime\$|l\t/var/db/timezone/zoneinfo/$zone\t/private/var/db/timezone/localtime|" root/etc/var.skel
  	# ... and the files of ours it puts there (var/): those under mobile/ belong to the user mobile
-@@ -548,6 +557,12 @@ if [ -d ../fw-gpu ]; then
+@@ -548,6 +579,12 @@ if [ -d ../fw-gpu ]; then
  	mkdir -p root/fw
  	cp ../fw-gpu/* root/fw/
  fi
@@ -195,7 +247,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d
  # ... and the image of the Wi-Fi DSP, from /vendor/firmware_mnt/image of the same Android into ../fw-wifi
  # (bsd/dev/redwood_wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
  # board data and the regulatory database (image/qca6750 there; 60 and 24 KB)
-@@ -675,6 +690,12 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+@@ -675,6 +712,12 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
  		mkdir -p flashboot/fw
  		cp ../fw-audio/aw882xx_acf.bin flashboot/fw/
  	fi
@@ -208,7 +260,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d
  	# the package manager's prefix, when tools/mk-jb.sh has fetched one: /jb of the boot volume, which is
  	# /private/preboot/jb once the iOS volume is the root -- the volume where a rootless jailbreak keeps its
  	# Procursus on an iPhone as well; init grafts it onto /var/jb (src/init.c, mount_writable)
-@@ -708,7 +729,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+@@ -708,7 +751,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
  fi
  
  # --- the system image -----------------------------------------------------------------------------
@@ -218,7 +270,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2950da5904f85f7288dcaf2803304e7d
  	  [ $IOS/cryptex -nt system.apfs ] || [ $IOS/cryptex-app -nt system.apfs ] || [ -n "$SYSTEM" ]; }; then
  	# what ios165/select-system.py has chosen since ios165/rootfs was extracted is not in it, and would not be
 diff --git a/userland/mkjobs.py b/userland/mkjobs.py
-index a92a4efa73630c2c13570ec98fd09f07462bbad3..e6062108acda93b9fc2bee3aff87e9dc97252558 100755
+index a92a4efa73630c2c13570ec98fd09f07462bbad3..a2cefb950a26625d93278a63e99105e557a91ea0 100755
 --- a/userland/mkjobs.py
 +++ b/userland/mkjobs.py
 @@ -222,8 +222,15 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'loca
@@ -238,7 +290,27 @@ index a92a4efa73630c2c13570ec98fd09f07462bbad3..e6062108acda93b9fc2bee3aff87e9dc
  # ALLOW="word ..." in the environment lets jobs through that DENY would stop: for trying one out
  DENY = tuple(word for word in DENY if word not in os.environ.get('ALLOW', '').split())
  
-@@ -322,9 +329,10 @@ if rest:
+@@ -237,6 +244,10 @@ if '--root-volume' in args:
+ args = [a for a in args if a != '--rest']
+ src_root, dest, labels = args[0], args[1], args[2:]
+ oslog = os.environ.get('OSLOG', '').split()
++# Variables a job is given whoever builds it. bluetoothd's transport to the controller is otherwise a serial
++# port over Skywalk (H4BC), which this kernel has not got; APPLEBT is the IOKit service AppleBTHci, which the
++# kernel makes when booted with bt=7 (iokit/Kernel/RedwoodBT.cpp). Without bt=7 it finds no Bluetooth either way.
++JOB_ENV = {'com.apple.bluetoothd': {'BT_HCI_TRANSPORT': 'APPLEBT'}}
+ src = f'{src_root}/System/Library/LaunchDaemons'
+ # A program in a cryptex -- on a device a volume of its own, grafted at /System/Cryptexes/NAME (eight of
+ # Safari's daemons are in the App cryptex) -- is looked for where fetch.sh unpacked that cryptex, beside
+@@ -287,6 +298,8 @@ for label in labels:
+     # a job that is named is wanted, whatever hardware it says it is for: wifid's asks for a node "wlan" in the
+     # device tree, which the loader's tree does not have yet
+     job.pop('_LimitLoadToDeviceTree', None)
++    if label in JOB_ENV:
++        job.setdefault('EnvironmentVariables', {}).update(JOB_ENV[label])
+     if 'all' in oslog or label in oslog:
+         job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
+     with open(f'{dest}/{label}.plist', 'wb') as f:
+@@ -322,9 +335,12 @@ if rest:
          # it. The boot of 22 October showed what declining costs: SpringBoard's icons stopped being
          # drawn, because its layers ask for one of those formats and a refused texture is a layer
          # that never appears.
@@ -249,6 +321,8 @@ index a92a4efa73630c2c13570ec98fd09f07462bbad3..e6062108acda93b9fc2bee3aff87e9dc
 +        for variable in ('RWA_PACKED16',):
 +            if os.environ.get(variable):
 +                job.setdefault('EnvironmentVariables', {})[variable] = os.environ[variable]
++        if label in JOB_ENV:
++            job.setdefault('EnvironmentVariables', {}).update(JOB_ENV[label])
          if label in oslog:
              job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
          with open(f'{dest}/{name}', 'wb') as f:
@@ -1806,6 +1880,26 @@ index b7c280c147faeb151dc731626cbc2b32d178f781..272c24a16c98f227c9cdbfa48de3a497
 +	gl->swizzle_supported = good;
 +	return good;
 +}
+diff --git a/userland/src/init.c b/userland/src/init.c
+index f21bca0250ffc17f3aabf6a66462a8b6c3db6121..a9b8c2e4018d4a1b058b656d24ea097980e20468 100644
+--- a/userland/src/init.c
++++ b/userland/src/init.c
+@@ -202,6 +202,15 @@ flash_root(const char *dev)
+ 		/* the audio DSP's firmware and the speakers' configuration, from the RAM image as in a RAM boot */
+ 		check(synthetic_dir("/flash/fw") && bind_dir("/fw", "/flash/fw"), "the firmware on /fw (adsp=1, sound=N)");
+ 	}
++	if (stat(in_image("/etc/bluetool"), &fw_st) == 0) {
++		/*
++		 * BlueTool boots the Bluetooth controller with a Broadcom firmware file it looks for in /etc/bluetool by the
++		 * chip's name (BCM4357B1_...); this phone's chip is a Qualcomm one, and the file here is only a placeholder
++		 * for BlueTool to find and send (the kernel answers what it sends; see bsd/dev/mi8_bt.c).
++		 */
++		check(synthetic_dir("/flash/private/etc/bluetool") && bind_dir(in_image("/etc/bluetool"), "/flash/private/etc/bluetool"),
++		    "the Bluetooth firmware placeholder on /etc/bluetool");
++	}
+ 	if (stat("/jb-bin", &fw_st) == 0) {
+ 		/*
+ 		 * The package manager's prefix is in the boot volume (/jb), and Sileo runs mv, cp, rm, mkdir
 diff --git a/userland/src/inject.c b/userland/src/inject.c
 index c5e9d9020cc05b698313e88984117c43df8d141e..37eaa73f23525deb7653ce944ad5585aec6ec32b 100644
 --- a/userland/src/inject.c
@@ -1916,6 +2010,66 @@ index c5e9d9020cc05b698313e88984117c43df8d141e..37eaa73f23525deb7653ce944ad5585a
  		/*
  		 * brightness_fixes() is not used for now: with it backboardd no longer took our touch
  		 * screen service for its own ("still waiting for a main screen digitizer"), whether the
+diff --git a/userland/src/inject_bt.c b/userland/src/inject_bt.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..3005a33286ba50c98adae0d35c9a839627bdd732
+--- /dev/null
++++ b/userland/src/inject_bt.c
+@@ -0,0 +1,54 @@
++/*
++ * libredwood-bt.dylib: code of ours inside BlueTool and bluetoothd (build.sh, BT=1).
++ *
++ * BlueTool is the program that boots the Bluetooth controller (bluetoothd asks it, over XPC, to run
++ * the "boot" script). It picks that script by the platform and by the maker of the phone's Wi-Fi/
++ * Bluetooth module, which it asks MobileGestalt for (kMGQWifiVendor) and compares with "Murata", "USI"
++ * and the like. This phone's module is neither; MobileGestalt makes BlueTool wait five seconds for
++ * nothing, twice, and then answers "no vendor" (-1), and BlueTool finds no script and gives up.
++ * Here the question is answered "Murata". What the script sends is for a Broadcom controller; the
++ * kernel (iokit/Kernel/RedwoodBT.cpp, bsd/dev/mi8_bt.c) answers what the Qualcomm chip cannot.
++ */
++#include <CoreFoundation/CoreFoundation.h>
++#include <dlfcn.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++
++extern CFTypeRef MGCopyAnswer(CFStringRef key);
++
++static int ours, told;
++
++static CFTypeRef
++bt_MGCopyAnswer(CFStringRef key)
++{
++	char text[32] = "";
++	CFStringRef *vendor;
++
++	if (ours && key != NULL) {
++		vendor = (CFStringRef *)dlsym(RTLD_DEFAULT, "kMGQWifiVendor");
++		if ((vendor != NULL && *vendor != NULL && CFEqual(key, *vendor)) ||
++		    (CFStringGetCString(key, text, sizeof(text), kCFStringEncodingUTF8) && strcmp(text, "WifiVendor") == 0)) {
++			if (!told++) {
++				dprintf(2, "redwood: bt: the Wi-Fi vendor asked for: answered \"Murata\"\n");
++			}
++			return CFRetain(CFSTR("Murata"));
++		}
++	}
++	return MGCopyAnswer(key);
++}
++
++__attribute__((used)) static struct {
++	const void *ours, *theirs;
++} interposed[] __attribute__((section("__DATA,__interpose"))) = {
++	{ (const void *)bt_MGCopyAnswer, (const void *)MGCopyAnswer },
++};
++
++__attribute__((constructor))
++static void
++redwood_bt_init(void)
++{
++	const char *name = getprogname();
++
++	ours = name != NULL && (strcmp(name, "BlueTool") == 0 || strcmp(name, "bluetoothd") == 0);
++}
 diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
 index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..b2d02bf74f34122347c7adbf82cd149c465ffd35 100644
 --- a/userland/src/inject_sb.c

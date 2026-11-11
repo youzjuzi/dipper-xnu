@@ -23,7 +23,7 @@ export BUILD_JOBS=8
 bash tools/build/build-userland.sh
 ```
 
-入口明确采用 `GL=1 FLASHBOOT=1 CRYPTEXES=flash REST=1`，从源码编译 Mesa、图形适配、注入库及网络程序；拒绝 `PREBUILT`，缺少交叉链接器时直接报错。`SHARE=1` 排除上游脚本可选的本机网络密码和 SSH 密钥。不会额外生成 RAM 根卷方案的 `system.apfs`。固定 `umask 022`，避免 launchd 拒绝组可写的配置；桌面验收不执行后台 CPU 基准。
+入口明确采用 `GL=1 FLASHBOOT=1 CRYPTEXES=flash REST=1 BT=1`，从源码编译 Mesa、图形适配、注入库及网络程序；`BT=1` 加入 iOS 的蓝牙守护进程 `bluetoothd` 与 `BlueTool`、它们的注入库和占位固件文件，只有内核以 `bt=7` 启动时才用得上，蓝牙芯片固件另从 `fw-bt/` 放进启动卷；拒绝 `PREBUILT`，缺少交叉链接器时直接报错。`SHARE=1` 排除上游脚本可选的本机网络密码和 SSH 密钥。不会额外生成 RAM 根卷方案的 `system.apfs`。固定 `umask 022`，避免 launchd 拒绝组可写的配置；桌面验收不执行后台 CPU 基准。
 
 | 输出，相对于 `work/hackios/` | 用途 |
 | --- | --- |

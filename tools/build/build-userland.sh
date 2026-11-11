@@ -14,7 +14,7 @@ for input in ios165/rootfs.slt ios165/system.manifest ios165/var.skel \
 done
 export LDID="$THEOS/toolchain/linux/iphone/bin/ldid"
 [ -x "$LDID" ] || { echo "Missing $LDID" >&2; exit 1; }
-export GL=1 FLASHBOOT=1 CRYPTEXES=flash SKIP_SYSTEM=1 SHARE=1 REST=1
+export GL=1 FLASHBOOT=1 CRYPTEXES=flash SKIP_SYSTEM=1 SHARE=1 REST=1 BT=1
 export RC_JOBS="$ROOT/system/userland/rc.jobs.desktop"
 export DENY_MORE="fairplayd voicemail"
 # Upstream JOBS selects launchd labels, not the compilation parallelism.

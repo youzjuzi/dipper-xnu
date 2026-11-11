@@ -20,7 +20,7 @@
       },
       {
         "path": "bsd/dev/mi8_bt.c",
-        "sha256": "88f285e04d0255be9549d1a8d0237026bed76c760f588e4f9a20fcdab82cdfe1",
+        "sha256": "e7fd384464ce0e60643a26f7cc3a1e085682f54fa0cbb290bb141ae1b022cfc0",
         "mode": "0o664"
       },
       {
@@ -174,8 +174,18 @@
         "mode": "0o664"
       },
       {
+        "path": "iokit/Kernel/RedwoodBT.cpp",
+        "sha256": "1f34a7237cb865b400a79d3e8e84b2ca1c4402043979f74ba1f7f5c51bc57bab",
+        "mode": "0o664"
+      },
+      {
         "path": "iokit/Kernel/RedwoodGPU.cpp",
         "sha256": "08771e80db344bc06378afb1efbbae43a3202e11f79ddafa23b9b3b7d9571cb2",
+        "mode": "0o664"
+      },
+      {
+        "path": "iokit/conf/files",
+        "sha256": "571ec0a4ed75ec0c78119110d98fbc139df179aebaab5f14407400a56364bc3b",
         "mode": "0o664"
       },
       {
@@ -357,12 +367,12 @@
       },
       {
         "path": "userland/build.sh",
-        "sha256": "a23bc727d4ed492ed0e6c9c90e902c84518ac4d2b3a8e8818c485366876b3a6e",
+        "sha256": "f3f9b3f2c6df75d1896b6f561552f73af03511443be990db6d8c57b9fce59144",
         "mode": "0o755"
       },
       {
         "path": "userland/mkjobs.py",
-        "sha256": "19f5e9d85495a92f8faa597aea05703b13b32896690e9a52f4407daa0d6bb2bf",
+        "sha256": "5bdc28cac47021fa5af6ba759ab86a02ca125891e1f52b26943635a932307e02",
         "mode": "0o755"
       },
       {
@@ -376,9 +386,19 @@
         "mode": "0o664"
       },
       {
+        "path": "userland/src/init.c",
+        "sha256": "04b40b62dbcb7a0538e50967011473ab0685fb5a65c0895bf74f32176ff30516",
+        "mode": "0o664"
+      },
+      {
         "path": "userland/src/inject.c",
         "sha256": "2ccf00fa21017bacfc24868990cf6eaffd2ff6a23a3d65374f00be116d98b565",
         "mode": "0o644"
+      },
+      {
+        "path": "userland/src/inject_bt.c",
+        "sha256": "185030780362eef015dbfa587222137777d161ca84d2457364343b8d6640eb36",
+        "mode": "0o664"
       },
       {
         "path": "userland/src/inject_sb.c",

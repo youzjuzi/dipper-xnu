@@ -111,9 +111,24 @@ python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --se
 - 清空存档：在 TWRP 把 darwin 块 2097152..3145727 清零（`dd if=/dev/zero of=/dev/block/<darwin 节点> bs=4096 seek=2097152 count=1048576`），先核对节点是 darwin；系统卷不受影响。
 - 保存期间系统仍在运行，数据库可能存到一半的状态；周期保存、异常退出和存档增长尚未测试。
 
+## 蓝牙（可选）
+
+需要先把蓝牙固件放进 `work/hackios/fw-bt/`（取法见[设备准备教程](DEVICE_PREPARATION.md#5-蓝牙固件实验)），再重建用户空间（构建入口已带 `BT=1`：蓝牙守护进程 `bluetoothd`、`BlueTool` 及其注入库和占位固件文件）。打包时同时加 `--wifi` 和 `--bluetooth`：
+
+```sh
+python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --seconds 600 --wifi --bluetooth
+```
+
+`--bluetooth` 追加 `bt=7`，并核对启动卷里的固件与根镜像里的蓝牙文件，缺一项就拒绝打包；它要求 `--wifi`，因为芯片和 Wi-Fi 共用供电，蓝牙地址也由 `wifi_mac` 推出。不写存储。
+
+- 开机后内核先等 `bt_delay` 秒（默认 60），再下载固件，芯片约在开机 70 秒后就绪。这之前"设置"里蓝牙显示关闭，就绪后自动打开。
+- 可以开关蓝牙、搜索设备、配对和连接耳机；没有声音（音频子系统未移植）。
+- 配对记录不跨重启保留（与 `--persist` 的组合未测试），重启后需要重新配对。
+- 启动日志里以 `bt:` 开头的行是内核侧记录；芯片拒绝的命令会以 `bridge: the chip refuses` 记下。
+
 ## 蓝牙芯片诊断（实验）
 
-`bt=N` 让内核运行蓝牙诊断到第 N 档，默认关闭，不写存储：`1` 只读摸底，`2` 再打开串口引擎时钟，`3` 引擎内部回环自检，`4` 再给芯片上电、发 HCI Reset 与读版本，`5` 再下载固件（补丁与 NVM，115200 baud，约 25 秒）并重发 HCI Reset 与读版本，`6` 与 `5` 相同但先把串口提速到 3.2 Mbaud（下载约 1 秒）。第 4 档会通过 RPMh 请求五路供电并切换四个引脚，先等待 `bt_delay` 秒（默认 60）；第 5、6 档需要启动卷 `fw/` 里有蓝牙固件，取法见[设备准备教程](DEVICE_PREPARATION.md#5-蓝牙固件实验)，限时建议不少于 300 秒。结果从启动日志里以 `bt:` 开头的行读取；建议同时加 `loader_return_after=240` 之类的限时，结束后完整重启。这只是硬件链路诊断，iOS 里的蓝牙功能尚不可用，见[验证记录](../validation/VALIDATION.md#蓝牙芯片的-uart-链路2026-11-10)。
+`bt=N` 让内核运行蓝牙诊断到第 N 档，默认关闭，不写存储：`1` 只读摸底，`2` 再打开串口引擎时钟，`3` 引擎内部回环自检，`4` 再给芯片上电、发 HCI Reset 与读版本，`5` 再下载固件（补丁与 NVM，115200 baud，约 25 秒）并重发 HCI Reset 与读版本，`6` 与 `5` 相同但先把串口提速到 3.2 Mbaud（下载约 1 秒）。第 4 档会通过 RPMh 请求五路供电并切换四个引脚，先等待 `bt_delay` 秒（默认 60）；第 5、6 档需要启动卷 `fw/` 里有蓝牙固件，取法见[设备准备教程](DEVICE_PREPARATION.md#5-蓝牙固件实验)，限时建议不少于 300 秒。结果从启动日志里以 `bt:` 开头的行读取；建议同时加 `loader_return_after=240` 之类的限时，结束后完整重启。`bt=7` 即上一节的 iOS 蓝牙。各档结果见[验证记录](../validation/VALIDATION.md#蓝牙芯片的-uart-链路2026-11-10)。
 
 ## 降低渲染分辨率（可选，不是默认值）
 

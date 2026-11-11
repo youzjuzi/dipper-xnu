@@ -5565,10 +5565,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_bt.c b/bsd/dev/mi8_bt.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4fc8859e1
+index 0000000000000000000000000000000000000000..f981e222e65f8e0962084898975176f0c9a5fa8d
 --- /dev/null
 +++ b/bsd/dev/mi8_bt.c
-@@ -0,0 +1,1294 @@
+@@ -0,0 +1,1953 @@
 +/*
 + * The Bluetooth of the Xiaomi Mi 8 (dipper, SDM845): a Qualcomm WCN3990 -- the chip whose Wi-Fi half
 + * redwood_wifi.c / mi8_rproc.c already run -- spoken to over a UART: serial engine 6 of the first QUP
@@ -5627,16 +5627,32 @@ index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4
 + *      baud tag is left as it is (0x11), so that the chip stays at 3.2 M; the download takes about 1 s
 + *      instead of 21 s.
 + *
++ *   7  step 6, then the chip handed to iOS (the bridge, below): the kernel thread keeps reading the UART,
++ *      answers the in-band sleep bytes and queues the H4 packets for the IOKit service AppleBTHci that
++ *      bluetoothd talks to (iokit/Kernel/RedwoodBT.cpp, made at the start of the thread, before the chip is
++ *      up), and for the kernel control socket com.apple.uart.bluetooth through which BlueTool runs its
++ *      boot script. iOS 16.5 for the iPhone X is written for a Broadcom BCM4357: the Read Local Version
++ *      answer is made a Broadcom one, Broadcom's vendor commands are answered here, and a few commands
++ *      the Qualcomm chip handles differently are adjusted (see mi8_bt_hci_write and bridge_parse).
++ *
 + * Addresses: the phone's device tree (qup_uart@898000, pinctrl@3400000, gcc@100000), Linux
 + * drivers/clk/qcom/gcc-sdm845.c, drivers/pinctrl/qcom/pinctrl-sdm845.c,
 + * include/linux/soc/qcom/geni-se.h and drivers/tty/serial/qcom_geni_serial.c.
 + *
 + * Status: steps 1 and 2 run on the phone (the engine runs the UART firmware, FIFO interface on); step 3
 + * run (loopback SAME); step 4 run (the chip answers HCI reset and the version); steps 5 and 6 run (the
-+ * firmware loads, HCI version 8 -> 9, patch version 1 -> 2).
++ * firmware loads, HCI version 8 -> 9, patch version 1 -> 2); step 7 run (Settings turns Bluetooth on and
++ * off, finds devices, pairs and connects a headset: HFP and the A2DP channel up; no audio, which needs a
++ * sound path this port has not got).
 + */
 +#include <kern/clock.h>
 +#include <kern/kalloc.h>
++#include <kern/locks.h>
++#include <sys/kern_control.h>
++#include <sys/kpi_mbuf.h>
++#include <sys/errno.h>
++#include <sys/param.h>
++#include <sys/kernel.h>
 +#include <kern/sched_prim.h>
 +#include <kern/thread.h>
 +#include <libkern/libkern.h>
@@ -5667,6 +5683,21 @@ index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4
 +		loader_log_putc(*c);
 +	}
 +	return printf("%s", line);
++}
++
++/* The same, for iokit/Kernel/RedwoodBT.cpp, so that its lines are in the loader's log too. */
++int mi8_bt_log(const char *format, ...) __printflike(1, 2);
++
++int
++mi8_bt_log(const char *format, ...)
++{
++	char line[300];
++	va_list list;
++
++	va_start(list, format);
++	vsnprintf(line, sizeof(line), format, list);
++	va_end(list);
++	return say("%s", line);
 +}
 +#define printf say
 +
@@ -6299,6 +6330,7 @@ index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4
 +}
 +
 +static bool firmware_step(vm_offset_t se, uint32_t steps);
++static void bridge_run(vm_offset_t se);
 +
 +static bool
 +chip_step(vm_offset_t se, uint32_t delay_s, uint32_t steps)
@@ -6364,7 +6396,9 @@ index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4
 +		    reply[8] | (reply[9] << 8), reply[10], reply[11] | (reply[12] << 8), reply[13] | (reply[14] << 8));
 +	}
 +	if (steps >= 5) {
-+		(void)firmware_step(se, steps);
++		if (firmware_step(se, steps) && steps == 7) {
++			bridge_run(se);         /* does not return */
++		}
 +	}
 +	uart_stop(se);
 +	return true;
@@ -6712,7 +6746,7 @@ index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4
 +		printf("bt: the rampatch's TLV type is %u, not 1: not downloading\n", hdr_type);
 +		return false;
 +	}
-+	if (steps == 6) {
++	if (steps >= 6) {
 +		/* the ROM's own command: the whole download at 3.2 M */
 +		if (!baud_raise(se) || !hci_cc(se, 0x0c03, NULL, 0, NULL, NULL)) {
 +			printf("bt: no answer from the ROM at 3.2 M: stopping\n");
@@ -6749,10 +6783,10 @@ index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4
 +				if (tag_id == 17 && tag_len >= 3) {
 +					printf("bt: NVM tag 17 (HCI transport): %02x %02x %02x\n", copy[off + idx + 12],
 +					    copy[off + idx + 13], copy[off + idx + 14]);
-+					if (steps != 6) {
++					if (steps < 6) {
 +						copy[off + idx + 14] = 0;
 +					} else {
-+						printf("bt: (bt=6: the tag is left as it is: the chip stays at 3.2 M)\n");
++						printf("bt: (bt=6 and up: the tag is left as it is: the chip stays at 3.2 M)\n");
 +					}
 +				}
 +				idx += 12 + tag_len;
@@ -6787,6 +6821,623 @@ index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4
 +	return true;
 +}
 +
++/* ---- step 7: the bridge to iOS ------------------------------------------------------------------ */
++
++/*
++ * After the firmware the thread stays: it takes the H4 packets off the UART (the in-band sleep bytes
++ * answered on the way) into a queue, and iokit/Kernel/RedwoodBT.cpp, the IOKit service AppleBTHci that
++ * bluetoothd looks for, reads and writes through the functions below. The vendor commands that
++ * bluetoothd was written to send to a Broadcom controller (opcode group 0x3f) are not sent to this chip:
++ * they are answered here with a Command Complete (mi8_bt_hci_write).
++ */
++extern void RedwoodBTStart(void);       /* iokit/Kernel/RedwoodBT.cpp: the service, once */
++
++#define BRIDGE_QUEUE            64
++#define BRIDGE_PACKET           1100
++
++static struct bridge_packet {
++	uint16_t length;
++	uint8_t data[BRIDGE_PACKET];
++} bridge_queue[BRIDGE_QUEUE];
++static uint32_t bridge_head, bridge_tail, bridge_dropped, bridge_seen;
++static bool bridge_ready, bridge_open, bridge_wake, ibs_acked;
++static bool bridge_failed;              /* the chip did not come up: nobody waits for it any more */
++
++/*
++ * The services are there from the start (bt_thread), the chip ~70 s later (bt_delay and the firmware); without
++ * them bluetoothd says "No bluetooth on this device" and Settings shows it "unavailable" until it is restarted.
++ * Until the chip is up, BlueTool's connect and bluetoothd's open wait here (3 minutes at most, a signal ends it).
++ */
++static int
++bridge_wait_ready(void)
++{
++	for (int i = 0; i < 1800 && !bridge_ready && !bridge_failed; i++) {
++		int e = tsleep((caddr_t)&bridge_ready, PCATCH, "mi8bt", hz / 10);
++
++		if (e != 0 && e != EWOULDBLOCK) {
++			return e;
++		}
++	}
++	return bridge_ready ? 0 : ENXIO;
++}
++static vm_offset_t bridge_se;
++static LCK_GRP_DECLARE(bridge_group, "mi8-bt");
++static LCK_MTX_DECLARE(bridge_lock, &bridge_group);     /* the queue */
++static LCK_MTX_DECLARE(bridge_tx, &bridge_group);       /* the transmitter, one packet at a time */
++static LCK_MTX_DECLARE(bridge_write_lock, &bridge_group);       /* a whole write: wake, answer, packet */
++
++/* The kernel controls com.apple.uart.bluetooth (BlueTool) and com.apple.uart.sk.bluetooth (bluetoothd), see below. */
++static struct uart_port {
++	kern_ctl_ref ref;
++	u_int32_t unit;
++	bool connected;
++} uart_ports[2];
++static struct uart_port *uart_active;           /* the one that was connected last: it gets what the chip sends */
++
++static void
++bridge_push(const uint8_t *data, uint32_t length)
++{
++	if (uart_active != NULL && uart_active->connected) {
++		/* BlueTool's (and bluetoothd's) serial port: the packets go up the socket as a stream of bytes */
++		errno_t e = ctl_enqueuedata(uart_active->ref, uart_active->unit, (void *)(uintptr_t)data, length, 0);
++
++		if (e != 0) {
++			static uint32_t lost;
++
++			if (lost++ < 10) {
++				printf("bt: bridge: the socket takes no more (error %d): a packet of %u bytes lost\n", (int)e, length);
++			}
++		}
++		if (bridge_seen++ < 60) {
++			dump_bytes("to the socket", data, length);
++		}
++		return;
++	}
++	lck_mtx_lock(&bridge_lock);
++	if (length > BRIDGE_PACKET || bridge_tail - bridge_head >= BRIDGE_QUEUE) {
++		bridge_dropped++;
++	} else {
++		struct bridge_packet *p = &bridge_queue[bridge_tail % BRIDGE_QUEUE];
++
++		p->length = (uint16_t)length;
++		memcpy(p->data, data, length);
++		bridge_tail++;
++		if (bridge_seen++ < 40) {
++			dump_bytes("to bluetoothd", data, length);
++		}
++		thread_wakeup((event_t)&bridge_head);
++	}
++	lck_mtx_unlock(&bridge_lock);
++}
++
++static bool
++bridge_tx_bytes(const uint8_t *data, uint32_t length)
++{
++	bool ok;
++
++	lck_mtx_lock(&bridge_tx);
++	ok = uart_tx(bridge_se, data, length);
++	lck_mtx_unlock(&bridge_tx);
++	return ok;
++}
++
++/* The receiver's bytes into packets (called by the thread alone). */
++static void
++bridge_parse(void)
++{
++	static uint32_t strays;
++
++	for (;;) {
++		uint32_t total;
++
++		if (rxq_len == 0) {
++			return;
++		}
++		if (rxq[0] >= IBS_WAKE_ACK) {
++			uint8_t b = rxq[0], ack = IBS_WAKE_ACK;
++
++			rx_take(1);
++			if (b == IBS_WAKE_IND) {
++				(void)bridge_tx_bytes(&ack, 1);
++			} else if (b == IBS_WAKE_ACK) {
++				ibs_acked = true;
++			}
++			continue;
++		}
++		switch (rxq[0]) {
++		case 4:
++			if (rxq_len < 3) {
++				return;
++			}
++			total = 3u + rxq[2];
++			break;
++		case 2:
++			if (rxq_len < 5) {
++				return;
++			}
++			total = 5u + (rxq[3] | (rxq[4] << 8));
++			break;
++		case 3:
++			if (rxq_len < 4) {
++				return;
++			}
++			total = 4u + rxq[3];
++			break;
++		default:
++			if (strays++ < 16) {
++				printf("bt: bridge: a byte %#04x where a packet should begin: dropped\n", rxq[0]);
++			}
++			rx_take(1);
++			continue;
++		}
++		if (total > sizeof(rxq)) {
++			rx_take(1);
++			continue;
++		}
++		if (rxq_len < total) {
++			return;
++		}
++		/*
++		 * What iOS is told the controller is. BlueTool and bluetoothd pick their firmware script and their
++		 * workarounds by the answer to Read Local Version: manufacturer 15 (Broadcom) and LMP subversion
++		 * 0x420e are the BCM4357B1 of this model of iPhone. The chip is a Qualcomm one (manufacturer 29,
++		 * subversion 0x2be); the two fields are replaced in that one answer, the others are the chip's.
++		 */
++		if (total == 15 && rxq[1] == 0x0e && rxq[4] == 0x01 && rxq[5] == 0x10 && rxq[6] == 0) {
++			rxq[11] = 15;
++			rxq[12] = 0;
++			rxq[13] = 0x0e;
++			rxq[14] = 0x42;
++		}
++		/*
++		 * Read Local Supported Commands: bluetoothd (written for the iPhone's Broadcom chip) sends Write Default
++		 * Erroneous Data Reporting without asking whether the chip has it, and gives up the initialization
++		 * (status 628) if the chip's mask says no. The two bits (octet 18, bits 2 and 3) are set; the command
++		 * itself is answered here (mi8_bt_hci_write).
++		 */
++		if (total == 71 && rxq[1] == 0x0e && rxq[4] == 0x02 && rxq[5] == 0x10 && rxq[6] == 0) {
++			rxq[7 + 18] |= 0x0c;
++		}
++		/*
++		 * The first few of each kind of event, for the log: their first four bytes (type, code, length and
++		 * the status or LE sub-event), which leave out the addresses of the devices around.
++		 */
++		if (rxq[0] == 4) {
++			static uint32_t seen[0x40];
++			uint8_t code = rxq[1] == 0x3e && total > 3 ? 0x30 + (rxq[3] & 0x0f) : rxq[1];
++
++			if (code < 0x40 && code != 0x0e && code != 0x0f && code != 0x13 && seen[code]++ < 8) {
++				dump_bytes(rxq[1] == 0x3e ? "bridge: LE event, head" : "bridge: event, head", rxq, total < 4 ? total : 4);
++			}
++		} else if (rxq[0] == 2) {
++			static uint32_t acl_in;
++
++			if ((acl_in++ & 0xff) == 0) {
++				printf("bt: bridge: %u ACL packets from the chip so far\n", acl_in);
++			}
++		}
++		/* The chip's refusals (Command Complete or Command Status with a status other than 0), for the log */
++		if ((rxq[1] == 0x0e && total >= 7 && rxq[6] != 0) || (rxq[1] == 0x0f && total >= 7 && rxq[3] != 0)) {
++			static uint32_t refusals;
++
++			if (refusals++ < 100) {
++				dump_bytes("bridge: the chip refuses", rxq, total);
++			}
++		}
++		bridge_push(rxq, total);
++		rx_take(total);
++	}
++}
++
++/*
++ * The serial port, as BlueTool and bluetoothd see it: on the iPhone X the controller is a UART one, and both
++ * open a kernel control socket, "com.apple.uart.bluetooth" (socket(PF_SYSTEM, SOCK_STREAM, SYSPROTO_CONTROL),
++ * CTLIOCGINFO, connect), write and read H4 packets as bytes, and set the line with termios through
++ * getsockopt/setsockopt (TIOCGETA, TIOCSETA, as option names, at level SYSPROTO_CONTROL). The line here is
++ * the engine's, at 3.2 Mbaud, and stays so: the speed that is asked for is not applied.
++ */
++static uint8_t uart_out[BRIDGE_PACKET + 8];
++static uint32_t uart_out_length;
++
++int mi8_bt_hci_write(const uint8_t *packet, uint32_t length);
++
++/* One byte of what the host writes: H4 packets are put together, anything else (the 0xaa that BlueTool sends to wake the line) dropped. */
++static void
++uart_out_byte(uint8_t b)
++{
++	static uint32_t stray;
++	uint32_t total = 0;
++
++	if (uart_out_length == 0 && (b < 1 || b > 3)) {
++		if (stray++ < 10) {
++			printf("bt: socket: a byte %#04x where a packet should begin: dropped\n", b);
++		}
++		return;
++	}
++	uart_out[uart_out_length++] = b;
++	switch (uart_out[0]) {
++	case 1:
++		total = uart_out_length >= 4 ? 4u + uart_out[3] : 0;
++		break;
++	case 2:
++		total = uart_out_length >= 5 ? 5u + (uart_out[3] | (uart_out[4] << 8)) : 0;
++		break;
++	case 3:
++		total = uart_out_length >= 4 ? 4u + uart_out[3] : 0;
++		break;
++	}
++	if (total != 0 && total > sizeof(uart_out)) {
++		uart_out_length = 0;
++		return;
++	}
++	if (total != 0 && uart_out_length == total) {
++		(void)mi8_bt_hci_write(uart_out, total);
++		uart_out_length = 0;
++	}
++}
++
++static struct uart_port *
++uart_port_of(kern_ctl_ref ref)
++{
++	return ref == uart_ports[1].ref ? &uart_ports[1] : &uart_ports[0];
++}
++
++static errno_t
++uart_connect(kern_ctl_ref ref, struct sockaddr_ctl *sac, void **unitinfo)
++{
++	struct uart_port *port = uart_port_of(ref);
++	errno_t e = bridge_wait_ready();
++
++	if (e != 0) {
++		return e;
++	}
++	if (port->connected) {
++		return EBUSY;
++	}
++	port->unit = sac->sc_unit;
++	uart_out_length = 0;
++	port->connected = true;
++	uart_active = port;
++	printf("bt: socket: %s connected (unit %u)\n", port == &uart_ports[1] ? "com.apple.uart.sk.bluetooth" : "com.apple.uart.bluetooth",
++	    sac->sc_unit);
++	return 0;
++}
++
++static errno_t
++uart_disconnect(kern_ctl_ref ref, u_int32_t unit, void *unitinfo)
++{
++	struct uart_port *port = uart_port_of(ref);
++
++	port->connected = false;
++	if (uart_active == port) {
++		uart_active = NULL;
++	}
++	printf("bt: socket: %s closed\n", port == &uart_ports[1] ? "com.apple.uart.sk.bluetooth" : "com.apple.uart.bluetooth");
++	return 0;
++}
++
++static errno_t
++uart_send(kern_ctl_ref ref, u_int32_t unit, void *unitinfo, mbuf_t m, int flags)
++{
++	for (mbuf_t n = m; n != NULL; n = mbuf_next(n)) {
++		const uint8_t *d = mbuf_data(n);
++		size_t l = mbuf_len(n);
++
++		for (size_t i = 0; i < l; i++) {
++			uart_out_byte(d[i]);
++		}
++	}
++	mbuf_freem(m);
++	return 0;
++}
++
++static errno_t
++uart_setopt(kern_ctl_ref ref, u_int32_t unit, void *unitinfo, int opt, void *data, size_t len)
++{
++	static uint32_t shown;
++
++	if (shown++ < 12) {
++		printf("bt: socket: option %#x set (%lu bytes): accepted, not applied\n", (unsigned)opt, (unsigned long)len);
++	}
++	return 0;
++}
++
++static errno_t
++uart_getopt(kern_ctl_ref ref, u_int32_t unit, void *unitinfo, int opt, void *data, size_t *len)
++{
++	static uint32_t shown;
++
++	if (shown++ < 12) {
++		printf("bt: socket: option %#x read (%lu bytes): zeros\n", (unsigned)opt, (unsigned long)*len);
++	}
++	if (data != NULL) {
++		bzero(data, *len);
++	}
++	return 0;
++}
++
++static void
++uart_control_register(void)
++{
++	static const char *const names[2] = { "com.apple.uart.bluetooth", "com.apple.uart.sk.bluetooth" };
++
++	for (int i = 0; i < 2; i++) {
++		struct kern_ctl_reg reg;
++		errno_t e;
++
++		bzero(&reg, sizeof(reg));
++		strlcpy(reg.ctl_name, names[i], sizeof(reg.ctl_name));
++		reg.ctl_flags = CTL_FLAG_REG_SOCK_STREAM;
++		reg.ctl_sendsize = 64 * 1024;
++		reg.ctl_recvsize = 64 * 1024;
++		reg.ctl_connect = uart_connect;
++		reg.ctl_disconnect = uart_disconnect;
++		reg.ctl_send = uart_send;
++		reg.ctl_setopt = uart_setopt;
++		reg.ctl_getopt = uart_getopt;
++		e = ctl_register(&reg, &uart_ports[i].ref);
++		printf("bt: socket: %s registered: %s (%d)\n", names[i], e == 0 ? "yes" : "NO", (int)e);
++	}
++}
++
++extern bool redwood_wifi_radio_address(uint8_t *address);       /* bsd/dev/redwood_wifi.c: boot-arg wifi_mac */
++
++static uint8_t bridge_address[6];
++
++/* The controller's address: the radio's, one more (so that the two differ), or a fixed local one. */
++void
++mi8_bt_hci_address(uint8_t *out)
++{
++	memcpy(out, bridge_address, 6);
++}
++
++static void
++bridge_address_init(void)
++{
++	static const uint8_t fallback[6] = { 0x02, 0x4d, 0x49, 0x38, 0x00, 0x01 };
++
++	if (redwood_wifi_radio_address(bridge_address)) {
++		bridge_address[5]++;
++	} else {
++		memcpy(bridge_address, fallback, 6);
++	}
++}
++
++static void
++bridge_set_address(vm_offset_t se)
++{
++	uint8_t params[6], payload[255], code;
++	uint32_t length = 0;
++
++	for (int i = 0; i < 6; i++) {
++		params[i] = bridge_address[5 - i];      /* Linux's bdaddr_t: the least significant byte first */
++	}
++	if (!hci_send(se, 0xfc14, params, 6)) {
++		return;
++	}
++	for (int i = 0; i < 3; i++) {
++		if (!hci_event(se, &code, payload, &length, 1000)) {
++			printf("bt: bridge: no answer to the address\n");
++			return;
++		}
++		dump_bytes("the answer to the address", payload, length);
++		if (code == 0xff || code == 0x0e) {
++			if (code == 0xff || (length >= 4 && payload[1] == 0x14 && payload[2] == 0xfc)) {
++				break;
++			}
++		}
++	}
++}
++
++static void
++bridge_run(vm_offset_t se)
++{
++	bridge_set_address(se);
++	printf("bt: step 7: the bridge. The chip is ready for iOS\n");
++	bridge_se = se;
++	rxq_len = 0;
++	ibs_acked = false;
++	bridge_ready = true;
++	wakeup((caddr_t)&bridge_ready);
++	for (;;) {
++		rx_pump(se);
++		bridge_parse();
++		sleep_us(500);
++	}
++}
++
++/* ---- what the service calls ---- */
++
++int
++mi8_bt_hci_open(void)
++{
++	if (bridge_wait_ready() != 0) {
++		return 1;
++	}
++	lck_mtx_lock(&bridge_lock);
++	bridge_head = bridge_tail = 0;
++	bridge_open = true;
++	bridge_wake = false;
++	lck_mtx_unlock(&bridge_lock);
++	printf("bt: bridge: opened by iOS\n");
++	return 0;
++}
++
++void
++mi8_bt_hci_close(void)
++{
++	lck_mtx_lock(&bridge_lock);
++	bridge_open = false;
++	bridge_wake = true;
++	thread_wakeup((event_t)&bridge_head);
++	lck_mtx_unlock(&bridge_lock);
++	printf("bt: bridge: closed by iOS\n");
++}
++
++/* The chip woken (in-band sleep) and the packet sent. 0 on success. */
++static int
++bridge_send(const uint8_t *packet, uint32_t length)
++{
++	static const uint8_t wake = IBS_WAKE_IND;
++	int result = 0;
++
++	lck_mtx_lock(&bridge_write_lock);
++	if (ibs_active) {
++		ibs_acked = false;
++		(void)bridge_tx_bytes(&wake, 1);
++		for (uint32_t t = 0; t < 300 * 5 && !ibs_acked; t++) {
++			sleep_us(200);
++		}
++		if (!ibs_acked) {
++			printf("bt: bridge: no wake acknowledgement within 300 ms: sending anyway\n");
++		}
++	}
++	if (!bridge_tx_bytes(packet, length)) {
++		result = 1;
++	}
++	lck_mtx_unlock(&bridge_write_lock);
++	return result;
++}
++
++/* One H4 packet to the chip (or answered here). 0 on success. */
++int
++mi8_bt_hci_write(const uint8_t *packet, uint32_t length)
++{
++	static uint32_t shown;
++
++	if (!bridge_ready || length < 1) {
++		return 1;
++	}
++	if (packet[0] == 1 && length >= 4) {
++		uint16_t opcode = packet[1] | (packet[2] << 8);
++
++		if (opcode != 0xfc4c && shown++ < 300) {
++			printf("bt: bridge: command %#06x, %u parameters%s\n", opcode, packet[3], (opcode >> 10) == 0x3f ? " (vendor: answered here)" : "");
++		}
++		if (opcode == 0x0c5a || opcode == 0x0c5b) {
++			/* (Read/Write) Default Erroneous Data Reporting: the chip has none; the answer is "yes, off" */
++			uint8_t cc[8] = { 4, 0x0e, opcode == 0x0c5a ? 5 : 4, 1, (uint8_t)(opcode & 0xff), (uint8_t)(opcode >> 8), 0, 0 };
++
++			if (shown < 300) {
++				printf("bt: bridge: command %#06x answered here\n", opcode);
++			}
++			bridge_push(cc, opcode == 0x0c5a ? 8 : 7);
++			return 0;
++		}
++		/*
++		 * Own_Address_Type in LE Set Scan Parameters, LE Set Advertising Parameters and LE Create Connection:
++		 * bluetoothd asks for its random address (1, or 3 for a resolvable one with the random fallback), which
++		 * it sets on the iPhone through a Broadcom vendor command; this chip has none set and refuses the scan
++		 * (status 0x12). The public address is used instead (1 -> 0, 3 -> 2).
++		 */
++		{
++			uint32_t at = opcode == 0x200b ? 9 : opcode == 0x2006 ? 9 : opcode == 0x200d ? 16 : 0;
++
++			if (at != 0 && length > at && (packet[at] == 1 || packet[at] == 3) && length <= 4 + 255) {
++				uint8_t copy[4 + 255];
++
++				memcpy(copy, packet, length);
++				copy[at] &= ~1;
++				return bridge_send(copy, length);
++			}
++		}
++		if (opcode == 0x204a) {
++			/*
++			 * LE Read Periodic Advertiser List Size is one of the extended advertising commands: once the chip
++			 * has had one, it refuses the legacy ones (status 0x0c), and bluetoothd advertises and scans with
++			 * those (it thinks the controller a BCM4357). The answer is "a list of 0" from here.
++			 */
++			uint8_t cc[8] = { 4, 0x0e, 5, 1, 0x4a, 0x20, 0, 0 };
++
++			bridge_push(cc, sizeof(cc));
++			return 0;
++		}
++		if ((opcode >> 10) == 0x3f) {
++			/*
++			 * BlueTool's firmware script (the socket) needs its vendor commands to succeed: status 0 alone.
++			 * bluetoothd (the service) reads further fields after a status of 0 (the advertising instance of
++			 * 0xfd48, ...) and aborts when they are missing; to it they are answered "unknown command"
++			 * (status 1) followed by the sub-opcode (the first parameter, which its parser of 0xfce9 compares)
++			 * and a 0: its parser of raw answers drops any with fewer than two bytes after the status, and
++			 * the command it waits for (15 s) then counts as a stalled chip.
++			 */
++			if (uart_active != NULL && uart_active->connected) {
++				uint8_t cc[7] = { 4, 0x0e, 4, 1, (uint8_t)(opcode & 0xff), (uint8_t)(opcode >> 8), 0 };
++
++				bridge_push(cc, sizeof(cc));
++			} else {
++				uint8_t cc[9] = { 4, 0x0e, 6, 1, (uint8_t)(opcode & 0xff), (uint8_t)(opcode >> 8), 0x01,
++					          packet[3] > 0 && length > 4 ? packet[4] : 0, 0 };
++
++				bridge_push(cc, sizeof(cc));
++			}
++			return 0;
++		}
++	}
++	return bridge_send(packet, length);
++}
++
++/* Blocks until a packet is queued; 1 when interrupted or closed. */
++int
++mi8_bt_hci_wait(void)
++{
++	int result = 0;
++
++	lck_mtx_lock(&bridge_lock);
++	while (bridge_head == bridge_tail && !bridge_wake) {
++		wait_result_t r = lck_mtx_sleep(&bridge_lock, LCK_SLEEP_DEFAULT, (event_t)&bridge_head, THREAD_ABORTSAFE);
++
++		if (r != THREAD_AWAKENED) {
++			result = 1;
++			break;
++		}
++	}
++	if (result == 0 && bridge_head == bridge_tail) {
++		bridge_wake = false;
++		result = 1;
++	}
++	lck_mtx_unlock(&bridge_lock);
++	return result;
++}
++
++/* The first queued packet's H4 type and length; 1 if none. */
++int
++mi8_bt_hci_peek(uint8_t *type, uint32_t *length)
++{
++	int result = 1;
++
++	lck_mtx_lock(&bridge_lock);
++	if (bridge_head != bridge_tail) {
++		struct bridge_packet *p = &bridge_queue[bridge_head % BRIDGE_QUEUE];
++
++		*type = p->data[0];
++		*length = p->length;
++		result = 0;
++	}
++	lck_mtx_unlock(&bridge_lock);
++	return result;
++}
++
++int
++mi8_bt_hci_pop(uint8_t *buffer, uint32_t max, uint32_t *length)
++{
++	int result = 1;
++
++	lck_mtx_lock(&bridge_lock);
++	if (bridge_head != bridge_tail) {
++		struct bridge_packet *p = &bridge_queue[bridge_head % BRIDGE_QUEUE];
++
++		if (p->length <= max) {
++			memcpy(buffer, p->data, p->length);
++			*length = p->length;
++			bridge_head++;
++			result = 0;
++		}
++	}
++	lck_mtx_unlock(&bridge_lock);
++	return result;
++}
++
 +static void
 +bt_thread(void *parameter, __unused wait_result_t result)
 +{
@@ -6795,6 +7446,12 @@ index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4
 +	uint32_t steps = (uint32_t)(uintptr_t)parameter, votes;
 +	bool m_ahb, s_ahb, s6;
 +
++	if (steps >= 7) {
++		/* What iOS looks for, before the chip is up (see bridge_wait_ready) */
++		bridge_address_init();
++		uart_control_register();
++		RedwoodBTStart();
++	}
 +	printf("bt: step 1: look (reads only; WCN3990 over serial engine 6)\n");
 +	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
 +	votes = rd(gcc + GCC_VOTE_APPS);
@@ -6846,6 +7503,8 @@ index 0000000000000000000000000000000000000000..77b28afe6202b73781a376434e6801e4
 +		}
 +	}
 +out:
++	bridge_failed = true;
++	wakeup((caddr_t)&bridge_ready);
 +	printf("bt: stopping here (bt=%u)\n", steps);
 +	thread_terminate(current_thread());
 +}
@@ -24244,6 +24903,476 @@ index 431423b069f6ab4dc98d06eb5f2969a3d50e376a..ce86f05e07ac32bda105a1619322fdf2
  MiniIOSurface * MiniIOSurfaceCreateSimple(uint32_t width, uint32_t height, uint32_t pixelFormat);
  void            MiniIOSurfaceDrop(MiniIOSurface * surface);
  /* A Mach send right for the surface in the task (what IOSurfaceCreateMachPort gives); 0 on failure. */
+diff --git a/iokit/Kernel/RedwoodBT.cpp b/iokit/Kernel/RedwoodBT.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0eae2c82946e1b51dc6768a2f7323b9e7d95a0c2
+--- /dev/null
++++ b/iokit/Kernel/RedwoodBT.cpp
+@@ -0,0 +1,464 @@
++/*
++ * RedwoodBT: the Bluetooth controller as iOS's bluetoothd looks for it.
++ *
++ * bluetoothd opens the IOKit service named AppleBTHci (IOServiceNameMatching, and waits for it to appear
++ * if it is not there yet), reads its property "pipes" -- pipe0 to pipe10, each {item_size, item_count} --
++ * and talks to it with IOConnectCallMethod:
++ *
++ *   selector 0 open, 1 close, 4 transport reset        no arguments
++ *   selector 2 write, 3 read                           n items of 16 bytes in, n results of 8 bytes out
++ *
++ * An item is { u8 pipe, u8 packet count, u16 pad, u32 total length, u64 pointer to the packets in the
++ * caller's memory }; a packet there is { u16 length, u8 sequence number of the pipe, u8 0, H4 packet },
++ * the length being that of the H4 packet (its type byte included), packets following one another. A
++ * result is { u32 IOReturn, u8 packets done, ... }. Pipes 0 to 4 are for writing (0 commands, 1 and 3 and 4
++ * ACL data, 2 SCO), pipes 5 to 10 for reading (bluetoothd reads all six in one call, which waits until
++ * there is something; it dispatches by the H4 type byte, not by pipe, and pipe 10 is its own kind of
++ * packet, which is never sent here). This is what bluetoothd's code does (local notes,
++ * bluetoothd-applebthci); none of it is from Apple's headers.
++ *
++ * The packets come from, and go to, bsd/dev/mi8_bt.c (boot-arg bt=7), which has the UART.
++ */
++
++#include <IOKit/IOLib.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSNumber.h>
++#include <sys/systm.h>
++
++extern "C" {
++int mi8_bt_log(const char * format, ...) __printflike(1, 2);
++void RedwoodBTStart(void);
++void mi8_bt_hci_address(uint8_t * address);
++int mi8_bt_hci_open(void);
++void mi8_bt_hci_close(void);
++int mi8_bt_hci_write(const uint8_t * packet, uint32_t length);
++int mi8_bt_hci_wait(void);
++int mi8_bt_hci_peek(uint8_t * type, uint32_t * length);
++int mi8_bt_hci_pop(uint8_t * buffer, uint32_t max, uint32_t * length);
++}
++
++enum { kBTOpen = 0, kBTClose = 1, kBTWrite = 2, kBTRead = 3, kBTReset = 4 };
++
++#define BT_PIPES                11
++#define BT_FIRST_READ_PIPE      5
++#define BT_ITEM_MAX             64              /* items in one call */
++#define BT_BYTES_MAX            (64u << 10)     /* bytes in one item */
++
++#define kIOReturnBTNotFound     ((IOReturn) 0xe00002f0)
++#define kIOReturnBTAborted      ((IOReturn) 0xe00002eb)
++
++struct bt_item {
++	uint8_t pipe, count;
++	uint16_t pad;
++	uint32_t total;
++	uint64_t pointer;
++};
++
++struct bt_result {
++	int32_t status;
++	uint8_t done, pad[3];
++};
++
++static const struct { uint32_t size, count; } bt_pipe_config[BT_PIPES] = {
++	{ 300, 16 }, { 1100, 16 }, { 300, 16 }, { 1100, 16 }, { 1100, 16},     /* written: command, ACL, SCO, ACL, ACL */
++	{ 300, 32 }, { 1100, 16 }, { 1100, 16 }, { 1100, 16 }, { 300, 16 },    /* read: events, ACL, ACL, ACL, SCO */
++	{ 1024, 1 },
++};
++
++class RedwoodBTHci : public IOService
++{
++	OSDeclareDefaultStructors(RedwoodBTHci);
++
++public:
++	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(RedwoodBTHci, IOService);
++
++bool
++RedwoodBTHci::start(IOService * provider)
++{
++	OSDictionary * pipes = OSDictionary::withCapacity(BT_PIPES);
++
++	if (!IOService::start(provider) || pipes == NULL) {
++		OSSafeReleaseNULL(pipes);
++		return false;
++	}
++	for (unsigned i = 0; i < BT_PIPES; i++) {
++		OSDictionary * pipe = OSDictionary::withCapacity(2);
++		OSNumber * size = OSNumber::withNumber((unsigned long long) bt_pipe_config[i].size, 32);
++		OSNumber * count = OSNumber::withNumber((unsigned long long) bt_pipe_config[i].count, 32);
++		char key[16];
++
++		if (pipe != NULL && size != NULL && count != NULL) {
++			snprintf(key, sizeof(key), "pipe%u", i);
++			pipe->setObject("item_size", size);
++			pipe->setObject("item_count", count);
++			pipes->setObject(key, pipe);
++		}
++		OSSafeReleaseNULL(size);
++		OSSafeReleaseNULL(count);
++		OSSafeReleaseNULL(pipe);
++	}
++	setProperty("pipes", pipes);
++	pipes->release();
++	setProperty(kIOUserClientClassKey, "RedwoodBTHciUserClient");
++	setName("AppleBTHci");
++	registerService();
++	return true;
++}
++
++/*
++ * bluetoothd also looks, by the names "marconi-bt" and then "bluetooth", for a service in the device tree
++ * with the property "local-mac-address" (six bytes, not all zeros), and ends with "No bluetooth on this
++ * device" if it finds none. This is that service.
++ */
++class RedwoodBTNode : public IOService
++{
++	OSDeclareDefaultStructors(RedwoodBTNode);
++
++public:
++	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(RedwoodBTNode, IOService);
++
++bool
++RedwoodBTNode::start(IOService * provider)
++{
++	uint8_t address[6];
++	OSData * data;
++
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	mi8_bt_hci_address(address);
++	data = OSData::withBytes(address, sizeof(address));
++	if (data != NULL) {
++		setProperty("local-mac-address", data);
++		data->release();
++	}
++	setName("bluetooth");
++	registerService();
++	return true;
++}
++
++/*
++ * The management service, AppleBTMgmt (user client AppleBTMgmtUC), which BlueTool asks to power the controller
++ * before it talks to AppleBTHci: selector 0 power on, 1 power off, 8 sleep, 9 wake from sleep, 2 to 4 the
++ * trace mode, level and mask, 5 the capture timeout, 6 trigger a capture, 7 read the crash information, and a
++ * general debug call. The chip is on from the kernel's bring-up and stays on, so all of them succeed and do
++ * nothing; the call is logged.
++ */
++class RedwoodBTMgmt : public IOService
++{
++	OSDeclareDefaultStructors(RedwoodBTMgmt);
++
++public:
++	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(RedwoodBTMgmt, IOService);
++
++bool
++RedwoodBTMgmt::start(IOService * provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "RedwoodBTMgmtUserClient");
++	setName("AppleBTMgmt");
++	registerService();
++	return true;
++}
++
++class RedwoodBTMgmtUserClient : public IOUserClient
++{
++	OSDeclareDefaultStructors(RedwoodBTMgmtUserClient);
++
++public:
++	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++	    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(RedwoodBTMgmtUserClient, IOUserClient);
++
++IOReturn
++RedwoodBTMgmtUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++RedwoodBTMgmtUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
++{
++	static unsigned said;
++
++	if (said++ < 40) {
++		mi8_bt_log("bt: shim: management selector %u (%u bytes in, %u scalars in)\n", selector,
++		    (unsigned) args->structureInputSize, (unsigned) args->scalarInputCount);
++	}
++	if (args->structureOutput != NULL) {
++		bzero(args->structureOutput, args->structureOutputSize);
++	}
++	return kIOReturnSuccess;
++}
++
++class RedwoodBTHciUserClient : public IOUserClient
++{
++	OSDeclareDefaultStructors(RedwoodBTHciUserClient);
++
++	uint8_t fSeq[BT_PIPES];                 /* the sequence number the next packet of a read pipe gets */
++
++	IOReturn write(const struct bt_item * item, struct bt_result * result);
++	IOReturn read(const struct bt_item * items, struct bt_result * results, uint32_t n);
++
++public:
++	virtual bool initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++	    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(RedwoodBTHciUserClient, IOUserClient);
++
++bool
++RedwoodBTHciUserClient::initWithTask(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties)
++{
++	mi8_bt_log("bt: shim: a user client is asked for (type %u)\n", (unsigned) type);
++	return IOUserClient::initWithTask(owningTask, securityID, type, properties);
++}
++
++IOReturn
++RedwoodBTHciUserClient::clientClose(void)
++{
++	mi8_bt_hci_close();
++	terminate();
++	return kIOReturnSuccess;
++}
++
++/* The packets of one write item: each is {u16 length, u8 sequence, u8 0, H4 packet}. */
++IOReturn
++RedwoodBTHciUserClient::write(const struct bt_item * item, struct bt_result * result)
++{
++	uint8_t * buffer;
++	uint32_t at = 0, done = 0;
++	IOReturn ret = kIOReturnSuccess;
++
++	if (item->pipe >= BT_FIRST_READ_PIPE || item->total == 0 || item->total > BT_BYTES_MAX) {
++		return kIOReturnBadArgument;
++	}
++	buffer = (uint8_t *) IOMalloc(item->total);
++	if (buffer == NULL) {
++		return kIOReturnNoMemory;
++	}
++	if (copyin((user_addr_t) item->pointer, buffer, item->total) != 0) {
++		IOFree(buffer, item->total);
++		return kIOReturnVMError;
++	}
++	while (at + 4 <= item->total && done < item->count) {
++		uint32_t length = buffer[at] | (buffer[at + 1] << 8);
++
++		if (length == 0 || at + 4 + length > item->total) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
++		if (mi8_bt_hci_write(buffer + at + 4, length) != 0) {
++			ret = kIOReturnDeviceError;
++			break;
++		}
++		at += 4 + length;
++		done++;
++	}
++	result->done = (uint8_t) done;
++	IOFree(buffer, item->total);
++	return ret;
++}
++
++/* Wait for a packet; then fill the items from the queue: events go to pipe 5, ACL data to 6, SCO to 9. */
++IOReturn
++RedwoodBTHciUserClient::read(const struct bt_item * items, struct bt_result * results, uint32_t n)
++{
++	uint8_t * staging[BT_ITEM_MAX] = { NULL };
++	uint32_t used[BT_ITEM_MAX] = { 0 }, size[BT_ITEM_MAX] = { 0 };
++	IOReturn ret = kIOReturnSuccess;
++
++	if (mi8_bt_hci_wait() != 0) {
++		return kIOReturnBTAborted;
++	}
++	for (uint32_t i = 0; i < n; i++) {
++		size[i] = items[i].total > BT_BYTES_MAX ? BT_BYTES_MAX : items[i].total;
++		staging[i] = size[i] ? (uint8_t *) IOMalloc(size[i]) : NULL;
++	}
++	for (;;) {
++		uint8_t type;
++		uint32_t length, want, i;
++		int found = -1;
++
++		if (mi8_bt_hci_peek(&type, &length) != 0) {
++			break;
++		}
++		want = type == 4 ? 5 : type == 2 ? 6 : 9;
++		for (i = 0; i < n; i++) {
++			if (items[i].pipe == want && staging[i] != NULL) {
++				found = (int) i;
++				break;
++			}
++		}
++		if (found < 0) {
++			for (i = 0; i < n; i++) {               /* any pipe but 10 that has room, if the wanted one is not asked for */
++				if (items[i].pipe >= BT_FIRST_READ_PIPE && items[i].pipe < 10 && staging[i] != NULL && type != 4) {
++					found = (int) i;
++					break;
++				}
++			}
++		}
++		if (found < 0) {
++			uint8_t * junk = (uint8_t *) IOMalloc(length);
++			uint32_t dropped;
++
++			mi8_bt_log("bt: shim: a packet of type %u has no pipe to go to: dropped\n", type);
++			if (junk == NULL) {
++				break;
++			}
++			(void) mi8_bt_hci_pop(junk, length, &dropped);
++			IOFree(junk, length);
++			continue;
++		}
++		if (used[found] + 4 + length > size[found] || results[found].done >= items[found].count) {
++			break;                                  /* no room: it stays for the next read */
++		}
++		{
++			uint8_t * at = staging[found] + used[found];
++			uint32_t got;
++
++			if (mi8_bt_hci_pop(at + 4, size[found] - used[found] - 4, &got) != 0) {
++				break;
++			}
++			at[0] = (uint8_t) (got & 0xff);
++			at[1] = (uint8_t) (got >> 8);
++			at[2] = fSeq[items[found].pipe]++;
++			at[3] = 0;
++			used[found] += 4 + got;
++			results[found].done++;
++		}
++	}
++	for (uint32_t i = 0; i < n; i++) {
++		if (used[i] != 0) {
++			if (copyout(staging[i], (user_addr_t) items[i].pointer, used[i]) != 0) {
++				ret = kIOReturnVMError;
++			}
++			results[i].status = 0;
++		} else {
++			results[i].status = kIOReturnBTNotFound;
++		}
++		if (staging[i] != NULL) {
++			IOFree(staging[i], size[i]);
++		}
++	}
++	return ret;
++}
++
++IOReturn
++RedwoodBTHciUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
++    IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
++{
++	struct bt_item items[BT_ITEM_MAX];
++	struct bt_result results[BT_ITEM_MAX];
++	uint32_t n;
++	IOReturn ret = kIOReturnSuccess;
++	static unsigned said;
++
++	if (said++ < 60) {
++		mi8_bt_log("bt: shim: selector %u, %u bytes in, %u out\n", selector, (unsigned) args->structureInputSize,
++		    (unsigned) args->structureOutputSize);
++	}
++	switch (selector) {
++	case kBTOpen:
++		bzero(fSeq, sizeof(fSeq));
++		return mi8_bt_hci_open() == 0 ? kIOReturnSuccess : kIOReturnNotReady;
++	case kBTClose:
++		mi8_bt_hci_close();
++		return kIOReturnSuccess;
++	case kBTReset:
++		mi8_bt_log("bt: shim: transport reset asked for: nothing done\n");
++		return kIOReturnSuccess;
++	case kBTWrite:
++	case kBTRead:
++		break;
++	default:
++		return kIOReturnUnsupported;
++	}
++	n = args->structureInputSize / sizeof(struct bt_item);
++	if (n == 0 || n > BT_ITEM_MAX || args->structureInput == NULL || args->structureInputSize != n * sizeof(struct bt_item) ||
++	    args->structureOutput == NULL || args->structureOutputSize < n * sizeof(struct bt_result)) {
++		return kIOReturnBadArgument;
++	}
++	memcpy(items, args->structureInput, n * sizeof(struct bt_item));
++	bzero(results, sizeof(results));
++	if (selector == kBTWrite) {
++		for (uint32_t i = 0; i < n; i++) {
++			results[i].status = (int32_t) write(&items[i], &results[i]);
++			if (results[i].status != 0) {
++				ret = (IOReturn) results[i].status;
++			}
++		}
++	} else {
++		ret = read(items, results, n);
++	}
++	memcpy(args->structureOutput, results, n * sizeof(struct bt_result));
++	args->structureOutputSize = n * sizeof(struct bt_result);
++	return selector == kBTRead ? ret : kIOReturnSuccess;
++}
++
++void
++RedwoodBTStart(void)
++{
++	static bool started;
++	IOService * provider = IOService::getPlatform();
++	RedwoodBTHci * service;
++
++	if (started) {
++		return;
++	}
++	started = true;
++	service = OSTypeAlloc(RedwoodBTHci);
++	if (service == NULL || provider == NULL || !service->init() || !service->attach(provider)) {
++		OSSafeReleaseNULL(service);
++		mi8_bt_log("bt: shim: cannot create the service\n");
++		return;
++	}
++	if (!service->start(provider)) {
++		service->detach(provider);
++		mi8_bt_log("bt: shim: the service did not start\n");
++	} else {
++		mi8_bt_log("bt: shim: AppleBTHci is there\n");
++	}
++	service->release();
++
++	RedwoodBTMgmt * mgmt = OSTypeAlloc(RedwoodBTMgmt);
++
++	if (mgmt == NULL || provider == NULL || !mgmt->init() || !mgmt->attach(provider) || !mgmt->start(provider)) {
++		mi8_bt_log("bt: shim: AppleBTMgmt did not start\n");
++	} else {
++		mi8_bt_log("bt: shim: AppleBTMgmt is there\n");
++	}
++	OSSafeReleaseNULL(mgmt);
++
++	RedwoodBTNode * node = OSTypeAlloc(RedwoodBTNode);
++
++	if (node == NULL || provider == NULL || !node->init() || !node->attach(provider) || !node->start(provider)) {
++		mi8_bt_log("bt: shim: the node \"bluetooth\" did not start\n");
++	} else {
++		mi8_bt_log("bt: shim: the node \"bluetooth\" with its address is there\n");
++	}
++	OSSafeReleaseNULL(node);
++}
 diff --git a/iokit/Kernel/RedwoodGPU.cpp b/iokit/Kernel/RedwoodGPU.cpp
 index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfaab68f07d 100644
 --- a/iokit/Kernel/RedwoodGPU.cpp
@@ -24746,6 +25875,18 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  	default:
  		IOLog("RedwoodGPU: request %#x (%zu bytes) is not known here\n", selector, size);
  		ret = kIOReturnUnsupported;
+diff --git a/iokit/conf/files b/iokit/conf/files
+index 6c430c2b23c74950cee9b8d54affe69b961cd627..39cfe78cb24abb54f83652589f0a0200bb9e6d94 100644
+--- a/iokit/conf/files
++++ b/iokit/conf/files
+@@ -85,6 +85,7 @@ iokit/Kernel/MiniIOMobileFramebuffer.cpp		optional iokitcpp
+ iokit/Kernel/RedwoodGPU.cpp				optional iokitcpp
+ iokit/Kernel/RedwoodWLAN.cpp			optional iokitcpp
+ iokit/Kernel/RedwoodBattery.cpp			optional iokitcpp
++iokit/Kernel/RedwoodBT.cpp			optional iokitcpp
+ iokit/Kernel/MiniAppleKeyStore.cpp			optional iokitcpp
+ iokit/Kernel/MiniIONetworkStack.cpp			optional iokitcpp
+ iokit/Kernel/IOPlatformIO.cpp				optional iokitcpp
 diff --git a/osfmk/arm/io_map.c b/osfmk/arm/io_map.c
 index 18ef2f02122f203a42aaa2a3d1552d0a0d2aaee4..06255c40b226b7506c35a8b7d1facca8ec843296 100644
 --- a/osfmk/arm/io_map.c
