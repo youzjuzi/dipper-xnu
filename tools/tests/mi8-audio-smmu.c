@@ -22,6 +22,10 @@ struct model {
 	unsigned writes, allocations, releases, caches, lines, holds;
 	unsigned mismatch_write, drop_forever, unreadable, rewrite, corrupt;
 	unsigned syncs, timeout_sync, faults, cb_reads;
+	uint32_t unstable_at, restore_ignore, restore_other_at;
+	unsigned flip_read, seen_reads;
+	bool restore_m;
+	char logs[38][320];
 	uint32_t addresses[128], values[128];
 	bool no_memory, tlb_stuck, restore_block;
 };
@@ -35,7 +39,9 @@ read_reg(void *ctx, uint32_t at, uint32_t *value)
 	if (at == m->unreadable) return false;
 	if (at >= 0x40000 && ((at & 4095) == 0x610 || (at & 4095) == 0x7f0)) { *value = 0; return true; }
 	if (at >= 0x40000 && (at & 4095) == 0x7f4) { *value = m->tlb_stuck ? 1 : 0; return true; }
-	*value = m->regs[at / 4]; return true;
+	*value = m->regs[at / 4];
+	if (at == m->unstable_at && ++m->seen_reads == m->flip_read) *value ^= 2;
+	return true;
 }
 static bool
 write_reg(void *ctx, uint32_t at, uint32_t value)
@@ -52,6 +58,11 @@ write_reg(void *ctx, uint32_t at, uint32_t value)
 	if (at == m->drop_forever) return true;
 	if (m->restore_block && m->holds && at == CB(43) && value == 0) return true;
 	m->regs[at / 4] = value;
+	if (at == CB(43) && m->holds) {
+		m->regs[at / 4] &= ~m->restore_ignore;
+		if (m->restore_m) m->regs[at / 4] |= 1;
+	}
+	if (m->holds && at == m->restore_other_at) m->regs[at / 4] ^= 2;
 	if (m->mismatch_write == m->writes) m->regs[at / 4] ^= 0x100;
 	if (m->faults == m->writes) m->regs[(CB(43) + 0x58) / 4] = 2;
 	return true;
@@ -65,7 +76,14 @@ wait_us(void *ctx, uint32_t us)
 	if (m->rewrite) m->regs[m->rewrite / 4] ^= 0x100;
 	if (m->corrupt == 2) m->tables[1024] ^= 1ull << 2;
 }
-static void log_line(void *ctx, const char *text) { struct model *m = ctx; CHECK(text && strlen(text) < 320); m->lines++; }
+static void log_line(void *ctx, const char *text) {
+	struct model *m = ctx; CHECK(text && strlen(text) < 320 && m->lines < 38);
+	snprintf(m->logs[m->lines++], 320, "%s", text);
+}
+static bool logged(struct model *m, const char *text) {
+	for (unsigned n = 0; n < m->lines; n++) if (strstr(m->logs[n], text)) return true;
+	return false;
+}
 static bool
 allocate(void *ctx, struct mi8_smmu_memory *mem)
 {
@@ -96,7 +114,7 @@ static struct model *
 fresh(void)
 {
 	struct model *m = calloc(1, sizeof(*m)); CHECK(m);
-	m->drop_forever = m->unreadable = ~0u;
+	m->drop_forever = m->unreadable = m->unstable_at = m->restore_other_at = ~0u;
 	m->regs[0] = 0x250406; m->regs[0x20 / 4] = 0x4c017e4c; m->regs[0x24 / 4] = 0x5000002d;
 	m->regs[0x28 / 4] = 0x1222; /* 4K / 40-bit UBS,OAS,IAS */
 	for (unsigned n = 0; n < 76; n++) m->regs[S2CR(n) / 4] = 2u << 16;
@@ -221,4 +239,89 @@ flow_tests(void)
 	}
 }
 
-int main(void) { overlap_tests(); flow_tests(); printf("SELFTEST PASS %u/%u\n", checks, checks); return 0; }
+static struct model *
+residue(void)
+{
+	struct model *m = fresh();
+	/* Recorded SDM845 vectors: CB43 SCTLR=0x3f35c100,
+	 * TTBR0=0x6bce20cd:5ba8454b, TCR=0x5e383faa, CBAR/CBA2R/FSR=0.
+	 * Configured CB0 has CBAR=0x10003, CB3=0x10000; both have
+	 * CBA2R=1, SCTLR=0xe0, FSR=0x400 (CB3 need not have an S2CR). */
+	const uint32_t smrs[] = {0x80080880,0x80080c80,0x800f00a0,0x800f00c0,0x800f00e0,0x800f0100,0x80000740,0x80000760};
+	const unsigned banks[] = {0,0,1,1,2,2,4,4};
+	m->regs[0] = 0x270406; m->regs[0x28 / 4] = 0x5555;
+	for (unsigned n = 0; n < 8; n++) { m->regs[SMR(n) / 4] = smrs[n]; m->regs[S2CR(n) / 4] = banks[n]; }
+	for (unsigned n = 0; n < 5; n++) {
+		m->regs[CBAR(n) / 4] = n == 0 ? 0x10003 : n == 4 ? 0x1f000 : 0x10000;
+		m->regs[CBA2R(n) / 4] = 1; m->regs[CB(n) / 4] = 0xe0; m->regs[(CB(n) + 0x58) / 4] = 0x400;
+	}
+	m->regs[CB(43) / 4] = 0x3f35c100;
+	m->regs[(CB(43) + 0x20) / 4] = 0x5ba8454b; m->regs[(CB(43) + 0x24) / 4] = 0x6bce20cd;
+	m->regs[(CB(43) + 0x30) / 4] = 0x5e383faa;
+	memcpy(m->before, m->regs, sizeof(m->regs)); return m;
+}
+
+static void
+free_bank_tests(void)
+{
+	struct model *m = residue();
+	m->unstable_at = CB(43); m->flip_read = ~0u;
+	struct mi8_smmu_result r = run(m, 11);
+	CHECK(r.bank == 43 && !m->writes && !m->allocations && m->seen_reads == 2);
+	CHECK(logged(m, "SCTLR=0x3f35c100 TTBR0=0x6bce20cd:5ba8454b TCR=0x5e383faa FSR=0 read twice stable"));
+	identical(m); free(m);
+	m = residue(); r = run(m, 12);
+	CHECK(r.bank == 43 && r.passed && r.restored && !r.retained && m->releases == 1);
+	CHECK(m->regs[CB(43) / 4] == 0x3f35c100 && !(m->regs[CB(43) / 4] & 1));
+	bool restored_raw = false;
+	for (unsigned n = 0; n < m->writes; n++) if (m->addresses[n] == CB(43) && m->values[n] == 0x3f35c100) restored_raw = true;
+	CHECK(restored_raw); identical(m); free(m);
+	/* Isolate each exclusion rather than relying on the configured vector's FSR. */
+	for (unsigned reason = 0; reason < 6; reason++) {
+		m = residue();
+		if (reason == 0) m->regs[CBAR(43) / 4] = 0x10000;
+		if (reason == 1) m->regs[CBA2R(43) / 4] = 1;
+		if (reason == 2) m->regs[CB(43) / 4] |= 1;
+		if (reason == 3) m->regs[(CB(43) + 0x58) / 4] = 0x400;
+		if (reason == 4) m->regs[S2CR(20) / 4] = 43; /* invalid SMR still reserves it */
+		if (reason == 5) { m->regs[SMR(20) / 4] = 0x80000500; m->regs[S2CR(20) / 4] = 43; }
+		r = run(m, 11); CHECK(r.bank == 42 && !m->writes); free(m);
+	}
+	const unsigned fields[] = {0,0x20,0x24,0x30};
+	for (unsigned f = 0; f < 4; f++) {
+		m = residue(); m->unstable_at = CB(43) + fields[f]; m->flip_read = 2;
+		r = run(m, 11); CHECK(r.bank == 42 && !m->writes); free(m);
+		/* Selection pair succeeds. Saved snapshot and echo recheck follow;
+		 * only the final pre-write pair (reads 5/6) is unstable. */
+		m = residue(); m->unstable_at = CB(43) + fields[f]; m->flip_read = 6;
+		r = run(m, 12); CHECK(r.bank == 43 && !r.passed && !m->writes && !m->holds);
+		CHECK(m->allocations == 1 && m->releases == 1 && logged(m, "candidate changed/unstable before write")); identical(m); free(m);
+	}
+	/* Configured, unreferenced CB3 and CB0 still cannot become fallback banks. */
+	m = residue();
+	for (unsigned n = 5; n < 44; n++) m->regs[CB(n) / 4] |= 1;
+	m->regs[S2CR(0) / 4] = m->regs[S2CR(1) / 4] = 2u << 16;
+	r = run(m, 11); CHECK(r.bank == -1 && !m->writes);
+	CHECK(logged(m, "CBAR!=0=2 CBA2R!=0=2")); free(m);
+	/* Every rejected bank contributes explicit reason counts, including refs. */
+	m = fresh();
+	for (unsigned n = 8; n < 44; n++) m->regs[CB(n) / 4] = 1;
+	m->regs[CB(43) / 4] = 0; m->regs[CBAR(43) / 4] = 1;
+	m->regs[CB(42) / 4] = 0; m->regs[CBA2R(42) / 4] = 1;
+	m->regs[CB(40) / 4] = 0; m->regs[(CB(40) + 0x58) / 4] = 2;
+	m->regs[CB(39) / 4] = 0; m->unstable_at = CB(39); m->flip_read = 2;
+	r = run(m, 11); CHECK(r.bank == -1 && !m->writes);
+	CHECK(logged(m, "bank rejects: referenced=8 CBAR!=0=1 CBA2R!=0=1 M=1=32 FSR!=0=1 unstable=1")); free(m);
+	/* Non-M write-ignored residue is reported, while every other word is exact. */
+	m = residue(); m->restore_ignore = 1u << 29; r = run(m, 12);
+	CHECK(r.passed && r.restored && !r.retained && m->releases == 1);
+	CHECK(logged(m, "SCTLR restore diff=0x20000000") && logged(m, "bank disabled"));
+	CHECK(m->regs[CB(43) / 4] == (0x3f35c100 & ~(1u << 29)));
+	m->regs[CB(43) / 4] = m->before[CB(43) / 4]; identical(m); free(m);
+	m = residue(); m->restore_m = true; r = run(m, 12);
+	CHECK(!r.passed && !r.restored && r.retained && !m->releases && logged(m, "SCTLR restore M mismatch")); free(m);
+	m = residue(); m->restore_other_at = CB(43) + 0x38; r = run(m, 12);
+	CHECK(!r.passed && !r.restored && r.retained && !m->releases && logged(m, "readback mismatch")); free(m);
+}
+
+int main(void) { overlap_tests(); flow_tests(); free_bank_tests(); printf("SELFTEST PASS %u/%u\n", checks, checks); return 0; }

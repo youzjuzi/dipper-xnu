@@ -6205,10 +6205,10 @@ index 0000000000000000000000000000000000000000..43386b9ab0d51a1864305486a25c1384
 +#endif
 diff --git a/bsd/dev/mi8_audio_smmu.c b/bsd/dev/mi8_audio_smmu.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..9c2e56aa028fa9d0e2cfb37e25ef2652551d374d
+index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c770d1bdf
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_smmu.c
-@@ -0,0 +1,407 @@
+@@ -0,0 +1,459 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independently written from SMMUv2 register/descriptor formats and the
 + * existing apps SMMU adapters. Software checks do not establish DMA reachability. */
@@ -6237,12 +6237,16 @@ index 0000000000000000000000000000000000000000..9c2e56aa028fa9d0e2cfb37e25ef2652
 +#define AS_CBAR_VALUE (1u << 16 | 3u << 8 | 15u << 12)
 +#define AS_MAIR 0xf404ff44u
 +
++struct as_bank_regs { uint32_t cbar, cba2r, ctl, lo, hi, tcr, fsr; };
 +struct as_state {
 +	const struct mi8_smmu_ops *io;
 +	struct mi8_smmu_result *out;
 +	uint32_t scr, id0, id1, id2, gfsr, page, cbbase, oas;
 +	uint32_t smr[76], s2cr[76];
 +	bool used[45], failed, truncated;
++	unsigned rejected[6]; /* referenced, CBAR, CBA2R, M, FSR, unstable */
++	struct as_bank_regs selected;
++	uint32_t restored_ctl_difference;
 +};
 +struct as_reg { uint32_t at, old, value; };
 +
@@ -6335,17 +6339,48 @@ index 0000000000000000000000000000000000000000..9c2e56aa028fa9d0e2cfb37e25ef2652
 +}
 +
 +static bool
-+as_bank(struct as_state *s, unsigned bank, bool report)
++as_bank_read(struct as_state *s, unsigned bank, struct as_bank_regs *r)
 +{
-+	uint32_t b = s->cbbase + bank * s->page, cbar, cba2r, ctl, lo, hi, tcr, fsr;
-+	if (!as_read(s, s->page + 4 * bank, &cbar) || !as_read(s, s->page + 0x800 + 4 * bank, &cba2r) ||
-+	    !as_read(s, b, &ctl) || !as_read(s, b + 0x20, &lo) || !as_read(s, b + 0x24, &hi) ||
-+	    !as_read(s, b + 0x30, &tcr) || !as_read(s, b + 0x58, &fsr)) return false;
-+	if (report) as_log(s, "CB%u CBAR=%#x CBA2R=%#x SCTLR=%#x TTBR0=%#x:%08x TCR=%#x FSR=%#x",
-+	    bank, cbar, cba2r, ctl, hi, lo, tcr, fsr);
-+	/* Conservative free-bank policy: reject configured CBAR types/attributes,
-+ * any SCTLR state, faults, S2-only banks and every referenced context. */
-+	return cbar == 0 && ctl == 0 && fsr == 0;
++	uint32_t b = s->cbbase + bank * s->page;
++	return as_read(s, s->page + 4 * bank, &r->cbar) && as_read(s, s->page + 0x800 + 4 * bank, &r->cba2r) &&
++	    as_read(s, b + 0x58, &r->fsr) && as_read(s, b, &r->ctl) && as_read(s, b + 0x20, &r->lo) &&
++	    as_read(s, b + 0x24, &r->hi) && as_read(s, b + 0x30, &r->tcr);
++}
++
++static void
++as_bank_report(struct as_state *s, unsigned bank, const struct as_bank_regs *r, bool stable)
++{
++	as_log(s, "CB%u CBAR=%#x CBA2R=%#x SCTLR=%#x TTBR0=%#x:%08x TCR=%#x FSR=%#x%s",
++	    bank, r->cbar, r->cba2r, r->ctl, r->hi, r->lo, r->tcr, r->fsr, stable ? " read twice stable" : "");
++}
++
++static bool
++as_bank_free(struct as_state *s, unsigned bank, struct as_bank_regs *r)
++{
++	uint32_t b = s->cbbase + bank * s->page, ctl, lo, hi, tcr;
++	bool reason[5], free = true;
++	if (!as_bank_read(s, bank, r) || !as_read(s, b, &ctl) || !as_read(s, b + 0x20, &lo) ||
++	    !as_read(s, b + 0x24, &hi) || !as_read(s, b + 0x30, &tcr)) return false;
++	/* Disabled, unconfigured banks can contain stable power-on residue. */
++	reason[0] = r->cbar != 0; reason[1] = r->cba2r != 0; reason[2] = (r->ctl & 1) != 0;
++	reason[3] = r->fsr != 0; reason[4] = r->ctl != ctl || r->lo != lo || r->hi != hi || r->tcr != tcr;
++	for (unsigned n = 0; n < 5; n++) if (reason[n]) { s->rejected[n + 1]++; free = false; }
++	return free;
++}
++
++/* Only restoration may tolerate non-M differences. Configuration/hold checks
++ * still require exact echoes; M must always be zero on this path. */
++static bool
++as_restore_ctl(struct as_state *s, uint32_t cb, uint32_t saved, bool write, bool report)
++{
++	uint32_t got;
++	if (saved & 1) return false;
++	if (write && (!as_read(s, cb, &got) || !s->io->write(s->io->ctx, cb, saved))) return false;
++	if (!as_read(s, cb, &got)) return false;
++	if (got & 1) { as_log(s, "Pending: SCTLR restore M mismatch saved=%#x got=%#x", saved, got); return false; }
++	if (report && (got ^ saved)) as_log(s, "SCTLR restore diff=%#x saved=%#x got=%#x (M=0)", got ^ saved, saved, got);
++	if (!write) s->restored_ctl_difference = got ^ saved;
++	return true;
 +}
 +
 +static bool
@@ -6387,14 +6422,19 @@ index 0000000000000000000000000000000000000000..9c2e56aa028fa9d0e2cfb37e25ef2652
 +	}
 +	if (s->out->slot != -2) as_log(s, "stream 0x1821: NOT MATCHED");
 +	for (unsigned n = 0; n < 45; n++) if (s->used[n]) {
-+		(void)as_bank(s, n, true); if (s->failed) return false;
++		struct as_bank_regs r;
++		if (!as_bank_read(s, n, &r)) return false;
++		as_bank_report(s, n, &r, false);
 +	}
 +	/* Bank 44 is reserved for Wi-Fi even before its SMR is installed. */
 +	for (unsigned n = 44; n-- > ((s->id1 >> 16) & 255);) {
-+		if (!s->used[n] && as_bank(s, n, false)) { s->out->bank = (int)n; (void)as_bank(s, n, true); break; }
++		if (s->used[n]) { s->rejected[0]++; continue; }
++		if (as_bank_free(s, n, &s->selected)) { s->out->bank = (int)n; as_bank_report(s, n, &s->selected, true); break; }
 +		if (s->failed) break;
 +	}
 +	as_log(s, "candidate SMR=%d CB=%d (CB44 reserved for Wi-Fi)", s->out->slot, s->out->bank);
++	if (s->out->bank < 0) as_log(s, "bank rejects: referenced=%u CBAR!=0=%u CBA2R!=0=%u M=1=%u FSR!=0=%u unstable=%u",
++	    s->rejected[0], s->rejected[1], s->rejected[2], s->rejected[3], s->rejected[4], s->rejected[5]);
 +	if (s->truncated) as_log(s, "Pending: report exceeded log budget");
 +	return !s->failed && !s->truncated;
 +}
@@ -6493,6 +6533,15 @@ index 0000000000000000000000000000000000000000..9c2e56aa028fa9d0e2cfb37e25ef2652
 +	for (unsigned n = 0; n < 76; n++) if (!as_equal(&s, AS_SMR(n), s.smr[n]) || !as_equal(&s, AS_S2CR(n), s.s2cr[n])) goto finish;
 +	for (unsigned n = 0; n < 12; n++) if (!as_equal(&s, regs[n].at, regs[n].old)) goto finish;
 +	if (!as_equal(&s, 0, s.scr) || !as_faults_clear(&s, cb)) goto finish;
++	/* A second stable pair is required immediately before any register write,
++ * and it must still agree with both selection and the saved snapshot. */
++	struct as_bank_regs current;
++	if (!as_bank_free(&s, bank, &current) || current.ctl != s.selected.ctl || current.lo != s.selected.lo ||
++	    current.hi != s.selected.hi || current.tcr != s.selected.tcr || current.ctl != regs[10].old ||
++	    current.lo != regs[2].old || current.hi != regs[3].old || current.tcr != regs[5].old ||
++	    current.cbar != regs[0].old || current.cba2r != regs[1].old) {
++		as_log(&s, "candidate changed/unstable before write; no SMMU writes"); goto finish;
++	}
 +	touched = true;
 +	for (unsigned n = 0; n < 11; n++) {
 +		if (!as_write(&s, regs[n].at, regs[n].value) || !as_faults_clear(&s, cb)) goto restore;
@@ -6514,16 +6563,19 @@ index 0000000000000000000000000000000000000000..9c2e56aa028fa9d0e2cfb37e25ef2652
 + * but retain memory unless detachment, disable and TLBSYNC are all confirmed. */
 +	if (!as_write(&s, AS_SMR(slot), s.smr[slot])) clean = false;
 +	if (!as_write(&s, AS_S2CR(slot), regs[11].old)) clean = false;
-+	if (!as_write(&s, cb, 0)) clean = false;
++	if (!as_restore_ctl(&s, cb, 0, true, true)) clean = false;
 +	if (!as_sync(&s, cb, bank)) clean = false;
 +	for (unsigned n = 0; n < 10; n++) if (!as_write(&s, regs[n].at, regs[n].old)) clean = false;
-+	if (!as_write(&s, cb, regs[10].old)) clean = false;
-+	for (unsigned n = 0; n < 12; n++) if (!as_equal(&s, regs[n].at, regs[n].old)) clean = false;
++	if (!as_restore_ctl(&s, cb, regs[10].old, true, false)) clean = false;
++	for (unsigned n = 0; n < 12; n++) if (n != 10 && !as_equal(&s, regs[n].at, regs[n].old)) clean = false;
++	if (!as_restore_ctl(&s, cb, regs[10].old, false, true)) clean = false;
 +	if (!as_equal(&s, AS_SMR(slot), s.smr[slot]) || !as_faults_clear(&s, cb) ||
 +	    !as_equal(&s, cb + 0x60, fault_far[0]) || !as_equal(&s, cb + 0x64, fault_far[1]) ||
 +	    !as_equal(&s, 0x40, global_far[0]) || !as_equal(&s, 0x44, global_far[1]) || !as_equal(&s, 0, s.scr)) clean = false;
 +	out->restored = clean;
-+	as_log(&s, clean ? "all saved configuration/fault registers restored exactly" : "Pending: restoration unconfirmed; memory and SMR/CB reservations retained");
++	as_log(&s, !clean ? "Pending: restoration unconfirmed; memory and SMR/CB reservations retained" :
++	    s.restored_ctl_difference ? "saved registers restored except reported SCTLR non-M bits; bank disabled" :
++	    "all saved configuration/fault registers restored exactly");
 +finish:
 +	if (allocated) {
 +		io->cache(io->ctx, &mem);

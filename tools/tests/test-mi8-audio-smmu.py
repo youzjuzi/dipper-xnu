@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Compile the actual bounded SMMU diagnostic against synthetic registers/RAM."""
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,7 +21,7 @@ def body(source, signature):
     return source[start:end]
 
 
-def check_shared_allocation(source, tmp):
+def check_shared_allocation(source, tmp, cflags, run_env):
     # Execute the real conditional-lock wrappers and early dispatcher branch.
     wrappers = '\n'.join(body(source, 'static void\n' + name + '(')
                          for name in ('wsmmu_before_power', 'audio_smmu_thread'))
@@ -74,26 +75,33 @@ int main(void){
 '''
     c, exe = Path(tmp) / 'allocation.c', Path(tmp) / 'allocation'
     c.write_text(code)
-    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread', str(c), '-o', str(exe)], check=True)
-    subprocess.run([str(exe)], check=True)
+    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread', *cflags, str(c), '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], env=run_env, check=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tree', type=Path, default=ROOT / 'work')
-    dev = parser.parse_args().tree.resolve() / 'hackios/xnu-src/xnu-8796.121.2/bsd/dev'
+    parser.add_argument('--sanitize', action='store_true', help='run ASan/UBSan; leak detection is unavailable under ptrace')
+    args = parser.parse_args()
+    dev = args.tree.resolve() / 'hackios/xnu-src/xnu-8796.121.2/bsd/dev'
+    cflags, run_env = [], None
+    if args.sanitize:
+        cflags = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-sanitize-recover=all']
+        run_env = dict(os.environ)
+        run_env['ASAN_OPTIONS'] = run_env.get('ASAN_OPTIONS', '') + ':detect_leaks=0'
     with tempfile.TemporaryDirectory(prefix='mi8-smmu-test-') as tmp:
         exe = Path(tmp) / 'test'
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread',
-                        '-DMI8_SMMU_HOST_TEST', '-I' + str(dev),
+                        *cflags, '-DMI8_SMMU_HOST_TEST', '-I' + str(dev),
                         str(ROOT / 'tools/tests/mi8-audio-smmu.c'),
                         str(dev / 'mi8_audio_smmu.c'), '-o', str(exe)], check=True)
-        subprocess.run([str(exe)], check=True)
+        subprocess.run([str(exe)], env=run_env, check=True)
         source = (dev / 'mi8_rproc.c').read_text()
         assert source.index('if (last >= 11)') < source.index('if (last >= 1)', source.index('if (last >= 11)'))
         assert 'audio_smmu_serial = shared_step >= 12;' in source
         assert 'mi8_audio_smmu_reserved(n, ~0u)' in source and 'mi8_audio_smmu_reserved(~0u, n)' in source
-        check_shared_allocation(source, tmp)
+        check_shared_allocation(source, tmp, cflags, run_env)
 
 
 if __name__ == '__main__':
