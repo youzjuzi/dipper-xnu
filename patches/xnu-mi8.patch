@@ -5568,10 +5568,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04af517c9be
+index 0000000000000000000000000000000000000000..d3c2666887c4e6f7269120d6197aa66163db7606
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,755 @@
+@@ -0,0 +1,781 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
@@ -5582,6 +5582,7 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +#ifdef MI8_GLINK_HOST_TEST
 +#include <string.h>
 +#include <errno.h>
++#include <stdio.h>
 +#else
 +#include <libkern/libkern.h>
 +#include <sys/errno.h>
@@ -5816,7 +5817,8 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +	struct mi8_glink *link;
 +	struct mi8_apr_reply reply;
 +	struct mi8_apr_pending *pending;
-+	bool afe_active, afe_event, play;
++	bool afe_active, afe_event, play, canary, fatal_seen;
++	bool (*fatal)(void *);
 +	struct mi8_pcm_state *pcm;
 +	struct mi8_pcm_ops play_ops;
 +	const struct mi8_pcm_ops *memory_ops;
@@ -5882,6 +5884,15 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +
 +#define TELL(s, ...) do { if ((s).io->log) (s).io->log((s).io->ctx, __VA_ARGS__); } while (0)
 +
++static bool
++teardown_fatal(struct audio_session *s)
++{
++	if (!s->play || !s->fatal || !s->fatal(s->alive_ctx)) return false;
++	if (!s->fatal_seen) TELL((*s),"mi8rp: 13: ADSP fatal; APR teardown skipped, PAS shutdown required\n");
++	s->fatal_seen=true;
++	return true;
++}
++
 +static int
 +service_request(struct audio_session *s, const uint8_t *packet, size_t bytes,
 +    struct mi8_apr_pending *pending, bool cleanup, bool *submitted)
@@ -5901,11 +5912,13 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +		if (now >= deadline || deadline - now < 1000) { error = ETIMEDOUT; goto out; }
 +		if ((deadline-now)/1000 < send_ms) send_ms = (uint32_t)((deadline-now)/1000);
 +	}
++	if (cleanup && teardown_fatal(s)) { error=EHOSTDOWN;goto out; }
 +	error = mi8_glink_raw_send(s->link, packet, bytes, send_ms);
 +	if (error) goto out;
 +	*submitted = true;
 +	while (!pending->done && time_us(s) < deadline) {
 +		struct mi8_glink_channel_status status;
++		if (cleanup && teardown_fatal(s)) { error=EHOSTDOWN;goto out; }
 +		if (!cleanup && !still_alive(s)) { error = ENOTCONN; goto out; }
 +		mi8_glink_poll_once(s->link);
 +		error = mi8_glink_raw_status(s->link, &status);
@@ -6023,7 +6036,9 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +static struct mi8_pcm_state play_pcm;
 +static struct mi8_glink_cfg play_cfg;
 +static struct mi8_pcm_ops play_memory_ops;
-+static bool play_live, last_play_clean, last_play_proven;
++static bool play_live, last_play_clean, last_play_proven, last_afe_clean, last_smmu_clean;
++static char last_cleanup[160];
++const char *mi8_audio_play_cleanup(void) { return last_cleanup; }
 +static uint64_t last_play_teardown;
 +uint64_t mi8_audio_play_teardown_end(void) { return last_play_teardown; }
 +bool mi8_audio_play_proven(void) { return last_play_proven; }
@@ -6034,7 +6049,7 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +{
 +	if (play_live) {
 +		bool inert=mi8_pcm_finish(&play_pcm,pas_shutdown);
-+		last_play_clean=last_play_clean && inert;
++		last_smmu_clean=inert;
 +		/* After reset there is no peer to ACK a close. Destroy sends one
 +		 * best-effort CLOSE and drops only the local GLINK allocations. */
 +		mi8_glink_destroy(play_session.link);
@@ -6042,6 +6057,13 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +		TELL(play_session,"mi8rp: 9: channel close local after PAS shutdown %s; peer ACK not awaited\n",pas_shutdown?"ok":"FAILED");
 +		play_live=false;
 +	}
++	last_play_clean=last_afe_clean && last_smmu_clean;
++	char missing[96]={0};size_t used=0;
++	if (!last_afe_clean) used=(size_t)snprintf(missing,sizeof(missing),"%s",play_session.fatal_seen?"AFE: DSP fatal":"AFE");
++	if (!pas_shutdown) used+=(size_t)snprintf(missing+used,sizeof(missing)-used,"%sPAS",used?", ":"");
++	if (!last_smmu_clean) (void)snprintf(missing+used,sizeof(missing)-used,"%sSMMU",used?", ":"");
++	if (*missing) snprintf(last_cleanup,sizeof(last_cleanup),"Pending (%s)",missing);
++	else snprintf(last_cleanup,sizeof(last_cleanup),"complete");
 +	return last_play_clean;
 +}
 +
@@ -6097,7 +6119,7 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +	started = !error || uncertain;
 +	if (error) goto out;
 +	if (s->play) {
-+		success=mi8_pcm_run(s->pcm,&s->play_ops,s->play_deadline);
++		success=mi8_pcm_run(s->pcm,&s->play_ops,s->play_deadline,s->canary);
 +		goto out;
 +	}
 +	{
@@ -6128,10 +6150,12 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +	}
 +	if (s->play) {
 +		/* A refused begin may itself have retained a prior reservation. */
-+		last_play_clean=clean && (!s->pcm->io || s->pcm->mapped);
++		last_afe_clean=clean;
++		last_smmu_clean=!s->pcm->io || s->pcm->mapped;
 +		if (s->pcm->mapped && !s->pcm->result.deferred) {
-+			if (!mi8_pcm_finish(s->pcm,false)) clean=last_play_clean=false;
++			if (!mi8_pcm_finish(s->pcm,false)) clean=last_smmu_clean=false;
 +		}
++		last_play_clean=last_afe_clean && last_smmu_clean;
 +		last_play_proven=s->pcm->result.proven;
 +	}
 +	if (clean || (s->play && pins_clean)) TELL((*s), "mi8rp: 10: pins restored (CFG and output latches)\n");
@@ -6141,7 +6165,7 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +}
 +
 +static bool
-+audio_run(const struct mi8_glink_cfg *cfg, bool (*alive)(void *), void *alive_ctx, const struct mi8_audio_pin_ops *pins, bool play, const struct mi8_pcm_ops *memory_ops, uint64_t play_until)
++audio_run(const struct mi8_glink_cfg *cfg, bool (*alive)(void *), void *alive_ctx, const struct mi8_audio_pin_ops *pins, bool play, const struct mi8_pcm_ops *memory_ops, uint64_t play_until, unsigned step, bool (*fatal)(void *))
 +{
 +	static const uint32_t intents[20] = {
 +		512, 512, 512, 512, 512, 512, 512, 512, 512, 512,
@@ -6166,6 +6190,8 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +	session->io = cfg; session->alive = alive; session->alive_ctx = alive_ctx;
 +	if (play) {
 +		memset(&play_pcm,0,sizeof(play_pcm));last_play_proven=false;last_play_clean=false;
++		last_afe_clean=last_smmu_clean=true;*last_cleanup=0;
++		session->canary=step==13;session->fatal=fatal;
 +		session->play=true;session->pcm=&play_pcm;session->memory_ops=memory_ops;
 +		session->play_deadline=play_until>3000000?play_until-3000000:0;
 +		last_play_teardown=play_until;
@@ -6251,7 +6277,7 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +bool
 +mi8_audio_run(const struct mi8_glink_cfg *cfg, bool (*alive)(void *), void *ctx)
 +{
-+	return audio_run(cfg, alive, ctx, NULL, false, NULL, 0);
++	return audio_run(cfg, alive, ctx, NULL, false, NULL, 0, 0, NULL);
 +}
 +
 +#ifndef MI8_GLINK_HOST_TEST
@@ -6309,30 +6335,30 @@ index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04a
 +	/* ml_io_map gives permanent, not page-aligned mappings (16 KB kernel pages): they are never unmapped (ml_io_unmap
 +	 * panics in pmap on them, run 20261111-audio-afe-01), only kept for the next call. */
 +	struct mi8_audio_pin_ops ops = { native_pin_read, native_pin_write, &native };
-+	if (pins) return audio_run(cfg, alive, ctx, pins, false, NULL, 0);
-+	return audio_run(cfg, alive, ctx, &ops, false, NULL, 0);
++	if (pins) return audio_run(cfg, alive, ctx, pins, false, NULL, 0, 0, NULL);
++	return audio_run(cfg, alive, ctx, &ops, false, NULL, 0, 0, NULL);
 +#else
-+	return pins && audio_run(cfg, alive, ctx, pins, false, NULL, 0);
++	return pins && audio_run(cfg, alive, ctx, pins, false, NULL, 0, 0, NULL);
 +#endif
 +}
 +
 +bool
 +mi8_audio_run_play(const struct mi8_glink_cfg *cfg, bool (*alive)(void *), void *ctx,
-+    const struct mi8_audio_pin_ops *pins, const struct mi8_pcm_ops *memory_ops, uint64_t until)
++    const struct mi8_audio_pin_ops *pins, const struct mi8_pcm_ops *memory_ops, uint64_t until, unsigned step, bool (*fatal)(void *))
 +{
 +#ifndef MI8_GLINK_HOST_TEST
 +	struct mi8_audio_pin_ops ops = { native_pin_read,native_pin_write,&native };
-+	return audio_run(cfg,alive,ctx,pins?pins:&ops,true,memory_ops,until);
++	return audio_run(cfg,alive,ctx,pins?pins:&ops,true,memory_ops,until,step,fatal);
 +#else
-+	return pins && memory_ops && audio_run(cfg,alive,ctx,pins,true,memory_ops,until);
++	return pins && memory_ops && audio_run(cfg,alive,ctx,pins,true,memory_ops,until,step,fatal);
 +#endif
 +}
 diff --git a/bsd/dev/mi8_audio.h b/bsd/dev/mi8_audio.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4a54e2437ba219c6bc4837787778a6c2f07a1b8e
+index 0000000000000000000000000000000000000000..db61e0e0959908d718dc8ee8a2f762b3a49a4e13
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.h
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,60 @@
 +/* SPDX-License-Identifier: MIT */
 +/* APR core handshake and explicit AFE MI2S control. The explicit playback entry never controls the amplifier. */
 +#ifndef MI8_AUDIO_H
@@ -6380,13 +6406,14 @@ index 0000000000000000000000000000000000000000..4a54e2437ba219c6bc4837787778a6c2
 +};
 +struct mi8_pcm_ops;
 +bool mi8_audio_play_proven(void);
++const char *mi8_audio_play_cleanup(void);
 +uint64_t mi8_audio_play_teardown_end(void);
 +/* Finish must run after the caller attempts PAS shutdown. Callbacks and their
 + * contexts stay valid until finish returns; callback tables are copied. The
 + * caller serializes run/finish and the SMMU lifetime with other claimants. */
 +bool mi8_audio_play_needs_finish(void);
 +bool mi8_audio_finish_play(bool pas_shutdown);
-+bool mi8_audio_run_play(const struct mi8_glink_cfg *, bool (*)(void *), void *, const struct mi8_audio_pin_ops *, const struct mi8_pcm_ops *, uint64_t);
++bool mi8_audio_run_play(const struct mi8_glink_cfg *, bool (*)(void *), void *, const struct mi8_audio_pin_ops *, const struct mi8_pcm_ops *, uint64_t, unsigned step, bool (*fatal)(void *));
 +bool mi8_audio_run_afe(const struct mi8_glink_cfg *, bool (*)(void *), void *, const struct mi8_audio_pin_ops *);
 +/* Synchronous and bounded; caller owns DSP boot/shutdown. cfg callbacks must
 + * remain valid until return. alive is polled for fatal/lifecycle cancellation. */
@@ -6394,7 +6421,7 @@ index 0000000000000000000000000000000000000000..4a54e2437ba219c6bc4837787778a6c2
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..8e2d5a70931c876759778d898403055fd6a2ed8b
+index 0000000000000000000000000000000000000000..c0ac270027ec5adaf74710a4f1e26d591f656200
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
 @@ -0,0 +1,286 @@
@@ -6607,7 +6634,7 @@ index 0000000000000000000000000000000000000000..8e2d5a70931c876759778d898403055f
 +}
 +
 +bool
-+mi8_pcm_run(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end)
++mi8_pcm_run(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end, bool canary)
 +{
 +	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;
 +	bool success=false,closed=false,unmapped=false,adm_closed=true;
@@ -6641,7 +6668,7 @@ index 0000000000000000000000000000000000000000..8e2d5a70931c876759778d898403055f
 +		}
 +	pcm_log(s,"play: %u periods submitted, done=%u errors=%u underflow=%u faults=0 gfsr=0",s->result.submitted,s->result.done,s->result.errors,s->result.underflow);
 +	s->canary_phase=true;
-+	if (!canaries(s)) goto cleanup;
++	if (canary && !canaries(s)) goto cleanup;
 +	success=true;
 +cleanup:
 +	/* Never drain a faulted stream here: terminated DMA may never complete.
@@ -6686,7 +6713,7 @@ index 0000000000000000000000000000000000000000..8e2d5a70931c876759778d898403055f
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac17def71fbeb6506bb5f50a54fa184d45b533c9
+index 0000000000000000000000000000000000000000..4d420a4afb53f887102ac6d3b448785ca831816a
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
 @@ -0,0 +1,60 @@
@@ -6745,7 +6772,7 @@ index 0000000000000000000000000000000000000000..ac17def71fbeb6506bb5f50a54fa184d
 +int mi8_pcm_encode(unsigned, uint32_t, uint32_t, uint16_t, uint8_t *, size_t, size_t *);
 +bool mi8_pcm_receive(struct mi8_pcm_state *, const void *, size_t);
 +int mi8_pcm_canary_verdict(uint64_t, const struct mi8_smmu_fault *, const struct mi8_smmu_fault *);
-+bool mi8_pcm_run(struct mi8_pcm_state *, const struct mi8_pcm_ops *, uint64_t);
++bool mi8_pcm_run(struct mi8_pcm_state *, const struct mi8_pcm_ops *, uint64_t, bool canary);
 +/* Called after AFE stop/clock off/pin restore; pass true only after PAS reset.
 + * Without confirmed close+unmap or PAS success, leaves the mapping untouched. */
 +bool mi8_pcm_finish(struct mi8_pcm_state *, bool pas_shutdown);
@@ -13392,10 +13419,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..feb1a61a7551d3047e9dda7d808351a6f3642328
+index 0000000000000000000000000000000000000000..cfb1585f3385716d249222c10e3e0571849b395b
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4294 @@
+@@ -0,0 +1,4321 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -13487,6 +13514,19 @@ index 0000000000000000000000000000000000000000..feb1a61a7551d3047e9dda7d808351a6
 +static int say(const char *format, ...) __printflike(1, 2);
 +static uint64_t now_us(void);
 +
++static bool
++says_dsp_state(const char *line)
++{
++	static const char *const marks[] = { "entry says", "last words", "LAST WORDS" };
++	for (unsigned m = 0; m < sizeof(marks) / sizeof(marks[0]); m++) {
++		size_t n = strlen(marks[m]);
++		for (const char *c = line; *c != 0; c++) {
++			if (strncmp(c, marks[m], n) == 0) return true;
++		}
++	}
++	return false;
++}
++
 +static int
 +say(const char *format, ...)
 +{
@@ -13497,7 +13537,8 @@ index 0000000000000000000000000000000000000000..feb1a61a7551d3047e9dda7d808351a6
 +	va_start(list, format);
 +	length = vsnprintf(line, sizeof(line), format, list);
 +	va_end(list);
-+	if (audio_play_brief && audio_play_worker()) {
++	/* the DSP's own state (its SMP2P entry, its last words) is kept even in the compact log */
++	if (audio_play_brief && audio_play_worker() && !says_dsp_state(line)) {
 +		strlcpy(audio_play_note, line, sizeof(audio_play_note)); return length;
 +	}
 +	/* the time since the kernel began, for the loader's log, which has none of its own (EXP-0221: where the minutes go) */
@@ -15146,6 +15187,8 @@ index 0000000000000000000000000000000000000000..feb1a61a7551d3047e9dda7d808351a6
 +	return nanoseconds / 1000;
 +}
 +
++static void remote_crash_reason(struct mi8_remote *r);
++
 +/* Linux's qcom_q6v5_request_stop(): our bit "stop", the DSP's "stop ack" waited for, our bit taken back. */
 +static bool
 +dsp_ask_to_stop(uint32_t bound_ms)
@@ -15166,6 +15209,7 @@ index 0000000000000000000000000000000000000000..feb1a61a7551d3047e9dda7d808351a6
 +	state = dsp_state(&theirs);
 +	if (!(state & DSP_READY) || (state & DSP_FATAL)) {
 +		say("mi8rp: the DSP is not asked to stop first: its entry says %#x, not \"up\"\n", state);
++		if (state & DSP_FATAL) remote_crash_reason(&adsp_remote);
 +		return false;
 +	}
 +	value_at = adsp_remote.our_item + SMP2P_AT_VALUE((uint32_t)entry);
@@ -17351,6 +17395,16 @@ index 0000000000000000000000000000000000000000..feb1a61a7551d3047e9dda7d808351a6
 +}
 +
 +static bool
++audio_fatal(void *ctx)
++{
++	struct mi8_remote *r=ctx;
++	struct smp2p words;
++	if (!remote_words(r,&words)) return false;
++	remote_listen(r,&words);
++	return (dsp_state(&words)&DSP_FATAL)!=0;
++}
++
++static bool
 +adsp_audio_handshake(uint32_t last)
 +{
 +	uint64_t until = now_us() + 4000000ull;
@@ -17374,7 +17428,7 @@ index 0000000000000000000000000000000000000000..feb1a61a7551d3047e9dda7d808351a6
 +		audio_play_locked=true;
 +		/* Firmware loading has its own budget; playback starts with ADSP up. */
 +		audio_play_until = now_us() + 15000000;
-+		bool okay = mi8_audio_run_play(&cfg, audio_alive, &adsp_remote, NULL, NULL, audio_play_until);
++		bool okay = mi8_audio_run_play(&cfg, audio_alive, &adsp_remote, NULL, NULL, audio_play_until, last, audio_fatal);
 +		audio_play_until=mi8_audio_play_teardown_end();
 +		if (!mi8_audio_play_needs_finish()) {
 +			lck_mtx_unlock(&wsmmu_lock);audio_play_locked=false;
@@ -17451,13 +17505,13 @@ index 0000000000000000000000000000000000000000..feb1a61a7551d3047e9dda7d808351a6
 +			qmp_send("{class: image, res: load_state, name: adsp, val: off}");
 +		}
 +		if (last >= 13) {
-+			bool complete = mi8_audio_finish_play(down) && down;
++			(void)mi8_audio_finish_play(down);
 +			if (audio_play_locked) { lck_mtx_unlock(&wsmmu_lock);audio_play_locked=false; }
 +			if (started_here && !adsp_last_stop_acked) say("mi8rp: 13: Pending ADSP stop-ack\n");
 +			if (started_here && !down) say("mi8rp: 13: Pending PAS shutdown\n");
 +			if (started_here && !adsp_last_aop_off) say("mi8rp: 13: Pending AOP off\n");
 +			say("mi8rp: step 13: PROVEN=%u cleanup=%s%s%s\n",mi8_audio_play_proven(),
-+			    complete?"complete":"Pending (AFE/PAS/SMMU)",
++			    mi8_audio_play_cleanup(),
 +			    started_here && !adsp_last_stop_acked?" (stop-ack missing)":"",
 +			    started_here && !adsp_last_aop_off?" (AOP off Pending)":"");
 +		} else if (last >= 10) {

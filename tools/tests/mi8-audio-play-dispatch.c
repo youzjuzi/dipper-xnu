@@ -22,7 +22,7 @@ static atomic_uint active,overlaps;
 static void allocation(void){if(atomic_fetch_add(&active,1))atomic_fetch_add(&overlaps,1);sched_yield();atomic_fetch_sub(&active,1);}
 static void lck_mtx_lock(pthread_mutex_t*l){pthread_mutex_lock(l);locks++;}
 static void lck_mtx_unlock(pthread_mutex_t*l){unlocks++;pthread_mutex_unlock(l);}
-static bool mi8_audio_run_play(void*c,void*f,void*r,void*p,void*m,uint64_t end){(void)c;(void)f;(void)r;(void)p;(void)m;CHECK(end==fake_now+15000000);play_calls++;allocation();return true;}
+static bool mi8_audio_run_play(void*c,void*f,void*r,void*p,void*m,uint64_t end,unsigned step,void*fatal){(void)c;(void)f;(void)r;(void)p;(void)m;(void)fatal;CHECK(step>=13);CHECK(end==fake_now+15000000);play_calls++;allocation();return true;}
 static uint64_t mi8_audio_play_teardown_end(void){return 15000000;}
 static bool mi8_audio_run_afe(void*c,void*f,void*r,void*p){(void)c;(void)f;(void)r;(void)p;afe_calls++;return true;}
 static bool mi8_audio_run(void*c,void*f,void*r){(void)c;(void)f;(void)r;core_calls++;return true;}
@@ -38,7 +38,7 @@ static void mi8_audio_smmu_run(unsigned n){CHECK(n==11||n==12);smmu_spawn++;}
 static void steps_from_five(void*p,int r){(void)r;CHECK((uintptr_t)p>=13);play_spawn++;}
 /* @wsmmu_before_power */
 /* @audio_smmu_thread */
-static bool handshake(unsigned last){int cfg=0;void*audio_alive=NULL;
+static bool handshake(unsigned last){int cfg=0;void*audio_alive=NULL;void*audio_fatal=NULL;
 /* @play_handshake */
 return last>=10?mi8_audio_run_afe(&cfg,audio_alive,&adsp_remote,NULL):mi8_audio_run(&cfg,audio_alive,&adsp_remote);}
 static int kernel_thread_start(void(*f)(void*,int),void*p,int*t){*t=1;f(p,0);return 0;}

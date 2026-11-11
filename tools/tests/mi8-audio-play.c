@@ -8,7 +8,8 @@ struct play_peer {
     uint8_t buffer[32768];
     uint32_t ops[200]; unsigned count,writes,normal,cache,begin,end,clear;
     uint32_t fail,drop,status;
-    bool hung,reset,no_pas,no_begin,no_end,retain,drop_writes,canary_timeout,canary_close_error,bad_map,bad_copp,ordinary_fault;
+    bool fatal,fatal_canary,fatal_close,hung,reset,no_pas,no_begin,no_end,retain,drop_writes,canary_timeout,canary_close_error,bad_map,bad_copp,ordinary_fault;
+    unsigned step,after_fatal;
     unsigned canary_mode; /* 0=A CB fault, 1=B global fault, 2=neither, 3=A low FAR */
     struct mi8_smmu_fault fault;
     uint64_t last_write,budget,canary_at,close_at,adm_at;
@@ -16,11 +17,12 @@ struct play_peer {
 };
 static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
     struct play_peer *m=p->extension;uint32_t op=rd(q+16);
+    if(m->fatal)m->after_fatal++;
     if(q[4]!=7&&q[4]!=8)return 0;
     CHECK(m->count<200);m->ops[m->count++]=op;
     b[4]=b[8]=q[4];memcpy(b+6,q+10,2);memcpy(b+10,q+6,2);
     *n=28;wr(b+16,0x110e8);wr(b+20,op);wr(b+24,op==m->fail?m->status:0);
-    if(op==0x10bcd)m->close_at=p->now;
+    if(op==0x10bcd){m->close_at=p->now;if(m->fatal_close){m->fatal=true;return -1;}}
     if(op==0x10327)m->adm_at=p->now;
     if(m->hung&&(op==0x10bcd||op==0x10327))return -1;
     if(op==m->drop)return -1;
@@ -51,7 +53,8 @@ static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
                 m->fault.fsr=0x402;m->fault.far=m->canary_mode==3?(uint32_t)address:address;
             }
             if(address<=UINT32_MAX&&m->canary_mode==1)m->fault.gfsr=2;
-            if(m->canary_timeout||m->hung)return -1;
+            if(m->fatal_canary)m->fatal=true;
+            if(m->canary_timeout||m->hung||m->fatal)return -1;
         }
         *n=36;wr(b+16,0x10d99);memcpy(b+20,q+20,12);wr(b+32,canary?2:0);
     }
@@ -79,12 +82,14 @@ static void play_log(void*v,const char*fmt,...){
     log_line(v,"%s",line);size_t n=strlen(line);CHECK(m->log_length+n<sizeof(m->log));
     memcpy(m->log+m->log_length,line,n+1);m->log_length+=n;
 }
+static bool play_fatal(void*v){return ((struct play_peer*)((struct peer*)v)->extension)->fatal;}
+static bool play_alive(void*v){return !play_fatal(v)&&alive(v);}
 static bool start_play(struct peer *p,struct play_peer *m){
     p->extension=m;p->extra_response=play_reply;p->reply=p->header8=p->afe_mode=true;
     struct mi8_audio_pin_ops pins={pin_read,pin_write,p};
     struct mi8_glink_cfg c=cfg(p);c.log=play_log;
     struct mi8_pcm_ops memory={.ctx=p,.begin=play_begin,.cache=play_cache,.fault=play_fault,.clear=play_clear,.end=play_end};
-    return mi8_audio_run_play(&c,alive,p,&pins,&memory,p->now+(m->budget?m->budget:15000000));
+    return mi8_audio_run_play(&c,play_alive,p,&pins,&memory,p->now+(m->budget?m->budget:15000000),m->step?m->step:13,play_fatal);
 }
 static bool run_play(struct peer*p,struct play_peer*m){
     bool okay=start_play(p,m),deferred=mi8_audio_play_needs_finish();
@@ -225,7 +230,7 @@ static bool dsp_ask_to_stop(unsigned ms){
 }
 static int32_t scm(const char*why,unsigned cmd,unsigned nargs,unsigned dsp,unsigned b,unsigned c,unsigned d,uint64_t*answer){
     (void)why;CHECK(cmd==SCM_PAS_SHUTDOWN&&nargs==SCM_ONE_VALUE&&dsp==PAS_ADSP&&!b&&!c&&!d);
-    CHECK(worker_peer->afe_count==5&&worker_peer->actions[3]==4&&worker_peer->actions[4]==5);
+    CHECK(worker_memory->fatal ? worker_peer->afe_count==3 : worker_peer->afe_count==5&&worker_peer->actions[3]==4&&worker_peer->actions[4]==5);
     CHECK(worker_memory->end==(worker_memory->hung?0u:1u));
     CHECK(audio_play_locked==worker_memory->hung);pas_calls++;
     worker_memory->reset=!worker_memory->no_pas;*answer=worker_memory->no_pas?1:0;
@@ -263,20 +268,27 @@ static void log_order(const char*text,const char*const*lines,unsigned n){
 static unsigned count_op(struct play_peer*m,uint32_t op){unsigned n=0;for(unsigned i=0;i<m->count;i++)n+=m->ops[i]==op;return n;}
 static void lifecycle(void){
     struct peer p;struct play_peer m;
-    for(unsigned scenario=0;scenario<4;scenario++){
+    for(unsigned scenario=0;scenario<5;scenario++){
         prepare(&p,&m);worker_peer=&p;worker_memory=&m;
         p.extension=&m;m.canary_mode=scenario?3:2;m.hung=scenario!=0;m.no_pas=scenario==2;
         if(scenario==3)p.drop_stop=p.drop_off=true;
+        if(scenario==4)m.fatal_canary=true;
         stop_ack=aop_off=scenario==0;pas_calls=stop_calls=aop_calls=unlocks=0;
         steps_from_five((void*)(uintptr_t)13,0);
         CHECK(pas_calls==1&&stop_calls==1&&aop_calls==1);
         CHECK(!audio_play_locked&&!audio_play_thread&&!mi8_audio_play_needs_finish());
         CHECK(m.normal==150&&m.writes==(scenario?151u:152u));
         CHECK(mi8_audio_play_proven()==(scenario!=0));
-        CHECK(count_op(&m,0x10bcd)==1&&count_op(&m,0x10327)==1);
-        CHECK(p.pin_writes==8&&p.actions[3]==4&&p.actions[4]==5);
+        CHECK(count_op(&m,0x10bcd)==(scenario==4?0u:1u)&&count_op(&m,0x10327)==(scenario==4?0u:1u));
+        CHECK(p.pin_writes==8&&(scenario==4?p.afe_count==3:p.actions[3]==4&&p.actions[4]==5));
         CHECK(m.end==(scenario==2?0u:1u)&&unlocks==(scenario?1u:0u));
-        if(scenario){
+        if(scenario==4){
+            CHECK(!m.after_fatal&&mi8_audio_play_proven());
+            CHECK(strstr(m.log,"ADSP fatal; APR teardown skipped, PAS shutdown required"));
+            CHECK(strstr(m.log,"cleanup=Pending (AFE: DSP fatal) (stop-ack missing) (AOP off Pending)"));
+            const char*const lines[]={"translation: ENGAGED","ADSP fatal; APR teardown skipped","pins restored","PAS boundary: reset confirmed","smmu: end inert","channel close local","cleanup=Pending (AFE: DSP fatal)"};
+            log_order(m.log,lines,sizeof(lines)/sizeof(*lines));
+        }else if(scenario){
             CHECK(m.close_at-m.canary_at<=500000&&m.adm_at-m.close_at<=500000);
             CHECK(m.adm_at-m.close_at==500000); /* No hidden drain or retry. */
             CHECK(!saw(&m,0x10d94)&&!strstr(m.log,"canary B:"));
@@ -287,7 +299,7 @@ static void lifecycle(void){
                 "PAS boundary:","ADSP shutdown",scenario==2?"mapping unchanged, memory retained":"memory released",
                 "channel close local","Pending ADSP stop-ack","Pending AOP off","step 13: PROVEN=1 cleanup="};
             log_order(m.log,lines,sizeof(lines)/sizeof(*lines));
-            CHECK(strstr(m.log,scenario==1?"cleanup=complete (stop-ack missing) (AOP off Pending)":"cleanup=Pending (AFE/PAS/SMMU)"));
+            CHECK(strstr(m.log,scenario==1?"cleanup=complete (stop-ack missing) (AOP off Pending)":(scenario==2?"cleanup=Pending (PAS, SMMU)":"cleanup=Pending (AFE)")));
             CHECK(strstr(m.log,"taken back"));
             if(scenario==2)CHECK(strstr(m.log,"Pending PAS shutdown"));
         }else{
@@ -298,6 +310,13 @@ static void lifecycle(void){
             log_order(m.log,lines,sizeof(lines)/sizeof(*lines));
         }
         printf("LIFECYCLE scenario %u BEGIN\n%sLIFECYCLE scenario %u END\n",scenario,m.log,scenario);
+    }
+    prepare(&p,&m);m.hung=true;m.fatal_close=true;CHECK(!run_play(&p,&m));
+    CHECK(m.fatal&&!m.after_fatal&&!m.adm_at&&p.afe_count==3&&p.pin_writes==8);
+    CHECK(strstr(m.log,"ADSP fatal; APR teardown skipped")&&strstr(mi8_audio_play_cleanup(),"AFE: DSP fatal"));
+    for(unsigned step=14;step<=16;step++){
+        prepare(&p,&m);m.step=step;CHECK(run_play(&p,&m));CHECK(m.writes==150&&!m.clear&&!mi8_audio_play_proven());
+        CHECK(!strstr(m.log,"canary ")&&!strstr(m.log,"translation:"));
     }
     /* A timeout without a CB fault must still attempt B and cannot prove DMA. */
     prepare(&p,&m);m.canary_mode=2;m.canary_timeout=true;
