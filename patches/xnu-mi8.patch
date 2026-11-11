@@ -1,8 +1,8 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..dd9365c44222f50dd3cf8ea761aaffe4eaa33eca 100644
+index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..383465e084a164bd6481e0cbdb2c7295686a54fa 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -113,6 +113,15 @@ bsd/dev/redwood_input.c		standard
+@@ -113,6 +113,16 @@ bsd/dev/redwood_input.c		standard
  bsd/dev/redwood_virtio_input.c	standard
  bsd/dev/redwood_goodix.c	standard
  bsd/dev/redwood_buttons.c	standard
@@ -12,6 +12,7 @@ index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..dd9365c44222f50dd3cf8ea761aaffe4
 +bsd/dev/mi8_rproc.c	standard
 +bsd/dev/mi8_glink.c	standard
 +bsd/dev/mi8_audio.c	standard
++bsd/dev/mi8_audio_smmu.c	standard
 +bsd/dev/mi8_hostsvc_k.c	standard
 +bsd/dev/mi8_wlfw_k.c	standard
 +bsd/dev/mi8_wlfw_v01.c	standard
@@ -6202,6 +6203,466 @@ index 0000000000000000000000000000000000000000..43386b9ab0d51a1864305486a25c1384
 + * remain valid until return. alive is polled for fatal/lifecycle cancellation. */
 +bool mi8_audio_run(const struct mi8_glink_cfg *, bool (*alive)(void *), void *);
 +#endif
+diff --git a/bsd/dev/mi8_audio_smmu.c b/bsd/dev/mi8_audio_smmu.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c2e56aa028fa9d0e2cfb37e25ef2652551d374d
+--- /dev/null
++++ b/bsd/dev/mi8_audio_smmu.c
+@@ -0,0 +1,407 @@
++/* SPDX-License-Identifier: MIT */
++/* Independently written from SMMUv2 register/descriptor formats and the
++ * existing apps SMMU adapters. Software checks do not establish DMA reachability. */
++#include "mi8_audio_smmu.h"
++#ifdef MI8_SMMU_HOST_TEST
++#include <stdarg.h>
++#include <stdio.h>
++#include <string.h>
++#else
++#include <libkern/libkern.h>
++#include <kern/clock.h>
++#include <mach/mach_types.h>
++#include <mach/vm_param.h>
++#include <vm/vm_kern.h>
++#endif
++
++#define AS_SIZE 0x80000u
++#define AS_SMR(n) (0x800u + 4u * (n))
++#define AS_S2CR(n) (0xc00u + 4u * (n))
++#define AS_CBAR(n) (0x1000u + 4u * (n))
++#define AS_CBA2R(n) (0x1800u + 4u * (n))
++#define AS_CB(n) (0x40000u + 0x1000u * (n))
++#define AS_FAULT (2u << 16)
++#define AS_TCR (1u << 8 | 1u << 10 | 3u << 12 | 1u << 23)
++#define AS_SCTLR (1u | 1u << 1 | 1u << 2 | 1u << 5 | 1u << 12)
++#define AS_CBAR_VALUE (1u << 16 | 3u << 8 | 15u << 12)
++#define AS_MAIR 0xf404ff44u
++
++struct as_state {
++	const struct mi8_smmu_ops *io;
++	struct mi8_smmu_result *out;
++	uint32_t scr, id0, id1, id2, gfsr, page, cbbase, oas;
++	uint32_t smr[76], s2cr[76];
++	bool used[45], failed, truncated;
++};
++struct as_reg { uint32_t at, old, value; };
++
++static void
++as_log(struct as_state *s, const char *fmt, ...)
++{
++	char text[320];
++	va_list ap;
++	if (s->out->lines >= 38) { s->truncated = true; return; }
++	if (s->out->lines == 37) {
++		s->io->log(s->io->ctx, "Pending: log limit reached; remaining details suppressed");
++		s->out->lines++; s->truncated = true; return;
++	}
++	va_start(ap, fmt); vsnprintf(text, sizeof(text), fmt, ap); va_end(ap);
++	s->io->log(s->io->ctx, text); s->out->lines++;
++}
++
++static bool
++as_read(struct as_state *s, uint32_t at, uint32_t *value)
++{
++	if (!s->io->read(s->io->ctx, at, value) || *value == ~0u) {
++		if (!s->failed) as_log(s, "Pending: unreadable register +%#x", at);
++		s->failed = true; return false;
++	}
++	return true;
++}
++
++static bool
++as_equal(struct as_state *s, uint32_t at, uint32_t value)
++{
++	uint32_t got;
++	if (!as_read(s, at, &got)) return false;
++	if (got != value) { as_log(s, "readback mismatch +%#x wanted %#x got %#x", at, value, got); return false; }
++	return true;
++}
++
++static bool
++as_write(struct as_state *s, uint32_t at, uint32_t value)
++{
++	uint32_t before;
++	/* Configuration registers must echo each write exactly. */
++	if (!as_read(s, at, &before) || !s->io->write(s->io->ctx, at, value) || !as_equal(s, at, value)) {
++		as_log(s, "write/readback mismatch +%#x wanted %#x", at, value);
++		return false;
++	}
++	return true;
++}
++
++static bool
++as_valid(uint32_t smr, uint32_t s2cr, bool wide)
++{
++	return wide ? (s2cr & 1u << 10) != 0 : (smr & 1u << 31) != 0;
++}
++
++bool
++mi8_smmu_overlap(uint32_t smr, uint32_t s2cr, bool wide, uint32_t stream)
++{
++	uint32_t bits = wide ? 0xffffu : 0x7fffu;
++	return !(stream & ~bits) && as_valid(smr, s2cr, wide) && (((smr ^ stream) & bits & ~((smr >> 16) & bits)) == 0);
++}
++
++/* Independent of construction: follow physical table addresses and descriptor
++ * bytes through the caller's bounded physical-memory reader. No builder indices. */
++int
++mi8_smmu_walk(bool (*read64)(void *, uint64_t, uint64_t *), void *ctx,
++    uint64_t root, uint64_t iova, uint64_t *physical, uint64_t *attributes)
++{
++	uint64_t table = root & MI8_AS_ADDRESS, entry;
++	if (iova >= (1ull << 39)) return -1;
++	for (unsigned level = 0; level < 3; level++) {
++		unsigned shift = 30 - level * 9;
++		if (!read64(ctx, table + ((iova >> shift) & 511) * 8, &entry)) return -1;
++		if (!(entry & 1)) return 0;
++		if ((entry & 3) != 3) return -1; /* block mappings are never part of this object */
++		table = entry & MI8_AS_ADDRESS;
++		if (level == 2) {
++			*physical = table | (iova & 4095); *attributes = entry & ~MI8_AS_ADDRESS;
++			return 1;
++		}
++		if (entry & ~MI8_AS_ADDRESS & ~3ull) return -1;
++	}
++	return -1;
++}
++
++static unsigned
++as_bits(unsigned code)
++{
++	static const unsigned widths[] = { 32, 36, 40, 42, 44, 48 };
++	return code < 6 ? widths[code] : 0;
++}
++
++static bool
++as_bank(struct as_state *s, unsigned bank, bool report)
++{
++	uint32_t b = s->cbbase + bank * s->page, cbar, cba2r, ctl, lo, hi, tcr, fsr;
++	if (!as_read(s, s->page + 4 * bank, &cbar) || !as_read(s, s->page + 0x800 + 4 * bank, &cba2r) ||
++	    !as_read(s, b, &ctl) || !as_read(s, b + 0x20, &lo) || !as_read(s, b + 0x24, &hi) ||
++	    !as_read(s, b + 0x30, &tcr) || !as_read(s, b + 0x58, &fsr)) return false;
++	if (report) as_log(s, "CB%u CBAR=%#x CBA2R=%#x SCTLR=%#x TTBR0=%#x:%08x TCR=%#x FSR=%#x",
++	    bank, cbar, cba2r, ctl, hi, lo, tcr, fsr);
++	/* Conservative free-bank policy: reject configured CBAR types/attributes,
++ * any SCTLR state, faults, S2-only banks and every referenced context. */
++	return cbar == 0 && ctl == 0 && fsr == 0;
++}
++
++static bool
++as_probe(struct as_state *s)
++{
++	uint32_t farlo, farhi;
++	if (!as_read(s, 0, &s->scr) || !as_read(s, 0x20, &s->id0) || !as_read(s, 0x24, &s->id1) ||
++	    !as_read(s, 0x28, &s->id2) || !as_read(s, 0x48, &s->gfsr) ||
++	    !as_read(s, 0x40, &farlo) || !as_read(s, 0x44, &farhi)) return false;
++	s->page = (s->id1 & 1u << 31) ? 0x10000 : 0x1000;
++	s->cbbase = (2u << ((s->id1 >> 28) & 7)) * s->page;
++	s->oas = as_bits((s->id2 >> 4) & 15);
++	as_log(s, "SCR0=%#x IDR0=%#x IDR1=%#x IDR2=%#x GFSR=%#x GFAR=%#x:%08x", s->scr, s->id0, s->id1, s->id2, s->gfsr, farhi, farlo);
++	as_log(s, "register page=%#x CB base=+%#x IAS=%u OAS=%u UBS=%u 4K=%u ATOSNS=%u",
++	    s->page, s->cbbase, as_bits(s->id2 & 15), s->oas, as_bits((s->id2 >> 8) & 15), (s->id2 >> 12) & 1, (s->id0 >> 26) & 1);
++	if (s->id0 != 0x4c017e4c || s->id1 != 0x5000002d || s->cbbase + 45 * s->page > AS_SIZE ||
++	    !(s->id2 & 1u << 12) || !s->oas || !as_bits(s->id2 & 15) || !as_bits((s->id2 >> 8) & 15) ||
++	    ((s->scr & 1u << 3) && !(s->id0 & 1u << 8))) {
++		as_log(s, "Pending: unexpected IDR/geometry; no context access or writes"); return false;
++	}
++	for (unsigned n = 0; n < 76; n++) {
++		uint32_t smr, s2cr;
++		bool wide = (s->scr & 8) != 0;
++		if (!as_read(s, AS_SMR(n), &smr) || !as_read(s, AS_S2CR(n), &s2cr)) return false;
++		s->smr[n] = smr; s->s2cr[n] = s2cr;
++		/* Even an invalid SMR with a translate S2CR reserves its context. */
++		if (((s2cr >> 16) & 3) == 0) {
++			if ((s2cr & 255) >= 45) { as_log(s, "Pending: invalid S2CR context"); return false; }
++			s->used[s2cr & 255] = true;
++		}
++		if (as_valid(smr, s2cr, wide)) {
++			unsigned bits = wide ? 0xffff : 0x7fff;
++			as_log(s, "SMR%u sid=%#x mask=%#x type=%u cb=%u raw=%#x/%#x", n, smr & bits, (smr >> 16) & bits, (s2cr >> 16) & 3, s2cr & 255, smr, s2cr);
++			if (((s2cr >> 16) & 3) == 3) { as_log(s, "Pending: reserved S2CR type"); return false; }
++			if (mi8_smmu_overlap(smr, s2cr, wide, 0x1821)) {
++				as_log(s, "stream 0x1821: matched by SMR %u", n); s->out->slot = -2;
++			}
++		} else if (s->out->slot == -1 && ((s2cr >> 16) & 3) == 2) s->out->slot = (int)n;
++	}
++	if (s->out->slot != -2) as_log(s, "stream 0x1821: NOT MATCHED");
++	for (unsigned n = 0; n < 45; n++) if (s->used[n]) {
++		(void)as_bank(s, n, true); if (s->failed) return false;
++	}
++	/* Bank 44 is reserved for Wi-Fi even before its SMR is installed. */
++	for (unsigned n = 44; n-- > ((s->id1 >> 16) & 255);) {
++		if (!s->used[n] && as_bank(s, n, false)) { s->out->bank = (int)n; (void)as_bank(s, n, true); break; }
++		if (s->failed) break;
++	}
++	as_log(s, "candidate SMR=%d CB=%d (CB44 reserved for Wi-Fi)", s->out->slot, s->out->bank);
++	if (s->truncated) as_log(s, "Pending: report exceeded log budget");
++	return !s->failed && !s->truncated;
++}
++
++static bool
++as_faults_clear(struct as_state *s, uint32_t cb)
++{
++	uint32_t global, local, farlo, farhi;
++	if (!as_read(s, 0x48, &global) || !as_read(s, cb + 0x58, &local) ||
++	    !as_read(s, cb + 0x60, &farlo) || !as_read(s, cb + 0x64, &farhi)) return false;
++	if (global || local) { as_log(s, "fault: GFSR=%#x FSR=%#x FAR=%#x:%08x", global, local, farhi, farlo); return false; }
++	return true;
++}
++
++static bool
++as_sync(struct as_state *s, uint32_t cb, unsigned asid)
++{
++	uint32_t status;
++	/* Command registers are architecturally WO/RAZ. Read-before and read-after
++ * are performed, but completion is checked via TLBSTATUS, not echo equality. */
++	if (!as_read(s, cb + 0x610, &status) || !s->io->write(s->io->ctx, cb + 0x610, asid) ||
++	    !as_read(s, cb + 0x610, &status) || !as_read(s, cb + 0x7f0, &status) ||
++	    !s->io->write(s->io->ctx, cb + 0x7f0, 0) || !as_read(s, cb + 0x7f0, &status)) return false;
++	for (unsigned n = 0; n < 1000; n++) {
++		if (!as_read(s, cb + 0x7f4, &status)) return false;
++		if (!(status & 1)) return true;
++		s->io->wait_us(s->io->ctx, 10);
++	}
++	as_log(s, "Pending: context TLB synchronization timeout"); return false;
++}
++
++static bool
++as_walk_pages(struct as_state *s, const struct mi8_smmu_memory *m, uint64_t root)
++{
++	for (unsigned n = 0; n <= 8; n++) {
++		uint64_t phys = 0, attrs = 0;
++		int walk = mi8_smmu_walk(s->io->table_read, s->io->ctx, root, MI8_AS_IOVA + n * 4096, &phys, &attrs);
++		if (n == 8 ? walk != 0 : walk != 1 || phys != m->pages[n] || attrs != MI8_AS_PTE) return false;
++	}
++	return true;
++}
++
++static bool
++as_tables(struct as_state *s, struct mi8_smmu_memory *m)
++{
++	uint64_t *root = m->tables, *l2 = root + 512, *l3 = l2 + 512;
++	if (!root || !m->buffer) return false;
++	for (unsigned n = 0; n < 11; n++) {
++		uint64_t pa = n < 3 ? m->table_phys[n] : m->pages[n - 3];
++		if (!pa || (pa & 4095) || pa >= (1ull << s->oas)) return false;
++		for (unsigned k = 0; k < n; k++) if (pa == (k < 3 ? m->table_phys[k] : m->pages[k - 3])) return false;
++	}
++	memset(root, 0, 3 * 4096);
++	root[MI8_AS_IOVA >> 30] = m->table_phys[1] | 3;
++	l2[(MI8_AS_IOVA >> 21) & 511] = m->table_phys[2] | 3;
++	for (unsigned n = 0; n < 8; n++) l3[((MI8_AS_IOVA >> 12) & 511) + n] = m->pages[n] | MI8_AS_PTE;
++	s->io->cache(s->io->ctx, m);
++	if (!as_walk_pages(s, m, m->table_phys[0])) return false;
++	as_log(s, "software walk: 8 nonidentity pages correct; ninth invalid; no DMA proof"); return true;
++}
++
++void
++mi8_smmu_diagnose(const struct mi8_smmu_ops *io, unsigned step, struct mi8_smmu_result *out)
++{
++	struct as_state s = { .io = io, .out = out };
++	struct mi8_smmu_memory mem = { 0 };
++	struct as_reg regs[12];
++	uint32_t cb, slot, bank, fault_far[2], global_far[2];
++	bool good = false, clean = true, allocated = false, touched = false;
++	memset(out, 0, sizeof(*out)); out->slot = out->bank = -1;
++	if (!as_probe(&s)) return;
++	if (step < 12) { as_log(&s, "read-only report; no SMMU register writes"); return; }
++	if (out->slot < 0 || out->bank < 0 || s.gfsr || (s.scr & 1) || !(s.scr & 1u << 10)) {
++		as_log(&s, "precondition refused; no SMMU register writes"); return;
++	}
++	slot = (unsigned)out->slot; bank = (unsigned)out->bank; cb = AS_CB(bank);
++	/* Complete configuration snapshot, including both TTBRs and both MAIRs. */
++	const uint32_t offsets[12] = { AS_CBAR(bank), AS_CBA2R(bank), cb + 0x20, cb + 0x24,
++	    cb + 0x10, cb + 0x30, cb + 0x28, cb + 0x2c, cb + 0x38, cb + 0x3c, cb, AS_S2CR(slot) };
++	for (unsigned n = 0; n < 12; n++) {
++		regs[n].at = offsets[n]; if (!as_read(&s, offsets[n], &regs[n].old)) return;
++	}
++	if (!as_read(&s, cb + 0x60, &fault_far[0]) || !as_read(&s, cb + 0x64, &fault_far[1]) ||
++	    !as_read(&s, 0x40, &global_far[0]) || !as_read(&s, 0x44, &global_far[1]) || !as_faults_clear(&s, cb)) return;
++	if (!io->allocate(io->ctx, &mem)) { as_log(&s, "allocation failed; no SMMU register writes"); return; }
++	allocated = true;
++	if (!as_tables(&s, &mem)) { as_log(&s, "software page-table check failed; no SMMU writes"); goto finish; }
++	regs[0].value = AS_CBAR_VALUE; regs[1].value = 1;
++	regs[2].value = (uint32_t)mem.table_phys[0]; regs[3].value = (uint32_t)(mem.table_phys[0] >> 32) | bank << 16;
++	regs[4].value = ((s.id2 >> 4) & 15) | 1u << 4 | 7u << 15;
++	unsigned input_bits = as_bits((s.id2 >> 8) & 15);
++	regs[5].value = AS_TCR | (64u - (input_bits < 39 ? input_bits : 39)); regs[6].value = regs[7].value = 0;
++	regs[8].value = AS_MAIR; regs[9].value = 0; regs[10].value = AS_SCTLR;
++	regs[11].value = bank | ((s.scr & 8) ? 1u << 10 : 0);
++	/* Recheck the whole allocation under the caller's shared allocation lock. */
++	for (unsigned n = 0; n < 76; n++) if (!as_equal(&s, AS_SMR(n), s.smr[n]) || !as_equal(&s, AS_S2CR(n), s.s2cr[n])) goto finish;
++	for (unsigned n = 0; n < 12; n++) if (!as_equal(&s, regs[n].at, regs[n].old)) goto finish;
++	if (!as_equal(&s, 0, s.scr) || !as_faults_clear(&s, cb)) goto finish;
++	touched = true;
++	for (unsigned n = 0; n < 11; n++) {
++		if (!as_write(&s, regs[n].at, regs[n].value) || !as_faults_clear(&s, cb)) goto restore;
++	}
++	if (!as_sync(&s, cb, bank) || !as_faults_clear(&s, cb)) goto restore;
++	if (!as_write(&s, AS_S2CR(slot), regs[11].value) || !as_faults_clear(&s, cb) ||
++	    !as_write(&s, AS_SMR(slot), 0x1821u | ((s.scr & 8) ? 0 : 1u << 31))) goto restore;
++	if (!as_faults_clear(&s, cb)) goto restore;
++	io->wait_us(io->ctx, 200000);
++	for (unsigned n = 0; n < 12; n++) if (!as_equal(&s, regs[n].at, regs[n].value)) goto restore;
++	if (!as_equal(&s, AS_SMR(slot), 0x1821u | ((s.scr & 8) ? 0 : 1u << 31)) || !as_faults_clear(&s, cb) ||
++	    !as_equal(&s, 0x20, s.id0) || !as_equal(&s, 0x24, s.id1) || !as_equal(&s, 0x28, s.id2)) goto restore;
++	if (!as_walk_pages(&s, &mem, (uint64_t)regs[3].value << 32 | regs[2].value)) {
++		as_log(&s, "software walk changed during hold"); goto restore;
++	}
++	as_log(&s, "200 ms hold/readback passed; GFSR/FSR clear; hardware translation Pending"); good = true;
++restore:
++	/* Remove routing first. Continue independent restoration after a failure,
++ * but retain memory unless detachment, disable and TLBSYNC are all confirmed. */
++	if (!as_write(&s, AS_SMR(slot), s.smr[slot])) clean = false;
++	if (!as_write(&s, AS_S2CR(slot), regs[11].old)) clean = false;
++	if (!as_write(&s, cb, 0)) clean = false;
++	if (!as_sync(&s, cb, bank)) clean = false;
++	for (unsigned n = 0; n < 10; n++) if (!as_write(&s, regs[n].at, regs[n].old)) clean = false;
++	if (!as_write(&s, cb, regs[10].old)) clean = false;
++	for (unsigned n = 0; n < 12; n++) if (!as_equal(&s, regs[n].at, regs[n].old)) clean = false;
++	if (!as_equal(&s, AS_SMR(slot), s.smr[slot]) || !as_faults_clear(&s, cb) ||
++	    !as_equal(&s, cb + 0x60, fault_far[0]) || !as_equal(&s, cb + 0x64, fault_far[1]) ||
++	    !as_equal(&s, 0x40, global_far[0]) || !as_equal(&s, 0x44, global_far[1]) || !as_equal(&s, 0, s.scr)) clean = false;
++	out->restored = clean;
++	as_log(&s, clean ? "all saved configuration/fault registers restored exactly" : "Pending: restoration unconfirmed; memory and SMR/CB reservations retained");
++finish:
++	if (allocated) {
++		io->cache(io->ctx, &mem);
++		if (!touched || clean) io->release(io->ctx, &mem); else out->retained = true;
++	}
++	out->passed = good && clean;
++	if (!out->passed && !out->retained) as_log(&s, "self-check stopped; no DMA was issued");
++}
++
++#ifndef MI8_SMMU_HOST_TEST
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern uint64_t kvtophys(vm_offset_t);
++extern void mi8_rproc_smmu_log(const char *);
++static vm_offset_t native_smmu;
++static struct mi8_smmu_result native_result;
++static struct mi8_smmu_memory native_memory;
++
++static bool
++native_read(void *ctx, uint32_t at, uint32_t *value)
++{
++	(void)ctx;
++	if ((at & 3) || at >= AS_SIZE) return false;
++	__asm__ volatile("ldr %w0, [%1]" : "=r" (*value) : "r" (native_smmu + at) : "memory");
++	return true;
++}
++static bool __attribute__((noinline))
++native_write(void *ctx, uint32_t at, uint32_t value)
++{
++	(void)ctx;
++	/* Ordinary source register, never a post-indexed MMIO access or XZR. */
++	__asm__ volatile("str %w0, [%1]" : : "r" (value), "r" (native_smmu + at) : "memory");
++	__asm__ volatile("dsb sy" ::: "memory"); return true;
++}
++static void native_wait(void *ctx, uint32_t us) { (void)ctx; delay_for_interval(us, NSEC_PER_USEC); }
++static void native_log(void *ctx, const char *text) { (void)ctx; mi8_rproc_smmu_log(text); }
++
++static bool
++native_allocate(void *ctx, struct mi8_smmu_memory *m)
++{
++	vm_offset_t tables = 0, buffer = 0;
++	(void)ctx;
++	if (kmem_alloc(kernel_map, &tables, round_page(12288), KMA_KOBJECT | KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return false;
++	if (kmem_alloc(kernel_map, &buffer, 32768, KMA_KOBJECT | KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		kmem_free(kernel_map, tables, round_page(12288)); return false;
++	}
++	m->tables = (void *)tables; m->buffer = (void *)buffer;
++	for (unsigned n = 0; n < 3; n++) m->table_phys[n] = kvtophys(tables + 4096 * n);
++	for (unsigned n = 0; n < 8; n++) m->pages[n] = kvtophys(buffer + 4096 * n);
++	native_memory = *m; return true;
++}
++static void
++native_cache(void *ctx, const struct mi8_smmu_memory *m)
++{
++	(void)ctx;
++	for (vm_offset_t line = (vm_offset_t)m->tables; line < (vm_offset_t)m->tables + round_page(12288); line += 64)
++		__asm__ volatile("dc civac, %0" : : "r" (line) : "memory");
++	for (vm_offset_t line = (vm_offset_t)m->buffer; line < (vm_offset_t)m->buffer + 32768; line += 64)
++		__asm__ volatile("dc civac, %0" : : "r" (line) : "memory");
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++static void
++native_release(void *ctx, struct mi8_smmu_memory *m)
++{
++	(void)ctx;
++	kmem_free(kernel_map, (vm_offset_t)m->tables, round_page(12288));
++	kmem_free(kernel_map, (vm_offset_t)m->buffer, 32768);
++	memset(&native_memory, 0, sizeof(native_memory));
++}
++static bool
++native_table_read(void *ctx, uint64_t physical, uint64_t *value)
++{
++	(void)ctx;
++	for (unsigned n = 0; n < 3; n++) if (physical >= native_memory.table_phys[n] && physical - native_memory.table_phys[n] <= 4088 && !(physical & 7)) {
++		memcpy(value, (const char *)native_memory.tables + 4096 * n + physical - native_memory.table_phys[n], 8); return true;
++	}
++	return false;
++}
++bool
++mi8_audio_smmu_reserved(unsigned slot, unsigned bank)
++{
++	return native_result.retained && (slot == (unsigned)native_result.slot || bank == (unsigned)native_result.bank);
++}
++void
++mi8_audio_smmu_run(unsigned step)
++{
++	const struct mi8_smmu_ops ops = { NULL, native_read, native_write, native_wait, native_log,
++	    native_allocate, native_release, native_cache, native_table_read };
++	if (native_result.retained) { native_log(NULL, "Pending: prior SMMU reservation retained; reboot required"); return; }
++	if (!native_smmu) native_smmu = ml_io_map(0x15000000ul, AS_SIZE);
++	mi8_smmu_diagnose(&ops, step, &native_result);
++}
++#endif
+diff --git a/bsd/dev/mi8_audio_smmu.h b/bsd/dev/mi8_audio_smmu.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..474d7913112a46e114ac7587d2f369a9590189e6
+--- /dev/null
++++ b/bsd/dev/mi8_audio_smmu.h
+@@ -0,0 +1,41 @@
++/* SPDX-License-Identifier: MIT */
++/* Bounded apps SMMU diagnostics; no remote processor or DMA operations. */
++#ifndef MI8_AUDIO_SMMU_H
++#define MI8_AUDIO_SMMU_H
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#define MI8_AS_IOVA 0x10000000ull
++#define MI8_AS_ADDRESS 0x0000fffffffff000ull
++#define MI8_AS_PTE (3ull | 1ull << 2 | 1ull << 6 | 3ull << 8 | 1ull << 10 | 1ull << 11 | 3ull << 53)
++struct mi8_smmu_memory {
++	void *tables, *buffer;
++	uint64_t table_phys[3], pages[8];
++};
++struct mi8_smmu_ops {
++	void *ctx;
++	bool (*read)(void *, uint32_t, uint32_t *);
++	bool (*write)(void *, uint32_t, uint32_t);
++	void (*wait_us)(void *, uint32_t);
++	void (*log)(void *, const char *);
++	bool (*allocate)(void *, struct mi8_smmu_memory *);
++	void (*release)(void *, struct mi8_smmu_memory *);
++	void (*cache)(void *, const struct mi8_smmu_memory *);
++	bool (*table_read)(void *, uint64_t, uint64_t *);
++};
++struct mi8_smmu_result {
++	int slot, bank;
++	bool restored, retained, passed;
++	unsigned lines;
++};
++bool mi8_smmu_overlap(uint32_t, uint32_t, bool, uint32_t);
++/* 1: page, 0: invalid descriptor, -1: inaccessible/malformed table. */
++int mi8_smmu_walk(bool (*)(void *, uint64_t, uint64_t *), void *, uint64_t,
++    uint64_t, uint64_t *, uint64_t *);
++void mi8_smmu_diagnose(const struct mi8_smmu_ops *, unsigned, struct mi8_smmu_result *);
++#ifndef MI8_SMMU_HOST_TEST
++void mi8_audio_smmu_run(unsigned);
++bool mi8_audio_smmu_reserved(unsigned, unsigned);
++#endif
++#endif
 diff --git a/bsd/dev/mi8_bt.c b/bsd/dev/mi8_bt.c
 new file mode 100644
 index 0000000000000000000000000000000000000000..f981e222e65f8e0962084898975176f0c9a5fa8d
@@ -12084,10 +12545,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b919432ba955d
+index 0000000000000000000000000000000000000000..4856e5e7c06c0ce46ca1a18231f1da569eea9fa7
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4187 @@
+@@ -0,0 +1,4224 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -12153,6 +12614,7 @@ index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b9194
 +#include <sys/param.h>
 +#include "mi8_glink.h"
 +#include "mi8_audio.h"
++#include "mi8_audio_smmu.h"
 +#include "mi8_hostsvc.h"
 +#include "mi8_wlfw.h"
 +#include <sys/mi8_lx.h>
@@ -12166,6 +12628,7 @@ index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b9194
 +extern kern_return_t thread_terminate(thread_t thread);
 +
 +void mi8_rproc_init(void);
++void mi8_rproc_smmu_log(const char *);
 +
 +static int say(const char *format, ...) __printflike(1, 2);
 +
@@ -14774,6 +15237,14 @@ index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b9194
 +static bool wsmmu_translating;
 +static LCK_GRP_DECLARE(wsmmu_lock_group, "mi8-wsmmu");
 +static LCK_MTX_DECLARE(wsmmu_lock, &wsmmu_lock_group);
++/* Fixed before either worker starts; ordinary boots acquire no new lock. */
++static bool audio_smmu_serial;
++
++void
++mi8_rproc_smmu_log(const char *text)
++{
++	say("mi8rp: audio SMMU: %s\n", text);
++}
 +
 +static void
 +wsmmu_watch(void)
@@ -14908,6 +15379,7 @@ index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b9194
 +	vm_offset_t cbs;
 +
 +	for (n = 0; n < matches && WSMMU_SMR(n) < 0xc00; n++) {
++		if (audio_smmu_serial && mi8_audio_smmu_reserved(n, ~0u)) continue;
 +		smr = rd(wsmmu + WSMMU_SMR(n));
 +		s2cr = rd(wsmmu + WSMMU_S2CR(n));
 +		if (smr >> 31) {
@@ -14934,7 +15406,7 @@ index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b9194
 +		for (n = contexts; n-- > 0;) {
 +			vm_offset_t cb = cbs + 0x1000ul * n;
 +
-+			if (!used[n] && !(rd(cb + WSMMU_CB_SCTLR) & 1)) {
++			if (!used[n] && !(audio_smmu_serial && mi8_audio_smmu_reserved(~0u, n)) && !(rd(cb + WSMMU_CB_SCTLR) & 1)) {
 +				wsmmu_cb = cb;
 +				wsmmu_context = n;
 +				break;
@@ -14965,7 +15437,7 @@ index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b9194
 +
 +/* At MSA_READY, before the radio's supplies go on. */
 +static void
-+wsmmu_before_power(void)
++wsmmu_before_power_unserialized(void)
 +{
 +	if (wsmmu_level == 0 || wsmmu != 0) {
 +		return;
@@ -14975,6 +15447,14 @@ index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b9194
 +	if (wsmmu_level >= 2) {
 +		wsmmu_bypass();
 +	}
++}
++
++static void
++wsmmu_before_power(void)
++{
++	if (audio_smmu_serial) lck_mtx_lock(&wsmmu_lock);
++	wsmmu_before_power_unserialized();
++	if (audio_smmu_serial) lck_mtx_unlock(&wsmmu_lock);
 +}
 +
 +/* ---- the radio's firmware service (WLFW, QRTR service 69; TASK-004): mi8rp_wlfw=1 goes up to FW_READY, 2 also powers the chip and sends WLAN_CFG + WLAN_MODE ---- */
@@ -16025,6 +16505,16 @@ index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b9194
 +	    mi8_audio_run(&cfg, audio_alive, &adsp_remote);
 +}
 +
++/* Independent of firmware/ADSP steps: only this worker may run for 11/12. */
++static void
++audio_smmu_thread(void *parameter, __unused wait_result_t wr)
++{
++	if (audio_smmu_serial) lck_mtx_lock(&wsmmu_lock);
++	mi8_audio_smmu_run((unsigned)(uintptr_t)parameter);
++	if (audio_smmu_serial) lck_mtx_unlock(&wsmmu_lock);
++	thread_terminate(current_thread());
++}
++
 +/* The partitions are there some time after the system starts; steps 5 and on run on a thread that waits for them. */
 +static void
 +steps_from_five(void *parameter, __unused wait_result_t wr)
@@ -16203,6 +16693,7 @@ index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b9194
 +	/* Set once before starting either worker; default calls take no new lock. */
 +	PE_parse_boot_argn("mi8rp_step", &shared_step, sizeof(shared_step));
 +	adsp_shared_serial = shared_step >= 9;
++	audio_smmu_serial = shared_step >= 12;
 +	PE_parse_boot_argn("mi8rp_pause", &pause_ms, sizeof(pause_ms));
 +	{
 +		uint32_t pre = 0;
@@ -16255,6 +16746,13 @@ index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b9194
 +	}
 +	PE_parse_boot_argn("mi8rp_pause", &pause_ms, sizeof(pause_ms));
 +	say("mi8rp: steps up to %u\n", last);
++	if (last >= 11) {
++		thread_t thread;
++		if (kernel_thread_start(audio_smmu_thread, (void *)(uintptr_t)last, &thread) == KERN_SUCCESS) {
++			thread_deallocate(thread);
++		}
++		return;
++	}
 +	if (last >= 1) {
 +		step_survey();
 +	}

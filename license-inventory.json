@@ -8,7 +8,7 @@
       "upstream_file_exists": true,
       "license": "LicenseRef-CMU",
       "basis": "Original CMU header retained upstream; see pinned XNU file",
-      "sha256": "47223ac9efa1c6e37448b809cca11a420f4b7be1c61c3ab8d82c155499d86a2f"
+      "sha256": "3e5b155ea413b82e38338bbcc288ccc170db63d75f367452868f8b4b1fc302ed"
     },
     {
       "component": "xnu-mi8",
@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "8d2c24a0b9ba7a20ae0122230ed47496c6370be3076045a781c4170ff77738b8"
+      "sha256": "66dea46a371fcfedcfafa778c569b3e7c0dfa91c32666f4af3628e8bd3dbac42"
     },
     {
       "component": "xnu-mi8",
@@ -721,6 +721,22 @@
       "license": "MIT",
       "basis": "本项目新写，参考 Linux/Android apr/q6core/q6afe 协议与 SDM845 设备树寄存器字段，未复制驱动实现",
       "sha256": "954efd965dec1a1195945265fa5c53fe6b2cc7bb959ea7a410e9de65b4d5351c"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/dev/mi8_audio_smmu.c",
+      "upstream_file_exists": false,
+      "license": "MIT",
+      "basis": "本项目新写的有界 SMMU 诊断与软件走表；寄存器/描述符字段参考 ARM SMMUv2、Linux 定义及现有适配器，未复制驱动实现",
+      "sha256": "7f145d4dc2804ff8e3b3eb7d13c545bfc6201d3d5699049619e930e61c9dbc44"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/dev/mi8_audio_smmu.h",
+      "upstream_file_exists": false,
+      "license": "MIT",
+      "basis": "本项目新写的有界 SMMU 诊断与软件走表；寄存器/描述符字段参考 ARM SMMUv2、Linux 定义及现有适配器，未复制驱动实现",
+      "sha256": "b9eb509ddea8ea3f06fd769d7f722de8b9209c525610b71c309e3e93cb7f67b7"
     }
   ]
 }
