@@ -17,7 +17,7 @@
 static unsigned checks;
 struct model {
 	uint32_t regs[0x80000 / 4], before[0x80000 / 4];
-	uint64_t tables[1536], buffer[4096];
+	uint64_t tables[2560], buffer[4096];
 	struct mi8_smmu_memory memory;
 	struct mi8_smmu_claim claim;
 	unsigned writes, allocations, releases, caches, lines, holds;
@@ -65,6 +65,7 @@ write_reg(void *ctx, uint32_t at, uint32_t value)
 	if (at == S2CR(8) && m->s2cr_range && (value & 0xff) >= 45) return true; /* hypervisor refuses an out-of-range context */
 	if (at == S2CR(8) && m->s2cr_locked && m->s2cr_writes++) return true; /* only the first (claim) write takes effect */
 	if (m->restore_block && m->holds && at == CB(43) && value == 0) return true;
+	if (at == CB(43) + 0x58) { m->regs[at / 4] &= ~value; return true; }
 	m->regs[at / 4] = value;
 	if (at == CB(43) && m->holds) {
 		m->regs[at / 4] |= m->restore_ignore;
@@ -107,7 +108,7 @@ allocate(void *ctx, struct mi8_smmu_memory *mem)
 	m->allocations++; if (m->no_memory) return false;
 	memset(m->tables, 0, sizeof(m->tables));
 	mem->tables = m->tables; mem->buffer = m->buffer;
-	for (unsigned n = 0; n < 3; n++) mem->table_phys[n] = 0x90000000ull + n * 0x4000;
+	for (unsigned n = 0; n < mem->table_count; n++) mem->table_phys[n] = 0x90000000ull + n * 0x4000;
 	for (unsigned n = 0; n < 8; n++) mem->pages[n] = 0xa0000000ull + n * 0x2000;
 	m->memory = *mem; return true;
 }
@@ -120,7 +121,7 @@ static bool
 table_read(void *ctx, uint64_t physical, uint64_t *value)
 {
 	struct model *m = ctx;
-	for (unsigned n = 0; n < 3; n++) if (physical >= m->memory.table_phys[n] &&
+	for (unsigned n = 0; n < m->memory.table_count; n++) if (physical >= m->memory.table_phys[n] &&
 	    physical - m->memory.table_phys[n] <= 4088 && !(physical & 7)) {
 		memcpy(value, (const char *)m->tables + n * 4096 + physical - m->memory.table_phys[n], 8); return true;
 	}

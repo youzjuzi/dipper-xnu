@@ -15,6 +15,8 @@ static unsigned checks;
 #define RX 16640u
 #define FIFO 16384u
 struct peer {
+    int (*extra_response)(struct peer *, const unsigned char *, unsigned char *, unsigned *);
+    void *extension;
     unsigned char mem[33024];
     uint64_t now;
     uint16_t local_cid, remote_cid;
@@ -23,7 +25,7 @@ struct peer {
     unsigned bad_packets;
     unsigned logs, error_logs, unsupported_logs, intent_logs, rejected_logs, ignored_logs;
     bool header8, afe_mode, bad_afe_version, amp_high, drop_start, drop_stop, drop_off;
-    unsigned fail_action, afe_count, pin_writes, pending_logs;
+    unsigned fail_action, afe_status, afe_count, pin_writes, pending_logs;
     bool fail_pin_write, fail_restore, hold_event, die_hold;
     unsigned char actions[16];
     uint64_t start_at, held_us;
@@ -57,13 +59,16 @@ static void open_peer(struct peer *p,const char *name) {
 static void respond(struct peer *p,const unsigned char *req) {
     unsigned char b[4096]={0}, frame[4200];unsigned n=24;uint32_t op=rd(req+16);
     b[0]=0x51;b[1]=0;b[4]=3;b[5]=4;b[8]=3;b[9]=5;memcpy(b+12,req+12,4);
-    if(req[4]==4){
+    int extra=p->extra_response?p->extra_response(p,req,b,&n):0;
+    if(extra<0)return;
+    if(extra){}
+    else if(req[4]==4){
         unsigned action=op==0x100ef?1:op==0x100e5?3:op==0x100e6?4:rd(req+64)?2:5;
         CHECK(p->afe_count<16);p->actions[p->afe_count++]=(unsigned char)action;
         if(action==3)p->start_at=p->now;
         if(action==4)p->held_us=p->now-p->start_at;
         if((action==3&&p->drop_start)||(action==4&&p->drop_stop)||(action==5&&p->drop_off))return;
-        b[4]=b[8]=4;n=28;wr(b+16,0x110e8);wr(b+20,op);wr(b+24,p->fail_action==action?1:0);
+        b[4]=b[8]=4;n=28;wr(b+16,0x110e8);wr(b+20,op);wr(b+24,p->fail_action==action?(p->afe_status?p->afe_status:1):0);
     }
     else if(op==0x1290c) {wr(b+16,0x1290d);wr(b+20,p->state_zero?0:1);}
     else if(op==0x1292c && p->legacy) {n=28;wr(b+16,0x110e8);wr(b+20,0x1292c);wr(b+24,3);}
@@ -73,6 +78,7 @@ static void respond(struct peer *p,const unsigned char *req) {
         wr(b+base-4,p->bad_version?count+1:count);
         for(unsigned i=0;i<count;i++){wr(b+base+width*i,i+1);wr(b+base+width*i+4,p->afe_mode&&i==3?(p->bad_afe_version?9:2):0x100+i+1);if(width==12)wr(b+base+width*i+8,0x200+i+1);}
     }
+    if(p->extra_response && op==0x1292c){wr(b+44+12*6,1);wr(b+44+12*7,2);}
     if(p->header8){memmove(b+32,b+20,n-20);memset(b+20,0,12);n+=12;b[0]=0x81;}
     b[2]=n;b[3]=n>>8;
     unsigned slot=p->intents;
@@ -117,7 +123,7 @@ static void turn(struct peer *p) {
             if(!rd(b+12)){
                 p->received++;p->packet_size=p->taken;control(p,14,p->remote_cid,arg);
                 if(p->local_cid==1 && p->taken>=32){if(rd(p->packet+4)==2)p->qrtr_hello++;}
-                else if(p->reply && (p->taken==20||p->packet[4]==4))respond(p,p->packet);
+                else if(p->reply && (p->taken==20||p->packet[4]==4||p->extra_response))respond(p,p->packet);
                 p->taken=0;
             }break;
         case 3:
@@ -299,7 +305,7 @@ static bool pin_read(void*v,unsigned pin,uint32_t*cfg,uint32_t*io){
 }
 static bool pin_write(void*v,unsigned pin,uint32_t cfg,uint32_t io){
     struct peer*p=v;CHECK(pin>=58&&pin<=61);unsigned i=pin-58;p->pin_writes++;
-    if(cfg==p->saved_cfg[i]&&p->afe_count)CHECK(p->actions[p->afe_count-1]==5||p->fail_action==1);
+    if(cfg==p->saved_cfg[i]&&p->afe_count&&!p->extra_response)CHECK(p->actions[p->afe_count-1]==5||p->fail_action==1);
     if(p->fail_pin_write&&pin==60){p->fail_pin_write=false;return false;}
     if(p->fail_restore&&pin==59&&cfg==p->saved_cfg[i])return false;
     p->pin_cfg[i]=cfg;p->pin_io[i]=io;return true;

@@ -90,6 +90,7 @@ static unsigned smem_items(uint32_t partition,uint32_t line,struct smem_item *ou
 #define __unused __attribute__((unused))
 #define NSEC_PER_MSEC 1
 #define KERN_SUCCESS 0
+#define NULL_THREAD 0
 typedef int wait_result_t;
 static bool adsp_started, prep_ok, start_ok, starts_dsp, down_ok, ack_ok, aop_ok, handshake_ok;
 static bool adsp_last_stop_acked, adsp_last_aop_off;
@@ -100,6 +101,9 @@ static void step_firmware(void){}
 static void step_aop(void){}
 static bool step_header(void){return true;}
 static bool step_image(void){return true;}
+static bool mi8_audio_play_proven(void){return false;}
+static int audio_play_thread;static bool audio_play_brief;static uint64_t audio_play_until;static char audio_play_note[400];
+static uint64_t now_us(void){return 0;}
 static bool adsp_glink_prepare(void){return prep_ok;}
 static bool step_start(void){adsp_started=starts_dsp;return start_ok;}
 static bool adsp_audio_handshake(uint32_t last){CHECK(last==9||last==10);handshakes++;return handshake_ok;}
@@ -107,7 +111,7 @@ static bool dsp_shutdown(const char*s){(void)s;shutdowns++;adsp_last_stop_acked=
 static bool qmp_send(const char*s){CHECK(strstr(s,"val: off")!=NULL);offs++;return true;}
 static int current_thread(void){return 0;}
 static void thread_terminate(int t){(void)t;terminations++;}
-'''+dispatcher+r'''
+'''+dispatcher.replace('audio_play_thread=NULL', 'audio_play_thread=0')+r'''
 static void lifecycle_tests(void){
  uint32_t size=0;CHECK(item_find(8192,32,43,&size)==8320&&size==344);
  for(unsigned scenario=0;scenario<10;scenario++){

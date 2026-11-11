@@ -36,7 +36,7 @@ def main():
         subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread',
                         '-DMI8_GLINK_HOST_TEST', '-I' + str(dev),
                         str(ROOT / 'tools/tests/mi8-audio-apr.c'),
-                        str(dev / 'mi8_glink.c'), str(dev / 'mi8_audio.c'), '-o', str(exe)], check=True)
+                        str(dev / 'mi8_glink.c'), str(dev / 'mi8_audio.c'), str(dev / 'mi8_audio_pcm.c'), '-o', str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
 
 
