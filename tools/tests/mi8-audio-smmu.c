@@ -27,7 +27,9 @@ struct model {
 	bool cbar_locked, cbar_writable, no_idle;
 	uint32_t unstable_at, restore_ignore, restore_other_at;
 	unsigned flip_read, seen_reads;
-	bool restore_m;
+	bool restore_m, s2cr_range, s2cr_locked;
+	unsigned s2cr_writes;
+	uint32_t resv_at, resv_or, hold_flip_at, hold_flip; /* bits outside the compare mask that read back set; a hold-time change */
 	char logs[38][320];
 	uint32_t addresses[128], values[128];
 	bool no_memory, tlb_stuck, restore_block;
@@ -60,6 +62,8 @@ write_reg(void *ctx, uint32_t at, uint32_t value)
 	}
 	if (at == m->drop_forever || (m->holds && at == m->cleanup_drop)) return true;
 	if (at == CBAR(43) && m->cbar_locked && !m->cbar_writable) return true;
+	if (at == S2CR(8) && m->s2cr_range && (value & 0xff) >= 45) return true; /* hypervisor refuses an out-of-range context */
+	if (at == S2CR(8) && m->s2cr_locked && m->s2cr_writes++) return true; /* only the first (claim) write takes effect */
 	if (m->restore_block && m->holds && at == CB(43) && value == 0) return true;
 	m->regs[at / 4] = value;
 	if (at == CB(43) && m->holds) {
@@ -67,7 +71,9 @@ write_reg(void *ctx, uint32_t at, uint32_t value)
 		if (m->restore_m) m->regs[at / 4] |= 1;
 	}
 	if (m->holds && at == m->restore_other_at) m->regs[at / 4] ^= 2;
-	if (m->mismatch_write == m->writes) m->regs[at / 4] ^= 0x100;
+	if (at == m->resv_at) m->regs[at / 4] |= m->resv_or;
+	/* flip a bit inside the register's defined mask (CBA2R and TCR2 define no bit 8) */
+	if (m->mismatch_write == m->writes) m->regs[at / 4] ^= (at == CBA2R(43) || at == CB(43) + 0x10) ? 1u : 0x100;
 	if (at == CBAR(43) && value) {
 		m->cbar_locked = true;
 		if (!m->no_idle) m->regs[(CB(43) + 0x58) / 4] = 0x400;
@@ -83,6 +89,7 @@ wait_us(void *ctx, uint32_t us)
 	if (us != 200000) { CHECK(us == 10); return; }
 	m->holds++;
 	if (m->rewrite) m->regs[m->rewrite / 4] ^= 0x100;
+	if (m->hold_flip_at != ~0u) m->regs[m->hold_flip_at / 4] ^= m->hold_flip;
 	if (m->corrupt == 2) m->tables[1024] ^= 1ull << 2;
 }
 static void log_line(void *ctx, const char *text) {
@@ -124,6 +131,7 @@ fresh(void)
 {
 	struct model *m = calloc(1, sizeof(*m)); CHECK(m);
 	m->drop_forever = m->unreadable = m->unstable_at = m->restore_other_at = m->cleanup_drop = ~0u;
+	m->resv_at = m->hold_flip_at = ~0u;
 	m->fault_value = 2;
 	m->regs[0] = 0x250406; m->regs[0x20 / 4] = 0x4c017e4c; m->regs[0x24 / 4] = 0x5000002d;
 	m->regs[0x28 / 4] = 0x1222; /* 4K / 40-bit UBS,OAS,IAS */
@@ -254,6 +262,28 @@ flow_tests(void)
 		if (n == 3) m->corrupt = 2;
 		r = run(m, 12); CHECK(!r.passed && !r.retained && m->releases == 1); identical(m); free(m);
 	}
+	/* Device run 20261111-audio-smmu-04: an unconfigured bank's CB_TCR2 read back 0x38075 for 0x38015. Bits outside the compare mask that read
+	 * back set are reported once, not compared, and never listed as sticky; the same bits changing during the hold fail it. */
+	m = fresh(); m->resv_at = CB(43) + 0x10; m->resv_or = 0x60; r = run(m, 12);
+	CHECK(r.passed && r.restored && !r.retained && m->releases == 1);
+	CHECK(logged(m, "bits outside the compare mask differ (not compared): +0x6b010:0x60") && logged(m, "sticky registers: +0x10ac=0x1f300") && !logged(m, "mismatch"));
+	free(m);
+	m = fresh(); m->hold_flip_at = CB(43) + 0x10; m->hold_flip = 0x20; r = run(m, 12);
+	CHECK(!r.passed && r.restored && !r.retained && m->releases == 1 && logged(m, "hold readback changed +0x6b010")); free(m);
+	m = fresh(); m->resv_at = CB(43) + 0x10; m->resv_or = 0x60; m->hold_flip_at = CB(43) + 0x10; m->hold_flip = 0x1; r = run(m, 12);
+	CHECK(!r.passed && logged(m, "hold readback changed +0x6b010")); free(m);
+	/* Device run 20261111-audio-smmu-05: the unused slot reads S2CR 0x200ff (FAULT, CBNDX 0xff); writing that back is refused. An
+	 * in-range FAULT value is tried next; if that is refused too the S2CR is sticky (like CBAR): the cleanup is still confirmed
+	 * because the SMR is restored and verified (the slot matches nothing) and SCTLR.M is clear. */
+	m = fresh(); m->regs[S2CR(8) / 4] = 0x200ff; m->s2cr_range = true; r = run(m, 12);
+	CHECK(r.passed && r.restored && !r.retained && m->releases == 1 && logged(m, "S2CR 8: original 0x200ff refused; in-range FAULT 0x2002b set"));
+	CHECK(m->regs[S2CR(8) / 4] == 0x2002b && m->regs[SMR(8) / 4] == 0); free(m);
+	m = fresh(); m->regs[S2CR(8) / 4] = 0x200ff; m->s2cr_locked = true; r = run(m, 12);
+	CHECK(r.passed && r.restored && !r.retained && m->releases == 1 && logged(m, "S2CR sticky (inert: SMR invalid)"));
+	CHECK(logged(m, "sticky registers: +0xc20=0x2b +0x10ac=0x1f300") && m->regs[S2CR(8) / 4] == 0x2b && m->regs[SMR(8) / 4] == 0); free(m);
+	/* A sticky S2CR does not excuse an SMR that cannot be restored. */
+	m = fresh(); m->regs[S2CR(8) / 4] = 0x200ff; m->s2cr_locked = true; m->cleanup_drop = SMR(8); r = run(m, 12);
+	CHECK(!r.passed && !r.restored && r.retained && !m->releases); free(m);
 	m = fresh(); m->timeout_sync = 1; r = run(m, 12); CHECK(!r.passed && r.retained && !m->releases); free(m);
 	m = fresh(); m->timeout_sync = 2; r = run(m, 12); CHECK(!r.passed && r.retained && !m->releases); free(m);
 	m = fresh(); m->faults = 5; r = run(m, 12); CHECK(!r.passed && r.restored && !r.retained && m->releases == 1 && !m->holds); free(m);
@@ -303,7 +333,7 @@ free_bank_tests(void)
 	CHECK(m->regs[CB(43) / 4] == 0);
 	CHECK(m->regs[CBAR(43) / 4] == 0x1f300 && m->regs[(CB(43)+0x58)/4] == 0x400);
 	CHECK(logged(m, "CBAR restore: wrote 0 got 0x1f300 (sticky)"));
-	CHECK(logged(m, "bank 43 claimed (CBAR=0x1f300), inert; SMR 8 / S2CR 8 restored"));
+	CHECK(logged(m, "bank 43 claimed (CBAR=0x1f300), inert; SMR 8 restored, S2CR 8 restored"));
 	identical(m); free(m);
 	/* Isolate each exclusion rather than relying on the configured vector's FSR. */
 	for (unsigned reason = 0; reason < 6; reason++) {
@@ -344,7 +374,8 @@ free_bank_tests(void)
 	/* SCTLR non-M residue is tolerable only while M remains clear. */
 	m = residue(); m->restore_ignore = 1u << 29; r = run(m, 12);
 	CHECK(r.passed && r.restored && !r.retained && m->releases == 1);
-	CHECK(logged(m, "sticky registers: +0x6b000=0x20000000"));
+	/* bit 29 is outside the SCTLR mask: not compared, not listed as sticky */
+	CHECK(logged(m, "sticky registers: +0x10ac=0x1f300"));
 	CHECK(m->regs[CB(43) / 4] == 1u << 29); identical(m); free(m);
 	m = residue(); m->restore_m = true; r = run(m, 12);
 	CHECK(!r.passed && !r.restored && r.retained && !m->releases && logged(m, "inert state unconfirmed")); free(m);
@@ -380,7 +411,7 @@ claim_tests(void)
 	for(unsigned i=0;i<13;i++) {
 		m=residue(); m->rewrite=held[i]; r=run(m,12);
 		CHECK(!r.passed && r.restored && !r.retained && m->releases==1);
-		CHECK(logged(m,"readback mismatch") && !logged(m,"200 ms hold/readback exact")); free(m);
+		CHECK((logged(m,"readback mismatch") || logged(m,"hold readback changed")) && !logged(m,"200 ms hold: every register unchanged")); free(m);
 	}
 	/* Independent sticky clears all run, including ones after the ignored write. */
 	const uint32_t words[]={CBA2R(43),CB(43)+0x20,CB(43)+0x24,CB(43)+0x10,CB(43)+0x30,
@@ -393,12 +424,15 @@ claim_tests(void)
 		CHECK(logged(m,"sticky registers:") && logged(m,"CBAR restore:"));
 		identical(m); free(m);
 	}
-	for (unsigned i=0;i<2;i++) {
-		m=residue(); m->cleanup_drop=i ? S2CR(8) : SMR(8); r=run(m,12);
-		CHECK(!r.passed && !r.restored && r.retained && !m->releases);
-		CHECK(mi8_smmu_reserved(&m->claim,&r,8,~0u));
-		CHECK(m->regs[(CB(43)+0x3c)/4] == 0); free(m);
-	}
+	/* An SMR that cannot be restored keeps everything reserved. A refused S2CR does not: it is sticky once the SMR is invalid
+	 * (device run 20261111-audio-smmu-05), so the slot is inert, the claim stays (CBAR/S2CR are one-way) and memory is released. */
+	m=residue(); m->cleanup_drop=SMR(8); r=run(m,12);
+	CHECK(!r.passed && !r.restored && r.retained && !m->releases);
+	CHECK(mi8_smmu_reserved(&m->claim,&r,8,~0u));
+	CHECK(m->regs[(CB(43)+0x3c)/4] == 0); free(m);
+	m=residue(); m->cleanup_drop=S2CR(8); r=run(m,12);
+	CHECK(r.passed && r.restored && !r.retained && m->releases == 1 && logged(m, "S2CR sticky (inert: SMR invalid)"));
+	CHECK(mi8_smmu_reserved(&m->claim,&r,~0u,43)); free(m); /* the bank stays claimed; slot 8 is no longer FAULT-type, so nobody picks it */
 	/* Original free-bank policy still excludes configured FSR=0x400. */
 	m=residue(); m->regs[(CB(43)+0x58)/4]=0x400; r=run(m,11); CHECK(r.bank==42&&!m->writes); free(m);
 	m=residue(); r=run(m,12); CHECK(r.passed && m->claim.owned && m->claim.bank==43);

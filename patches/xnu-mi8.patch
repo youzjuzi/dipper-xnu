@@ -6205,10 +6205,10 @@ index 0000000000000000000000000000000000000000..43386b9ab0d51a1864305486a25c1384
 +#endif
 diff --git a/bsd/dev/mi8_audio_smmu.c b/bsd/dev/mi8_audio_smmu.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..d262099b58fb8e8b6d71c2eb47b47d351cd56e6f
+index 0000000000000000000000000000000000000000..4c4a162e4aedf7dbd2b1b76cd54a4f6a8b785ebb
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_smmu.c
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,570 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independently written from SMMUv2 register/descriptor formats and the
 + * existing apps SMMU adapters. Software checks do not establish DMA reachability. */
@@ -6250,8 +6250,15 @@ index 0000000000000000000000000000000000000000..d262099b58fb8e8b6d71c2eb47b47d35
 +	unsigned rejected[6]; /* referenced, CBAR, CBA2R, M, FSR, unstable */
 +	struct as_bank_regs selected;
 +	uint32_t fsr;
++	char diff[96]; /* registers whose bits outside the compare mask read back differently from what we wrote */
 +};
-+struct as_reg { uint32_t at, old, value; };
++/* mask: the bits of the register that we configure and require to echo a write. Bits outside it are NOT compared; they may
++ * be defined by the architecture (ARM IHI0062D.c) or hold power-up residue of an unconfigured bank: run 20261111-audio-smmu-04
++ * saw CB_TCR2 wanted 0x38015 got 0x38075. Bits 5/6 of CB_TCR2 are TBI0/TBI1 (top byte of the input address ignored); they read
++ * back 1 here although written 0. That has no effect on us: the only input addresses are the audio IOVAs, far below 2^40, and
++ * the DSP's stream bits sit at [35:32]. The masks are device-verified policy, not "every defined bit". first: what the register
++ * read back right after our write. */
++struct as_reg { uint32_t at, old, value, mask, first; };
 +
 +static void
 +as_log(struct as_state *s, const char *fmt, ...)
@@ -6294,6 +6301,28 @@ index 0000000000000000000000000000000000000000..d262099b58fb8e8b6d71c2eb47b47d35
 +	if (!as_read(s, at, &before) || !s->io->write(s->io->ctx, at, value) || !as_equal(s, at, value)) {
 +		as_log(s, "write/readback mismatch +%#x wanted %#x", at, value);
 +		return false;
++	}
++	return true;
++}
++
++/* Write, read back, compare the defined bits; differences outside the mask are collected (one summary line), not failures. */
++static bool
++as_write_reg(struct as_state *s, struct as_reg *r)
++{
++	uint32_t before, got;
++	if (!as_read(s, r->at, &before) || !s->io->write(s->io->ctx, r->at, r->value) || !as_read(s, r->at, &got)) {
++		as_log(s, "write/readback mismatch +%#x wanted %#x", r->at, r->value);
++		return false;
++	}
++	if ((got ^ r->value) & r->mask) {
++		as_log(s, "readback mismatch +%#x wanted %#x got %#x (mask %#x)", r->at, r->value, got, r->mask);
++		as_log(s, "write/readback mismatch +%#x wanted %#x", r->at, r->value);
++		return false;
++	}
++	r->first = got;
++	if (got != r->value) {
++		size_t n = strlen(s->diff);
++		if (n + 24 < sizeof(s->diff)) snprintf(s->diff + n, sizeof(s->diff) - n, " +%#x:%#x", r->at, got ^ r->value);
 +	}
 +	return true;
 +}
@@ -6549,6 +6578,13 @@ index 0000000000000000000000000000000000000000..d262099b58fb8e8b6d71c2eb47b47d35
 +	regs[5].value = AS_TCR | (64u - (input_bits < 39 ? input_bits : 39)); regs[6].value = regs[7].value = 0;
 +	regs[8].value = AS_MAIR; regs[9].value = 0; regs[10].value = AS_SCTLR;
 +	regs[11].value = bank | ((s.scr & 8) ? 1u << 10 : 0);
++	/* Compared bits (the fields we set; Linux arm-smmu.h and ARM IHI0062D.c give the layouts): CBAR VMID[7:0] BPSHCFG[9:8]
++	 * MEMATTR[15:12] TYPE[17:16] IRPTNDX[31:24] (not the TYPE-dependent extras); CBA2R VA64[0] VMID16[31:16]; TTBR/MAIR/S2CR:
++	 * all bits; TCR2 PASIZE[3:0] AS[4] SEP[17:15] (TBI0/TBI1 [6:5] read 1 on this device, see struct as_reg); TCR: all but the
++	 * reserved bit 6; SCTLR: controls [10:0] (ASIDPNE[12] reads back 0 on this SMMU, device run 20261111-audio-smmu-05). SCTLR's
++	 * upper fields (WACFG/RACFG/SHCFG/MTCFG/MEMATTR) configure transactions that bypass translation (M=0); we run with M=1. */
++	static const uint32_t masks[12] = { 0xff03f3ffu, 0xffff0001u, ~0u, ~0u, 0x3801fu, 0xffffffbfu, ~0u, ~0u, ~0u, ~0u, 0x07ffu, ~0u };
++	for (unsigned n = 0; n < 12; n++) { regs[n].mask = masks[n]; regs[n].first = 0; }
 +	/* Recheck the whole allocation under the caller's shared allocation lock. */
 +	for (unsigned n = 0; n < 76; n++) if (!as_equal(&s, AS_SMR(n), s.smr[n]) || !as_equal(&s, AS_S2CR(n), s.s2cr[n])) goto finish;
 +	for (unsigned n = 0; n < 12; n++) if (!as_equal(&s, regs[n].at, regs[n].old)) goto finish;
@@ -6567,25 +6603,34 @@ index 0000000000000000000000000000000000000000..d262099b58fb8e8b6d71c2eb47b47d35
 +	 * hardware. The same lock is held through cleanup and Wi-Fi allocation. */
 +	io->claim->owned = true; io->claim->bank = bank;
 +	for (unsigned n = 0; n < 11; n++) {
-+		if (!as_write(&s, regs[n].at, regs[n].value) || !as_faults_clear(&s, cb)) goto restore;
++		if (!as_write_reg(&s, &regs[n]) || !as_faults_clear(&s, cb)) goto restore;
 +		if (n % 3 == 2) as_log(&s, "write/readback +%#x=%#x +%#x=%#x +%#x=%#x exact",
 +		    regs[n-2].at, regs[n-2].value, regs[n-1].at, regs[n-1].value, regs[n].at, regs[n].value);
 +		else if (n == 10) as_log(&s, "write/readback +%#x=%#x +%#x=%#x exact",
 +		    regs[9].at, regs[9].value, regs[10].at, regs[10].value);
 +	}
 +	if (!as_sync(&s, cb, bank) || !as_faults_clear(&s, cb)) goto restore;
-+	if (!as_write(&s, AS_S2CR(slot), regs[11].value) || !as_faults_clear(&s, cb) ||
++	if (!as_write_reg(&s, &regs[11]) || !as_faults_clear(&s, cb) ||
 +	    !as_write(&s, AS_SMR(slot), 0x1821u | ((s.scr & 8) ? 0 : 1u << 31))) goto restore;
 +	if (!as_faults_clear(&s, cb)) goto restore;
 +	as_log(&s, "route write/readback S2CR%u=%#x SMR%u=%#x exact; TLB synchronized", slot, regs[11].value, slot, 0x1821u | ((s.scr & 8) ? 0 : 1u << 31));
 +	io->wait_us(io->ctx, 200000);
-+	for (unsigned n = 0; n < 12; n++) if (!as_equal(&s, regs[n].at, regs[n].value)) goto restore;
++	for (unsigned n = 0; n < 12; n++) {
++		/* Stable: identical to the first readback; and the defined bits are what we wrote. */
++		uint32_t got;
++		if (!as_read(&s, regs[n].at, &got)) goto restore;
++		if (got != regs[n].first || ((got ^ regs[n].value) & regs[n].mask)) {
++			as_log(&s, "hold readback changed +%#x first %#x now %#x wanted %#x (mask %#x)", regs[n].at, regs[n].first, got, regs[n].value, regs[n].mask);
++			goto restore;
++		}
++	}
++	if (s.diff[0]) as_log(&s, "bits outside the compare mask differ (not compared):%s", s.diff);
 +	if (!as_equal(&s, AS_SMR(slot), 0x1821u | ((s.scr & 8) ? 0 : 1u << 31)) || !as_faults_clear(&s, cb) ||
 +	    !as_equal(&s, 0x20, s.id0) || !as_equal(&s, 0x24, s.id1) || !as_equal(&s, 0x28, s.id2)) goto restore;
 +	if (!as_walk_pages(&s, &mem, (uint64_t)regs[3].value << 32 | regs[2].value)) {
 +		as_log(&s, "software walk changed during hold"); goto restore;
 +	}
-+	as_log(&s, "200 ms hold/readback exact (CBAR and SCTLR included); GFSR=0 FSR=%#x (no fault); hardware translation Pending", s.fsr); good = true;
++	as_log(&s, "200 ms hold: every register unchanged from its first readback, defined bits as written; GFSR=0 FSR=%#x (no fault); hardware translation Pending", s.fsr); good = true;
 +restore:;
 +	/* No DSP or DMA is started here. Detach and disable before invalidating
 +	 * TLBs; only confirmed quiescence permits freeing the backing memory. */
@@ -6593,19 +6638,32 @@ index 0000000000000000000000000000000000000000..d262099b58fb8e8b6d71c2eb47b47d35
 +	uint32_t got = 0, final_cbar = 0;
 +	bool readable, wrote;
 +	if (!as_write(&s, AS_SMR(slot), s.smr[slot])) clean = false;
-+	if (!as_write(&s, AS_S2CR(slot), regs[11].old)) clean = false;
-+	as_log(&s, "route revoke: SMR %u / S2CR %u %s", slot, slot, clean ? "restored" : "unconfirmed");
++	/* The unused slot's S2CR is FAULT type with CBNDX 0xff, outside the 45 banks. Device run 20261111-audio-smmu-05: after our
++	 * first write (the claim) the hypervisor ignores every later S2CR write: the original value, and an in-range FAULT one. Like
++	 * CBAR this is a one-way claim. The SMR is restored first and verified: with it invalid the slot matches no stream, and the
++	 * S2CR that is left points at our own disabled bank, so the slot is inert. S2CR is therefore best effort, reported as sticky. */
++	uint32_t s2cr_final = regs[11].old;
++	bool s2cr_ok = true;
++	if (!as_write(&s, AS_S2CR(slot), regs[11].old)) {
++		uint32_t alt = AS_FAULT | bank;
++		s2cr_final = alt;
++		if (io->write(io->ctx, AS_S2CR(slot), alt) && as_read(&s, AS_S2CR(slot), &got) && got == alt)
++			as_log(&s, "S2CR %u: original %#x refused; in-range FAULT %#x set", slot, regs[11].old, alt);
++		else if (as_read(&s, AS_S2CR(slot), &got)) { s2cr_ok = false; as_sticky(sticky, sizeof(sticky), AS_S2CR(slot), true, got); }
++		else clean = false;
++	}
++	as_log(&s, "route revoke: SMR %u restored%s", slot, !clean ? " unconfirmed" : s2cr_ok ? ", S2CR restored" : "; S2CR sticky (inert: SMR invalid)");
 +	(void)as_read(&s, cb, &got);
 +	wrote = io->write(io->ctx, cb, 0); readable = as_read(&s, cb, &got);
 +	if (!wrote || !readable || (got & 1)) clean = false;
-+	if (!wrote || !readable || got) as_sticky(sticky, sizeof(sticky), cb, readable, got);
++	if (!wrote || !readable || (got & regs[10].mask)) as_sticky(sticky, sizeof(sticky), cb, readable, got);
 +	if (!as_sync(&s, cb, bank)) clean = false;
 +	/* CBAR is deliberately excluded: at most one restoration attempt below. */
 +	for (unsigned n = 1; n < 10; n++) {
 +		(void)as_read(&s, regs[n].at, &got);
 +		wrote = io->write(io->ctx, regs[n].at, 0);
 +		readable = as_read(&s, regs[n].at, &got);
-+		if (!wrote || !readable || got) as_sticky(sticky, sizeof(sticky), regs[n].at, readable, got);
++		if (!wrote || !readable || (got & regs[n].mask)) as_sticky(sticky, sizeof(sticky), regs[n].at, readable, got);
 +	}
 +	/* CBAR may be a one-way hypervisor claim (inference, not established).
 +	 * Try the original unconfigured value once, without retries or coercion. */
@@ -6618,15 +6676,15 @@ index 0000000000000000000000000000000000000000..d262099b58fb8e8b6d71c2eb47b47d35
 +	if (!wrote || !readable || final_cbar) as_sticky(sticky, sizeof(sticky), AS_CBAR(bank), readable, final_cbar);
 +	/* Verify critical detach/disable state again after all independent writes. */
 +	if (!as_equal(&s, AS_SMR(slot), s.smr[slot])) clean = false;
-+	if (!as_equal(&s, AS_S2CR(slot), regs[11].old)) clean = false;
++	if (s2cr_ok && !as_equal(&s, AS_S2CR(slot), s2cr_final)) clean = false;
 +	if (!as_read(&s, cb, &got) || (got & 1)) clean = false;
 +	if (!as_equal(&s, 0, s.scr)) clean = false;
 +	if (!as_faults_clear(&s, cb)) good = false;
 +	as_log(&s, "inert check: routes revoked, SCTLR.M=0, TLB synchronized: %s; GFSR/FSR checked (FSR=%#x)", clean ? "confirmed" : "unconfirmed", s.fsr);
 +	as_log(&s, "sticky registers:%s", *sticky ? sticky : " none");
 +	out->restored = clean;
-+	if (clean && readable) as_log(&s, "bank %u claimed (CBAR=%#x), inert; SMR %u / S2CR %u restored", bank, final_cbar, slot, slot);
-+	else if (clean) as_log(&s, "bank %u claimed (CBAR unreadable), inert; SMR %u / S2CR %u restored", bank, slot, slot);
++	if (clean && readable) as_log(&s, "bank %u claimed (CBAR=%#x), inert; SMR %u restored, S2CR %u %s", bank, final_cbar, slot, slot, s2cr_ok ? "restored" : "sticky");
++	else if (clean) as_log(&s, "bank %u claimed (CBAR unreadable), inert; SMR %u restored, S2CR %u %s", bank, slot, slot, s2cr_ok ? "restored" : "sticky");
 +	else as_log(&s, "Pending: inert state unconfirmed; memory and SMR/CB reservations retained");
 +finish:
 +	if (allocated) {

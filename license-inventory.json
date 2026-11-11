@@ -728,7 +728,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写的有界 SMMU 诊断与软件走表；寄存器/描述符字段参考 ARM SMMUv2、Linux 定义及现有适配器，未复制驱动实现",
-      "sha256": "38ae9c609c2567ba106d419ab1c09a3009e0d71f49c1f3c6d60369253ccb1a28"
+      "sha256": "6f1f1d29794f7c97b5027c78240b5fbc0c330a51221132afbc8a4074863ccff2"
     },
     {
       "component": "xnu-mi8",
