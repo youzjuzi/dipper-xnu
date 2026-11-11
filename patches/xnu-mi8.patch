@@ -5566,14 +5566,14 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..d19d798b0440f1b155d1ec821e5053a3b965e752
+index 0000000000000000000000000000000000000000..e52d10f993652edeb4087ea40231af847ff4e13d
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,578 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
-+ * This module never starts AFE/ASM/ADM or accesses audio hardware registers. */
++ * The explicit AFE entry controls only MI2S; no ASM/ADM, PCM buffers or amplifier operations. */
 +#include "mi8_audio.h"
 +#ifdef MI8_GLINK_HOST_TEST
 +#include <string.h>
@@ -5697,10 +5697,122 @@ index 0000000000000000000000000000000000000000..d19d798b0440f1b155d1ec821e5053a3
 +	return 0;
 +}
 +
++/* Generic APPS/ADSP transactions. The response ports reverse the request. */
++int
++mi8_apr_encode_service(uint8_t service, uint16_t local, uint16_t remote,
++    uint32_t token, uint32_t opcode, const void *payload, size_t length,
++    uint8_t *packet, size_t capacity, size_t *bytes)
++{
++	if (!service || !token || !opcode || !packet || !bytes || (!payload && length) ||
++	    length > 65535 - 20 || capacity < length + 20) return EINVAL;
++	memset(packet, 0, length + 20);
++	packet[0] = 0x50; packet[1] = 2;
++	packet[2] = (uint8_t)(length + 20); packet[3] = (uint8_t)((length + 20) >> 8);
++	packet[4] = packet[8] = service; packet[5] = 5; packet[9] = 4;
++	packet[6] = local; packet[7] = local >> 8; packet[10] = remote; packet[11] = remote >> 8;
++	write32(packet + 12, token); write32(packet + 16, opcode);
++	if (length) memcpy(packet + 20, payload, length);
++	*bytes = length + 20;
++	return 0;
++}
++
++int
++mi8_apr_expect(struct mi8_apr_pending *p, uint8_t service, uint16_t local, uint16_t remote,
++    uint32_t token, uint32_t command, uint32_t response, size_t minimum, size_t maximum)
++{
++	if (!p || !service || !token || !command || !response || minimum > maximum || maximum > sizeof(p->payload)) return EINVAL;
++	memset(p, 0, sizeof(*p));
++	p->service = service; p->local_port = local; p->remote_port = remote;
++	p->token = token; p->command = command; p->response = response;
++	p->minimum = minimum; p->maximum = maximum; p->dsp_status = UINT32_MAX;
++	return 0;
++}
++
++int
++mi8_apr_receive_service(struct mi8_apr_pending *pending, const void *data, size_t length)
++{
++	const uint8_t *p = data;
++	size_t hl, n;
++	uint32_t opcode, status = UINT32_MAX;
++	if (!pending || !p || pending->done || !pending->token) return EINVAL;
++	if (length < 20 || length > 4096) return EPROTO;
++	hl = (size_t)(p[0] >> 4) * 4;
++	if ((p[0] & 15) != 1 || hl < 20 || hl > length ||
++	    ((size_t)p[2] | (size_t)p[3] << 8) != length ||
++	    p[4] != pending->service || p[5] != 4 || p[8] != pending->service || p[9] != 5 ||
++	    ((uint16_t)p[6] | (uint16_t)p[7] << 8) != pending->remote_port ||
++	    ((uint16_t)p[10] | (uint16_t)p[11] << 8) != pending->local_port ||
++	    read32(p + 12) != pending->token) return EPROTO;
++	opcode = read32(p + 16); n = length - hl;
++	if (opcode == BASIC_REPLY) {
++		if (n != 8 || read32(p + hl) != pending->command) return EPROTO;
++		status = read32(p + hl + 4);
++		if (!status && pending->response != BASIC_REPLY) return 0;
++	} else if (opcode != pending->response) return EPROTO;
++	if (n > sizeof(pending->payload) || (opcode != BASIC_REPLY && (n < pending->minimum || n > pending->maximum))) return EPROTO;
++	/* For a requested basic response, its exact eight bytes are mandatory. */
++	if (opcode == BASIC_REPLY && pending->response == BASIC_REPLY && (n < pending->minimum || n > pending->maximum)) return EPROTO;
++	memcpy(pending->payload, p + hl, n); pending->payload_length = n;
++	pending->dsp_status = status;
++	pending->error = opcode != BASIC_REPLY || !status ? 0 : status == 3 ? ENOTSUP : EIO;
++	pending->done = true;
++	return 0;
++}
++
++int
++mi8_apr_service_version(const struct mi8_apr_reply *core, uint32_t service, uint32_t expected)
++{
++	if (!core || core->num_services > MI8_APR_MAX_SERVICES) return EINVAL;
++	for (uint32_t i = 0; i < core->num_services; i++)
++		if (core->services[i].id == service) return core->services[i].version == expected ? 0 : EPROTONOSUPPORT;
++	return ENOENT;
++}
++
++/* Protocol field layouts, independently encoded below (no compiler padding on wire). */
++struct mi8_afe_i2s {
++	uint32_t minor;
++	uint16_t bits, line, stereo, ws;
++	uint32_t rate;
++	uint16_t format, reserved;
++} __attribute__((packed));
++struct mi8_afe_clock {
++	uint32_t version, id, frequency;
++	uint16_t attribute, root;
++	uint32_t enable;
++} __attribute__((packed));
++_Static_assert(sizeof(struct mi8_afe_i2s) == 20, "I2S config is 20 bytes");
++_Static_assert(sizeof(struct mi8_afe_clock) == 20, "AFE clock is 20 bytes");
++
++int
++mi8_afe_encode(unsigned action, uint32_t token, uint8_t *packet, size_t capacity, size_t *bytes)
++{
++	uint8_t payload[48] = { 0 };
++	uint32_t opcode;
++	size_t n = 48;
++	if (action == MI8_AFE_START || action == MI8_AFE_STOP) {
++		opcode = action == MI8_AFE_START ? 0x100e5 : 0x100e6;
++		payload[0] = 6; payload[1] = 0x10; n = 4;
++	} else if (action == MI8_AFE_CONFIG) {
++		opcode = 0x100ef;
++		payload[0] = 6; payload[1] = 0x10; payload[2] = 32;
++		write32(payload + 16, 0x1020c); write32(payload + 20, 0x1020d); payload[24] = 20;
++		write32(payload + 28, 1); payload[32] = 16; payload[34] = 1;
++		payload[36] = 1; payload[38] = 1; write32(payload + 40, 48000);
++	} else if (action == MI8_AFE_CLOCK_ON || action == MI8_AFE_CLOCK_OFF) {
++		opcode = 0x100f3; write32(payload, 32);
++		write32(payload + 16, 0x1028f); write32(payload + 20, 0x10290); payload[24] = 20;
++		write32(payload + 28, 1); write32(payload + 32, 0x106); write32(payload + 36, 1536000);
++		payload[40] = 1; write32(payload + 44, action == MI8_AFE_CLOCK_ON);
++	} else return EINVAL;
++	return mi8_apr_encode_service(4, 0, 0, token, opcode, payload, n, packet, capacity, bytes);
++}
++
 +struct audio_session {
 +	const struct mi8_glink_cfg *io;
 +	struct mi8_glink *link;
 +	struct mi8_apr_reply reply;
++	struct mi8_apr_pending *pending;
++	bool afe_active, afe_event;
 +	bool (*alive)(void *);
 +	void *alive_ctx;
 +	uint32_t token, rejected;
@@ -5710,7 +5822,8 @@ index 0000000000000000000000000000000000000000..d19d798b0440f1b155d1ec821e5053a3
 +receive(void *ctx, const void *packet, size_t length)
 +{
 +	struct audio_session *session = ctx;
-+	if (mi8_apr_receive(&session->reply, packet, length)) {
++	if (session->afe_active && !session->pending) session->afe_event = true;
++	if (session->pending ? mi8_apr_receive_service(session->pending, packet, length) : mi8_apr_receive(&session->reply, packet, length)) {
 +		/* One bounded diagnostic for the first rejected packet. */
 +		if (!session->rejected) {
 +			const uint8_t *q = packet; uint32_t w[8] = { 0 };
@@ -5760,8 +5873,131 @@ index 0000000000000000000000000000000000000000..d19d798b0440f1b155d1ec821e5053a3
 +
 +#define TELL(s, ...) do { if ((s).io->log) (s).io->log((s).io->ctx, __VA_ARGS__); } while (0)
 +
-+bool
-+mi8_audio_run(const struct mi8_glink_cfg *cfg, bool (*alive)(void *), void *alive_ctx)
++static int
++service_request(struct audio_session *s, const uint8_t *packet, size_t bytes,
++    struct mi8_apr_pending *pending, bool cleanup, bool *submitted)
++{
++	uint64_t deadline = time_us(s) + 1000000;
++	int error;
++	*submitted = false;
++	s->pending = pending;
++	error = mi8_glink_raw_send(s->link, packet, bytes, 500);
++	if (error) goto out;
++	*submitted = true;
++	while (!pending->done && time_us(s) < deadline) {
++		struct mi8_glink_channel_status status;
++		if (!cleanup && !still_alive(s)) { error = ENOTCONN; goto out; }
++		mi8_glink_poll_once(s->link);
++		error = mi8_glink_raw_status(s->link, &status);
++		if (error) goto out;
++		if (!pending->done) s->io->sleep_us(s->io->ctx, 1000);
++	}
++	error = pending->done ? pending->error : ETIMEDOUT;
++out:
++	s->pending = NULL;
++	return error;
++}
++
++static int
++afe_command(struct audio_session *s, unsigned action, bool cleanup, bool *uncertain)
++{
++	static const char *const names[] = { "invalid", "set i2s cfg", "clock 1536000 on", "port 0x1006 start", "port 0x1006 stop", "clock off" };
++	uint8_t packet[68];
++	struct mi8_apr_pending pending;
++	size_t bytes;
++	bool submitted = false;
++	int error = mi8_afe_encode(action, ++s->token, packet, sizeof(packet), &bytes);
++	*uncertain = false;
++	if (error) return error;
++	error = mi8_apr_expect(&pending, 4, 0, 0, s->token, read32(packet + 16), BASIC_REPLY, 8, 8);
++	if (error) return error;
++	error = service_request(s, packet, bytes, &pending, cleanup, &submitted);
++	*uncertain = submitted && !pending.done;
++	if (!error) TELL((*s), "mi8rp: 10: afe %s status=0\n", names[action]);
++	else TELL((*s), "mi8rp: 10: afe %s errno=%d status=%#x%s\n", names[action], error, pending.dsp_status, *uncertain ? " Pending completion" : "");
++	return error;
++}
++
++static bool
++afe_sequence(struct audio_session *s, const struct mi8_audio_pin_ops *pins)
++{
++	uint32_t cfg[4], io[4], at_cfg, at_io, amp[3];
++	static const unsigned amp_pins[] = { 76, 87, 30 };
++	unsigned changed = 0;
++	bool clock_attempted = false, started = false, uncertain = false;
++	bool success = false, clean = true;
++	int error = mi8_apr_service_version(&s->reply, 4, 2);
++	if (error) { TELL((*s), "mi8rp: 10: AFE version mismatch/missing errno=%d; no pins touched\n", error); return false; }
++	if (!pins || !pins->read || !pins->write) return false;
++	for (unsigned i = 0; i < 3; i++) {
++		if (!pins->read(pins->ctx, amp_pins[i], &at_cfg, &amp[i])) {
++			TELL((*s), "mi8rp: 10: amp pin %u read failed; no pins touched\n", amp_pins[i]); return false;
++		}
++	}
++	TELL((*s), "mi8rp: 10: amp pins: reset76=%u spkid87=%u irq30=%u (read only)\n", amp[0] & 1, amp[1] & 1, amp[2] & 1);
++	if (amp[0] & 1) { TELL((*s), "mi8rp: 10: amp reset is not low; AFE skipped\n"); return false; }
++	for (unsigned i = 0; i < 4; i++) {
++		if (!pins->read(pins->ctx, 58 + i, &cfg[i], &io[i])) {
++			TELL((*s), "mi8rp: 10: pin %u read failed; no pins touched\n", 58 + i); return false;
++		}
++	}
++	TELL((*s), "mi8rp: 10: pins 58..61 before CFG=%#x/%#x/%#x/%#x IO=%#x/%#x/%#x/%#x\n",
++	    cfg[0], cfg[1], cfg[2], cfg[3], io[0], io[1], io[2], io[3]);
++	s->afe_active = true;
++	for (unsigned i = 0; i < 4; i++) {
++		/* DT: no pull, function1, 8mA; only clocks have output-high.
++		 * The data nodes do not request an OE change; preserve theirs. */
++		uint32_t next = (cfg[i] & ~(3u | (15u << 2) | (7u << 6))) | 4u | (3u << 6);
++		uint32_t level = io[i];
++		if (i < 2) { next |= 1u << 9; level |= 2; }
++		changed = i + 1; /* A failed write may have partially reached hardware. */
++		if (!pins->write(pins->ctx, 58 + i, next, level) ||
++		    !pins->read(pins->ctx, 58 + i, &at_cfg, &at_io) || at_cfg != next || ((at_io ^ level) & 2)) {
++			TELL((*s), "mi8rp: 10: pin %u qua_mi2s write/readback failed\n", 58 + i); goto out;
++		}
++	}
++	TELL((*s), "mi8rp: 10: pins 58..61 qua_mi2s readback verified; MCLK57 unchanged\n");
++	/* Linux machine startup enables IBIT before q6afe_port_start configures I2S. */
++	clock_attempted = true;
++	if (afe_command(s, MI8_AFE_CLOCK_ON, false, &uncertain)) goto out;
++	if (afe_command(s, MI8_AFE_CONFIG, false, &uncertain)) goto out;
++	error = afe_command(s, MI8_AFE_START, false, &uncertain);
++	started = !error || uncertain;
++	if (error) goto out;
++	{
++		uint64_t until = time_us(s) + 2000000;
++		while (time_us(s) < until) {
++			struct mi8_glink_channel_status status;
++			if (!still_alive(s)) { TELL((*s), "mi8rp: 10: DSP stopped during hold\n"); goto out; }
++			mi8_glink_poll_once(s->link);
++			if (s->afe_event) { TELL((*s), "mi8rp: 10: unexpected APR event during hold\n"); goto out; }
++			if (mi8_glink_raw_status(s->link, &status)) { TELL((*s), "mi8rp: 10: channel lost during hold\n"); goto out; }
++			s->io->sleep_us(s->io->ctx, 1000);
++		}
++	}
++	success = true;
++out:
++	if (started && afe_command(s, MI8_AFE_STOP, true, &uncertain)) {
++		clean = false; TELL((*s), "mi8rp: 10: Pending DEVICE_STOP; DSP shutdown still required\n");
++	}
++	if (clock_attempted && afe_command(s, MI8_AFE_CLOCK_OFF, true, &uncertain)) {
++		clean = false; TELL((*s), "mi8rp: 10: Pending clock disable; DSP shutdown still required\n");
++	}
++	while (changed) {
++		unsigned i = --changed;
++		if (!pins->write(pins->ctx, 58 + i, cfg[i], io[i]) ||
++		    !pins->read(pins->ctx, 58 + i, &at_cfg, &at_io) || at_cfg != cfg[i] || ((at_io ^ io[i]) & 2)) {
++			clean = false; TELL((*s), "mi8rp: 10: Pending pin %u CFG/output latch restore\n", 58 + i);
++		}
++	}
++	if (clean) TELL((*s), "mi8rp: 10: pins restored (CFG and output latches)\n");
++	TELL((*s), "mi8rp: step 10 AFE %s\n", success && clean ? "completed" : clean ? "FAILED; cleanup acknowledged" : "FAILED; cleanup Pending");
++	s->afe_active = false;
++	return success && clean;
++}
++
++static bool
++audio_run(const struct mi8_glink_cfg *cfg, bool (*alive)(void *), void *alive_ctx, const struct mi8_audio_pin_ops *pins)
 +{
 +	static const uint32_t intents[20] = {
 +		512, 512, 512, 512, 512, 512, 512, 512, 512, 512,
@@ -5832,21 +6068,94 @@ index 0000000000000000000000000000000000000000..d19d798b0440f1b155d1ec821e5053a3
 +	if (found != 3) { phase = "required services missing"; error = ENOENT; goto out; }
 +	TELL(session, "mi8rp: 9: parsed %u complete service entries, rejected %u unrelated/bad packets\n", session.reply.num_services, session.rejected);
 +	success = true;
++	if (pins && !afe_sequence(&session, pins)) { success = false; phase = "AFE step10"; error = EIO; }
 +out:
 +	if (!success) TELL(session, "mi8rp: 9: failed at %s errno=%d version=%u peer=%u rejected=%u\n", phase, error, status.negotiated, status.remote_cid, session.rejected);
 +	closed = mi8_glink_raw_close(session.link, 1000);
++	if (pins && closed) TELL(session, "mi8rp: 10: Pending GLINK_CLOSE_ACK errno=%d; DSP shutdown follows\n", closed);
 +	TELL(session, "mi8rp: 9: channel close errno=%d; DSP shutdown follows\n", closed);
 +	mi8_glink_destroy(session.link);
 +	return success && !closed;
 +}
++
++/* The step9 entry and its log/timing policy remain unchanged. */
++bool
++mi8_audio_run(const struct mi8_glink_cfg *cfg, bool (*alive)(void *), void *ctx)
++{
++	return audio_run(cfg, alive, ctx, NULL);
++}
++
++#ifndef MI8_GLINK_HOST_TEST
++#include <mach/mach_types.h>
++#include <mach/vm_param.h>
++#include <vm/vm_kern.h>
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern void ml_io_unmap(vm_offset_t, vm_size_t);
++struct native_audio_pins { vm_offset_t pages[7]; };
++static const unsigned native_pin_numbers[] = { 58, 59, 60, 61, 76, 87, 30 };
++
++static vm_offset_t
++native_pin_page(struct native_audio_pins *p, unsigned pin)
++{
++	for (unsigned i = 0; i < 7; i++) if (pin == native_pin_numbers[i]) {
++		/* Same per-pin TLMM mapping as mi8_fts; Linux SDM845 tiles. */
++		if (!p->pages[i]) p->pages[i] = ml_io_map(0x03400000ul +
++		    (i < 4 ? 0x00500000ul : 0x00100000ul) + pin * 0x1000ul, 0x1000);
++		return p->pages[i];
++	}
++	return 0;
++}
++
++static bool
++native_pin_read(void *ctx, unsigned pin, uint32_t *cfg, uint32_t *io)
++{
++	vm_offset_t at = native_pin_page(ctx, pin);
++	if (!at) return false;
++	*cfg = pin >= 58 && pin <= 61 ? *(volatile uint32_t *)at : 0;
++	*io = *(volatile uint32_t *)(at + 4);
++	return true;
++}
++
++static bool
++native_pin_write(void *ctx, unsigned pin, uint32_t cfg, uint32_t io)
++{
++	vm_offset_t at;
++	if (pin < 58 || pin > 61) return false;
++	at = native_pin_page(ctx, pin);
++	if (!at) return false;
++	/* Output latch first, then OE/mux, like mi8_fts:pin_set. */
++	*(volatile uint32_t *)(at + 4) = io;
++	__asm__ volatile("dsb sy" ::: "memory");
++	*(volatile uint32_t *)at = cfg;
++	__asm__ volatile("dsb sy" ::: "memory");
++	return true;
++}
++#endif
++
++bool
++mi8_audio_run_afe(const struct mi8_glink_cfg *cfg, bool (*alive)(void *), void *ctx,
++    const struct mi8_audio_pin_ops *pins)
++{
++#ifndef MI8_GLINK_HOST_TEST
++	struct native_audio_pins native = { 0 };
++	struct mi8_audio_pin_ops ops = { native_pin_read, native_pin_write, &native };
++	bool result;
++	if (pins) return audio_run(cfg, alive, ctx, pins);
++	result = audio_run(cfg, alive, ctx, &ops);
++	for (unsigned i = 0; i < 7; i++) if (native.pages[i]) ml_io_unmap(native.pages[i], 0x1000);
++	return result;
++#else
++	return pins && audio_run(cfg, alive, ctx, pins);
++#endif
++}
 diff --git a/bsd/dev/mi8_audio.h b/bsd/dev/mi8_audio.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..83e1c1b33dfb3a05add4a0db67ca5a880a457250
+index 0000000000000000000000000000000000000000..43386b9ab0d51a1864305486a25c1384ab8562ee
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.h
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,50 @@
 +/* SPDX-License-Identifier: MIT */
-+/* Core-service APR only. No audio ports, buffers or amplifier operations. */
++/* APR core handshake and explicit AFE MI2S control. No PCM buffers or amplifier operations. */
 +#ifndef MI8_AUDIO_H
 +#define MI8_AUDIO_H
 +#include "mi8_glink.h"
@@ -5865,6 +6174,32 @@ index 0000000000000000000000000000000000000000..83e1c1b33dfb3a05add4a0db67ca5a88
 +void mi8_apr_begin(struct mi8_apr_reply *, uint32_t request, uint32_t token);
 +/* Invalid/unrelated replies leave the pending request untouched. */
 +int mi8_apr_receive(struct mi8_apr_reply *, const void *, size_t);
++/* Bounded generic APPS->ADSP transactions; response payload is never truncated. */
++struct mi8_apr_pending {
++	uint8_t service;
++	uint16_t local_port, remote_port;
++	uint32_t token, command, response, dsp_status;
++	size_t minimum, maximum, payload_length;
++	bool done;
++	int error;
++	uint8_t payload[512];
++};
++int mi8_apr_encode_service(uint8_t, uint16_t, uint16_t, uint32_t, uint32_t,
++    const void *, size_t, uint8_t *, size_t, size_t *);
++int mi8_apr_expect(struct mi8_apr_pending *, uint8_t, uint16_t, uint16_t,
++    uint32_t, uint32_t, uint32_t, size_t, size_t);
++int mi8_apr_receive_service(struct mi8_apr_pending *, const void *, size_t);
++int mi8_apr_service_version(const struct mi8_apr_reply *, uint32_t, uint32_t);
++enum { MI8_AFE_CONFIG = 1, MI8_AFE_CLOCK_ON, MI8_AFE_START, MI8_AFE_STOP, MI8_AFE_CLOCK_OFF };
++int mi8_afe_encode(unsigned, uint32_t, uint8_t *, size_t, size_t *);
++/* read accepts only the four MI2S pins and three read-only amp observations;
++ * write accepts 58..61 only. NULL selects native TLMM access in kernel builds. */
++struct mi8_audio_pin_ops {
++	bool (*read)(void *, unsigned, uint32_t *, uint32_t *);
++	bool (*write)(void *, unsigned, uint32_t, uint32_t);
++	void *ctx;
++};
++bool mi8_audio_run_afe(const struct mi8_glink_cfg *, bool (*)(void *), void *, const struct mi8_audio_pin_ops *);
 +/* Synchronous and bounded; caller owns DSP boot/shutdown. cfg callbacks must
 + * remain valid until return. alive is polled for fatal/lifecycle cancellation. */
 +bool mi8_audio_run(const struct mi8_glink_cfg *, bool (*alive)(void *), void *);
@@ -11751,10 +12086,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..06f4d3541220f70ab3f7074000606fb73ed9705f
+index 0000000000000000000000000000000000000000..a64553b81f3d2a40077b171d243b919432ba955d
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4174 @@
+@@ -0,0 +1,4187 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -13212,6 +13547,7 @@ index 0000000000000000000000000000000000000000..06f4d3541220f70ab3f7074000606fb7
 +} adsp_image;
 +
 +static bool adsp_started;
++static bool adsp_last_stop_acked, adsp_last_aop_off;
 +
 +static bool
 +step_header(void)
@@ -13569,6 +13905,8 @@ index 0000000000000000000000000000000000000000..06f4d3541220f70ab3f7074000606fb7
 +
 +	say("mi8rp: %s: the audio DSP is asked to stop, then TrustZone to shut it down\n", why);
 +	acked = dsp_ask_to_stop(5000);
++	adsp_last_stop_acked = acked;
++	adsp_last_aop_off = false;
 +	result = scm("to shut the audio DSP down", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_ADSP, 0, 0, 0, &answer);
 +	if (result != 0 || answer != 0) {
 +		say("mi8rp: TRUSTZONE DOES NOT SHUT THE AUDIO DSP DOWN (%d, %#llx)\n", result, answer);
@@ -13576,7 +13914,7 @@ index 0000000000000000000000000000000000000000..06f4d3541220f70ab3f7074000606fb7
 +	}
 +	say("mi8rp: THE AUDIO DSP IS SHUT DOWN (%s its stop)\n", acked ? "after it acknowledged" : "WITHOUT its acknowledgement of");
 +	adsp_started = false;
-+	qmp_send("{class: image, res: load_state, name: adsp, val: off}");
++	adsp_last_aop_off = qmp_send("{class: image, res: load_state, name: adsp, val: off}");
 +	return true;
 +}
 +
@@ -15669,7 +16007,7 @@ index 0000000000000000000000000000000000000000..06f4d3541220f70ab3f7074000606fb7
 +}
 +
 +static bool
-+adsp_audio_handshake(void)
++adsp_audio_handshake(uint32_t last)
 +{
 +	uint64_t until = now_us() + 4000000ull;
 +	uint32_t offset = 0, size = 0;
@@ -15685,7 +16023,8 @@ index 0000000000000000000000000000000000000000..06f4d3541220f70ab3f7074000606fb7
 +	cfg.name = "lpass"; cfg.remote_pid = SMEM_ADSP; cfg.ctx = &adsp_remote;
 +	cfg.smem_item = audio_item; cfg.smem_read = svc_read; cfg.smem_write32 = svc_write32;
 +	cfg.ring = audio_ring; cfg.sleep_us = svc_sleep_us; cfg.now_us = svc_now_us; cfg.log = svc_log;
-+	return mi8_audio_run(&cfg, audio_alive, &adsp_remote);
++	return last >= 10 ? mi8_audio_run_afe(&cfg, audio_alive, &adsp_remote, NULL) :
++	    mi8_audio_run(&cfg, audio_alive, &adsp_remote);
 +}
 +
 +/* The partitions are there some time after the system starts; steps 5 and on run on a thread that waits for them. */
@@ -15708,7 +16047,7 @@ index 0000000000000000000000000000000000000000..06f4d3541220f70ab3f7074000606fb7
 +		step_aop();
 +	}
 +	if (last >= 7 && step_header() && step_image() && last >= 8) {
-+		bool up, apr = false;
++		bool up, apr = false, down = false, started_here;
 +
 +		if (last >= 9 && !adsp_glink_prepare()) {
 +			say("mi8rp: 9: preparation failed; ADSP not started\n");
@@ -15717,17 +16056,26 @@ index 0000000000000000000000000000000000000000..06f4d3541220f70ab3f7074000606fb7
 +			return;
 +		}
 +		up = step_start();
-+		if (up && last >= 9) apr = adsp_audio_handshake();
++		if (up && last >= 9) apr = adsp_audio_handshake(last);
++		started_here = adsp_started;
 +		if (adsp_started) {
-+			bool down = dsp_shutdown(up ? "the watch is over" : "it did not come up");
++			down = dsp_shutdown(up ? "the watch is over" : "it did not come up");
 +			/* The established step8 failure behavior is unchanged. Step9
 +			 * always also attempts AOP off when TrustZone refuses shutdown. */
-+			if (last >= 9 && !down) qmp_send("{class: image, res: load_state, name: adsp, val: off}");
++			if (last >= 9 && !down) adsp_last_aop_off = qmp_send("{class: image, res: load_state, name: adsp, val: off}");
 +		} else if (last >= 9) {
 +			qmp_send("{class: image, res: load_state, name: adsp, val: off}");
 +		}
-+		if (last >= 9) say("mi8rp: step 9 APR %s; see channel/stop/PAS results above\n", apr ? "completed" : "FAILED");
-+		say("mi8rp: step 8 done%s\n", up ? ": the audio DSP came up and was stopped" : ": THE AUDIO DSP DID NOT COME UP");
++		if (last >= 10) {
++			if (started_here && !adsp_last_stop_acked) say("mi8rp: 10: Pending ADSP stop-ack\n");
++			if (started_here && !down) say("mi8rp: 10: Pending PAS shutdown\n");
++			if (started_here && !adsp_last_aop_off) say("mi8rp: 10: Pending AOP off\n");
++			if (apr && down && adsp_last_stop_acked && adsp_last_aop_off)
++				say("mi8rp: step 10 completed (AFE/close/stop/PAS/AOP acknowledged)\n");
++			else say("mi8rp: step 10 not completed; see failure/Pending results above\n");
++		}
++		if (last == 9) say("mi8rp: step 9 APR %s; see channel/stop/PAS results above\n", apr ? "completed" : "FAILED");
++		if (last < 10) say("mi8rp: step 8 done%s\n", up ? ": the audio DSP came up and was stopped" : ": THE AUDIO DSP DID NOT COME UP");
 +	}
 +	thread_terminate(current_thread());
 +}

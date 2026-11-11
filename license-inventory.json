@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "e17569d071adfa53f803ea73802facd090dc86dafe8af1b562106c3b99b4b84b"
+      "sha256": "8d2c24a0b9ba7a20ae0122230ed47496c6370be3076045a781c4170ff77738b8"
     },
     {
       "component": "xnu-mi8",
@@ -711,16 +711,16 @@
       "path": "bsd/dev/mi8_audio.c",
       "upstream_file_exists": false,
       "license": "MIT",
-      "basis": "本项目新写，参考 Linux apr.c/q6core.c 的协议，未复制代码",
-      "sha256": "9d96d5c1f84f52baed624055470f22d712375d34bf26984cd134580d6df591e9"
+      "basis": "本项目新写，参考 Linux/Android apr/q6core/q6afe 协议与 SDM845 设备树寄存器字段，未复制驱动实现",
+      "sha256": "829f3cb7159a1bafd215aa874f12bebaed48e7f4ba567be0c8e04e4ed1fcd4d1"
     },
     {
       "component": "xnu-mi8",
       "path": "bsd/dev/mi8_audio.h",
       "upstream_file_exists": false,
       "license": "MIT",
-      "basis": "本项目新写，参考 Linux apr.c/q6core.c 的协议，未复制代码",
-      "sha256": "eaf9c9a449a7a93cbc440ea6ed52c55445d554b682f4a37119f13d20f2b79fd4"
+      "basis": "本项目新写，参考 Linux/Android apr/q6core/q6afe 协议与 SDM845 设备树寄存器字段，未复制驱动实现",
+      "sha256": "954efd965dec1a1195945265fa5c53fe6b2cc7bb959ea7a410e9de65b4d5351c"
     }
   ]
 }

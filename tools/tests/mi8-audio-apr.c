@@ -22,7 +22,12 @@ struct peer {
     unsigned local_ids[64], local_sizes[64], intents;
     unsigned bad_packets;
     unsigned logs, error_logs, unsupported_logs, intent_logs, rejected_logs, ignored_logs;
-    bool header8;
+    bool header8, afe_mode, bad_afe_version, amp_high, drop_start, drop_stop, drop_off;
+    unsigned fail_action, afe_count, pin_writes, pending_logs;
+    bool fail_pin_write, fail_restore, hold_event, die_hold;
+    unsigned char actions[16];
+    uint64_t start_at, held_us;
+    uint32_t pin_cfg[4], pin_io[4], saved_cfg[4], saved_io[4];
     bool running, offer_remote, grant, reply, legacy, bad_version, state_zero;
     bool hold_close, fragment_reply, silent_open, malformed_first, no_reuse;
     unsigned char packet[16384];
@@ -52,13 +57,21 @@ static void open_peer(struct peer *p,const char *name) {
 static void respond(struct peer *p,const unsigned char *req) {
     unsigned char b[4096]={0}, frame[4200];unsigned n=24;uint32_t op=rd(req+16);
     b[0]=0x51;b[1]=0;b[4]=3;b[5]=4;b[8]=3;b[9]=5;memcpy(b+12,req+12,4);
-    if(op==0x1290c) {wr(b+16,0x1290d);wr(b+20,p->state_zero?0:1);}
+    if(req[4]==4){
+        unsigned action=op==0x100ef?1:op==0x100e5?3:op==0x100e6?4:rd(req+64)?2:5;
+        CHECK(p->afe_count<16);p->actions[p->afe_count++]=(unsigned char)action;
+        if(action==3)p->start_at=p->now;
+        if(action==4)p->held_us=p->now-p->start_at;
+        if((action==3&&p->drop_start)||(action==4&&p->drop_stop)||(action==5&&p->drop_off))return;
+        b[4]=b[8]=4;n=28;wr(b+16,0x110e8);wr(b+20,op);wr(b+24,p->fail_action==action?1:0);
+    }
+    else if(op==0x1290c) {wr(b+16,0x1290d);wr(b+20,p->state_zero?0:1);}
     else if(op==0x1292c && p->legacy) {n=28;wr(b+16,0x110e8);wr(b+20,0x1292c);wr(b+24,3);}
     else {
         unsigned count=40, base=p->legacy?28:40, width=p->legacy?8:12;
         n=base+width*count;wr(b+16,p->legacy?0x12906:0x1292d);
         wr(b+base-4,p->bad_version?count+1:count);
-        for(unsigned i=0;i<count;i++){wr(b+base+width*i,i+1);wr(b+base+width*i+4,0x100+i+1);if(width==12)wr(b+base+width*i+8,0x200+i+1);}
+        for(unsigned i=0;i<count;i++){wr(b+base+width*i,i+1);wr(b+base+width*i+4,p->afe_mode&&i==3?(p->bad_afe_version?9:2):0x100+i+1);if(width==12)wr(b+base+width*i+8,0x200+i+1);}
     }
     if(p->header8){memmove(b+32,b+20,n-20);memset(b+20,0,12);n+=12;b[0]=0x81;}
     b[2]=n;b[3]=n>>8;
@@ -88,7 +101,9 @@ static void turn(struct peer *p) {
         CHECK(size<=sizeof(b));for(unsigned i=16;i<size;i++)b[i]=p->mem[TX+(tail+i)%FIFO];
         size=(size+7)&~7u;tail=(tail+size)%FIFO;wr(p->mem+DESC,tail);
         switch(cmd){
-        case 0:control(p,0,1,p->no_reuse?0:1);control(p,1,1,p->no_reuse?0:1);if(!p->silent_open)open_peer(p,p->local_cid==1?"IPCRTR":"apr_audio_svc");break;
+        case 0:
+            if(p->afe_mode)for(unsigned i=0;i<8;i++){unsigned saved=p->remote_cid;p->remote_cid=100+i;open_peer(p,"unsupported");p->remote_cid=saved;}
+            control(p,0,1,p->no_reuse?0:1);control(p,1,1,p->no_reuse?0:1);if(!p->silent_open)open_peer(p,p->local_cid==1?"IPCRTR":"apr_audio_svc");break;
         case 2:p->opens++;CHECK(cid==p->local_cid);control(p,4,cid,0);if(p->offer_remote)intent(p,0,16384);break;
         case 5:
             for(unsigned i=0;i<arg;i++){CHECK(p->intents<64);p->local_sizes[p->intents]=rd(b+8+8*i);p->local_ids[p->intents]=rd(b+12+8*i);p->intents++;}
@@ -102,10 +117,12 @@ static void turn(struct peer *p) {
             if(!rd(b+12)){
                 p->received++;p->packet_size=p->taken;control(p,14,p->remote_cid,arg);
                 if(p->local_cid==1 && p->taken>=32){if(rd(p->packet+4)==2)p->qrtr_hello++;}
-                else if(p->reply && p->taken==20)respond(p,p->packet);
+                else if(p->reply && (p->taken==20||p->packet[4]==4))respond(p,p->packet);
                 p->taken=0;
             }break;
-        case 3:p->closes++;if(!p->hold_close)control(p,11,cid,0);break;
+        case 3:
+            if(p->afe_mode)for(unsigned i=0;i<4;i++)if(!(p->fail_restore&&i==1))CHECK(p->pin_cfg[i]==p->saved_cfg[i]&&p->pin_io[i]==p->saved_io[i]);
+            p->closes++;if(!p->hold_close)control(p,11,cid,0);break;
         case 14:if(p->no_reuse)p->reused_unnegotiated++;break;
         default:break;
         }
@@ -118,10 +135,12 @@ static bool item(void *v,uint32_t id,uint32_t *base,uint32_t *size) {
 static void read_mem(void *v,uint32_t at,void *b,uint32_t n){struct peer*p=v;CHECK(at+n<=sizeof(p->mem));memcpy(b,p->mem+at,n);}
 static void write_mem(void *v,uint32_t at,uint32_t n){struct peer*p=v;CHECK(at+4<=sizeof(p->mem));wr(p->mem+at,n);}
 static void ring(void*v){turn(v);}
-static void sleep_us(void*v,uint32_t us){struct peer*p=v;p->now+=us;turn(p);}
+static void sleep_us(void*v,uint32_t us){struct peer*p=v;p->now+=us;
+    if(p->hold_event&&p->afe_count&&p->actions[p->afe_count-1]==3&&p->now>p->start_at){p->hold_event=false;unsigned char frame[40]={0};hdr(frame,9,p->remote_cid,p->local_ids[0]);wr(frame+8,20);frame[16]=0x51;frame[18]=20;frame[20]=4;frame[21]=4;frame[24]=4;frame[25]=5;peer_push(p,frame,36);}
+    turn(p);}
 static uint64_t now_us(void*v){return ((struct peer*)v)->now;}
 static void log_line(void*v,const char*fmt,...){
-    struct peer*p=v;char line[512];va_list ap;va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);p->logs++;
+    struct peer*p=v;char line[512];va_list ap;va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);p->logs++;if(strstr(line,"Pending"))p->pending_logs++;
     if(strstr(line,"GLINK error:"))p->error_logs++;
     if(strstr(line,"unsupported remote channel"))p->unsupported_logs++;
     if(strstr(line,"remote intent id"))p->intent_logs++;
@@ -130,7 +149,7 @@ static void log_line(void*v,const char*fmt,...){
     }
     if(strstr(line,"ignored 1 excess remote intent"))p->ignored_logs++;
 }
-static bool alive(void*v){(void)v;return true;}
+static bool alive(void*v){struct peer*p=v;return !(p->die_hold&&p->afe_count&&p->actions[p->afe_count-1]==3&&p->now-p->start_at>=10000);}
 static struct mi8_glink_cfg cfg(struct peer *p) {
     struct mi8_glink_cfg c={0};c.name="synthetic";c.remote_pid=2;c.smem_item=item;c.smem_read=read_mem;c.smem_write32=write_mem;c.ring=ring;c.sleep_us=sleep_us;c.now_us=now_us;c.log=log_line;c.ctx=p;return c;
 }
@@ -273,4 +292,80 @@ static void test_log_budget(void){
     CHECK(mi8_audio_run(&c,alive,&p));CHECK(p.rejected_logs==1&&p.logs<40&&!p.intent_logs);printf("bounded-log flow: %u lines, %u rejected diagnostic\n",p.logs,p.rejected_logs);
     init(&p);p.reply=true;p.header8=true;p.legacy=true;c=cfg(&p);CHECK(mi8_audio_run(&c,alive,&p));CHECK(p.logs<40);
 }
-int main(void){test_many_intents();test_long_headers();test_log_budget();test_raw();test_codec();test_flow();test_qrtr_default();printf("SELFTEST PASS %u/%u\n",checks,checks);return 0;}
+static bool pin_read(void*v,unsigned pin,uint32_t*cfg,uint32_t*io){
+    struct peer*p=v;
+    if(pin>=58&&pin<=61){*cfg=p->pin_cfg[pin-58];*io=p->pin_io[pin-58];return true;}
+    CHECK(pin==76||pin==87||pin==30);*cfg=0;*io=pin==76&&p->amp_high?1:0;return true;
+}
+static bool pin_write(void*v,unsigned pin,uint32_t cfg,uint32_t io){
+    struct peer*p=v;CHECK(pin>=58&&pin<=61);unsigned i=pin-58;p->pin_writes++;
+    if(cfg==p->saved_cfg[i]&&p->afe_count)CHECK(p->actions[p->afe_count-1]==5||p->fail_action==1);
+    if(p->fail_pin_write&&pin==60){p->fail_pin_write=false;return false;}
+    if(p->fail_restore&&pin==59&&cfg==p->saved_cfg[i])return false;
+    p->pin_cfg[i]=cfg;p->pin_io[i]=io;return true;
+}
+static void test_generic_apr(void){
+    unsigned char b[1024],body[8]={0};size_t bytes;struct mi8_apr_pending r;
+    CHECK(mi8_apr_encode_service(4,0x12,0x34,7,0x100e5,body,4,b,sizeof(b),&bytes)==0&&bytes==24);
+    CHECK(b[0]==0x50&&b[1]==2&&b[4]==4&&b[5]==5&&b[6]==0x12&&b[8]==4&&b[9]==4&&b[10]==0x34);
+    for(unsigned kind=0;kind<12;kind++){
+        reply_header(b,40,7,0x110e8);b[0]=0x81;b[4]=b[8]=4;b[6]=0x34;b[10]=0x12;wr(b+32,0x100e5);wr(b+36,0);
+        CHECK(mi8_apr_expect(&r,4,0x12,0x34,7,0x100e5,0x110e8,8,8)==0);
+        if(kind==1)b[12]=8;
+        if(kind==2)b[4]=3;
+        if(kind==3)b[6]=0;
+        if(kind==4)b[9]=4;
+        if(kind==5)wr(b+32,0x100e6);
+        if(kind==6){b[2]=39;}
+        if(kind==7){b[2]=41;}
+        if(kind==8)b[0]=0x41;
+        if(kind==9)b[0]=0x82;
+        if(kind==10)wr(b+36,1);
+        if(kind==11)wr(b+36,UINT32_MAX);
+        int e=mi8_apr_receive_service(&r,b,kind==6?39:kind==7?41:40);
+        if(kind==0)CHECK(e==0&&r.done&&!r.error&&r.dsp_status==0&&r.payload_length==8);
+        else if(kind>=10)CHECK(e==0&&r.done&&r.error==EIO&&r.dsp_status==(kind==10?1:UINT32_MAX));
+        else CHECK(e!=0&&!r.done);
+    }
+    /* Custom service responses use their declared payload bounds too. */
+    for(unsigned n=3;n<=5;n++){
+        reply_header(b,32+n,7,0x22222);b[0]=0x81;b[4]=b[8]=4;
+        CHECK(mi8_apr_expect(&r,4,0,0,7,0x12345,0x22222,4,4)==0);
+        int e=mi8_apr_receive_service(&r,b,32+n);CHECK(n==4?(e==0&&r.done&&r.payload_length==4):(e!=0&&!r.done));
+    }
+    CHECK(mi8_apr_expect(&r,4,0,0,7,1,2,0,513)!=0);
+    struct mi8_apr_reply core={0};core.num_services=1;core.services[0].id=4;core.services[0].version=2;
+    CHECK(mi8_apr_service_version(&core,4,2)==0);CHECK(mi8_apr_service_version(&core,4,1)!=0);CHECK(mi8_apr_service_version(&core,7,1)!=0);
+}
+static void test_afe_bytes(void){
+    static const unsigned char config[68]={0x50,2,68,0,4,5,0,0,4,4,0,0,7,0,0,0,0xef,0,1,0,6,0x10,32,0,0,0,0,0,0,0,0,0,0,0,0,0,0x0c,2,1,0,0x0d,2,1,0,20,0,0,0,1,0,0,0,16,0,1,0,1,0,1,0,0x80,0xbb,0,0,0,0,0,0};
+    static const unsigned char clock[68]={0x50,2,68,0,4,5,0,0,4,4,0,0,7,0,0,0,0xf3,0,1,0,32,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0x8f,2,1,0,0x90,2,1,0,20,0,0,0,1,0,0,0,6,1,0,0,0,0x70,0x17,0,1,0,0,0,1,0,0,0};
+    static const unsigned char start[24]={0x50,2,24,0,4,5,0,0,4,4,0,0,7,0,0,0,0xe5,0,1,0,6,0x10,0,0};
+    unsigned char got[68],expected[68];size_t n;
+    for(unsigned a=1;a<=5;a++){
+        CHECK(mi8_afe_encode(a,7,got,sizeof(got),&n)==0);
+        if(a==1)CHECK(n==68&&!memcmp(got,config,n));
+        else if(a==2||a==5){memcpy(expected,clock,68);if(a==5)expected[64]=0;CHECK(n==68&&!memcmp(got,expected,n));}
+        else {memcpy(expected,start,24);if(a==4)expected[16]=0xe6;CHECK(n==24&&!memcmp(got,expected,n));}
+    }
+}
+static void test_afe_flow(void){
+    unsigned max_logs=0;
+    for(unsigned scenario=0;scenario<14;scenario++){
+        struct peer p;init(&p);p.reply=true;p.header8=true;p.afe_mode=true;
+        for(unsigned i=0;i<4;i++){p.saved_cfg[i]=p.pin_cfg[i]=0x800+i;p.saved_io[i]=p.pin_io[i]=i&1;}
+        p.fail_action=scenario<=3?scenario:0;p.drop_stop=scenario==4;p.drop_off=scenario==5;p.bad_afe_version=scenario==6;p.amp_high=scenario==7;p.fail_pin_write=scenario==8;p.drop_start=scenario==9;p.fail_restore=scenario==10;p.hold_event=scenario==11;p.die_hold=scenario==12;p.hold_close=scenario==13;
+        struct mi8_glink_cfg c=cfg(&p);struct mi8_audio_pin_ops pins={pin_read,pin_write,&p};
+        bool ok=mi8_audio_run_afe(&c,alive,&p,&pins);if(ok!=(scenario==0))fprintf(stderr,"AFE scenario %u unexpected result %d\n",scenario,ok);CHECK(ok==(scenario==0));CHECK(p.closes==1&&p.logs<40);
+        for(unsigned i=0;i<4;i++)CHECK((scenario==10&&i==1)||(p.pin_cfg[i]==p.saved_cfg[i]&&p.pin_io[i]==p.saved_io[i]));
+        if(scenario==0){static const unsigned char sequence[]={2,1,3,4,5};CHECK(p.afe_count==5&&!memcmp(p.actions,sequence,5)&&p.held_us>=2000000&&!p.pending_logs);}
+        if(scenario==1){static const unsigned char sequence[]={2,1,5};CHECK(p.afe_count==3&&!memcmp(p.actions,sequence,3));}
+        if(scenario==2){static const unsigned char sequence[]={2,5};CHECK(p.afe_count==2&&!memcmp(p.actions,sequence,2));}
+        if(scenario==3){static const unsigned char sequence[]={2,1,3,5};CHECK(p.afe_count==4&&!memcmp(p.actions,sequence,4));}
+        if(scenario==4||scenario==5||scenario==9||scenario==10||scenario==13)CHECK(p.pending_logs>0);
+        if(scenario==6||scenario==7)CHECK(!p.afe_count&&!p.pin_writes);
+        if(p.logs>max_logs)max_logs=p.logs;
+    }
+    printf("AFE success/failure flows: max %u log lines including 8 unsupported channels\n",max_logs);
+}
+int main(void){test_generic_apr();test_afe_bytes();test_afe_flow();test_many_intents();test_long_headers();test_log_budget();test_raw();test_codec();test_flow();test_qrtr_default();printf("SELFTEST PASS %u/%u\n",checks,checks);return 0;}

@@ -36,14 +36,14 @@ def main():
 #define SMP2P_MAGIC 0x504d5324u
 #define SMP2P_RESTART_ACKS 1u
 #define SMP2P_AT_VERSION 4
-static unsigned checks, bells;
+static unsigned checks, bells, pending_logs, completed_logs;
 static uint8_t mem[16384];
 #define CHECK(x) do {checks++;if(!(x)){fprintf(stderr,"FAIL %u: %s\n",__LINE__,#x);exit(1);}}while(0)
 static uint32_t smem_partition(unsigned us,unsigned remote,uint32_t*c,uint32_t*s){CHECK(us==0);*c=32;*s=4096;return remote*4096;}
 static uint32_t item_find(uint32_t base,uint32_t line,uint32_t item,uint32_t*size){CHECK(line==32);CHECK((base==8192&&item==443)||(base==4096&&item==435));*size=344;return base+512;}
 static bool smem_peek(uint64_t at,void*dst,uint32_t n){CHECK(at+n<=sizeof(mem));memcpy(dst,mem+at,n);return true;}
 static void smem_poke(uint32_t at,uint32_t value){CHECK(at+4<=sizeof(mem));memcpy(mem+at,&value,4);}
-static int say(const char*fmt,...){(void)fmt;return 0;}
+static int say(const char*fmt,...){if(strstr(fmt,"Pending"))pending_logs++;if(strstr(fmt,"step 10 completed"))completed_logs++;return 0;}
 static void settle(void){}
 static void ring(unsigned mask){bells|=mask;}
 '''+smp+'\n'+helpers+r'''
@@ -91,7 +91,8 @@ static unsigned smem_items(uint32_t partition,uint32_t line,struct smem_item *ou
 #define NSEC_PER_MSEC 1
 #define KERN_SUCCESS 0
 typedef int wait_result_t;
-static bool adsp_started, prep_ok, start_ok, starts_dsp, down_ok;
+static bool adsp_started, prep_ok, start_ok, starts_dsp, down_ok, ack_ok, aop_ok, handshake_ok;
+static bool adsp_last_stop_acked, adsp_last_aop_off;
 static unsigned shutdowns,offs,handshakes,terminations;
 static int redwood_ufs_read_named(const char*n,unsigned off,void*p,unsigned sz){(void)n;(void)off;(void)p;(void)sz;return 0;}
 static void delay_for_interval(unsigned a,unsigned b){(void)a;(void)b;}
@@ -101,20 +102,23 @@ static bool step_header(void){return true;}
 static bool step_image(void){return true;}
 static bool adsp_glink_prepare(void){return prep_ok;}
 static bool step_start(void){adsp_started=starts_dsp;return start_ok;}
-static bool adsp_audio_handshake(void){handshakes++;return true;}
-static bool dsp_shutdown(const char*s){(void)s;shutdowns++;if(down_ok)offs++;return down_ok;}
+static bool adsp_audio_handshake(uint32_t last){CHECK(last==9||last==10);handshakes++;return handshake_ok;}
+static bool dsp_shutdown(const char*s){(void)s;shutdowns++;adsp_last_stop_acked=ack_ok;adsp_last_aop_off=aop_ok;if(down_ok)offs++;return down_ok;}
 static bool qmp_send(const char*s){CHECK(strstr(s,"val: off")!=NULL);offs++;return true;}
 static int current_thread(void){return 0;}
 static void thread_terminate(int t){(void)t;terminations++;}
 '''+dispatcher+r'''
 static void lifecycle_tests(void){
  uint32_t size=0;CHECK(item_find(8192,32,43,&size)==8320&&size==344);
- for(unsigned scenario=0;scenario<5;scenario++){
-  prep_ok=scenario!=0;start_ok=scenario!=1;starts_dsp=scenario>=2;down_ok=scenario!=3;
-  adsp_started=false;shutdowns=offs=handshakes=terminations=0;
-  steps_from_five((void*)(uintptr_t)(scenario==4?8:9),0);
+ for(unsigned scenario=0;scenario<10;scenario++){
+  prep_ok=scenario!=0;start_ok=scenario!=1;starts_dsp=scenario>=2;down_ok=scenario!=3&&scenario!=9;ack_ok=scenario!=7;aop_ok=scenario!=8;handshake_ok=scenario!=6;
+  adsp_started=false;pending_logs=completed_logs=0;shutdowns=offs=handshakes=terminations=0;
+  steps_from_five((void*)(uintptr_t)(scenario>=5?10:scenario==4?8:9),0);
   CHECK(terminations==1);CHECK(offs==1);CHECK(shutdowns==(scenario>=2));
   CHECK(handshakes==(scenario>=2&&scenario!=4));
+  if(scenario>=7)CHECK(pending_logs>0&&!completed_logs);
+  if(scenario==5)CHECK(!pending_logs&&completed_logs==1);
+  if(scenario==6)CHECK(!completed_logs);
  }
 }
 '''
