@@ -1,8 +1,8 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..f18af0a1576ea972c0cf2d961e3a1b450ae52da9 100644
+index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..109bf18734bd5a10f98f8bbdf11ecfe37d617b93 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -113,6 +113,17 @@ bsd/dev/redwood_input.c		standard
+@@ -113,6 +113,18 @@ bsd/dev/redwood_input.c		standard
  bsd/dev/redwood_virtio_input.c	standard
  bsd/dev/redwood_goodix.c	standard
  bsd/dev/redwood_buttons.c	standard
@@ -13,6 +13,7 @@ index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..f18af0a1576ea972c0cf2d961e3a1b45
 +bsd/dev/mi8_glink.c	standard
 +bsd/dev/mi8_audio.c	standard
 +bsd/dev/mi8_audio_pcm.c	standard
++bsd/dev/mi8_tas2557.c	standard
 +bsd/dev/mi8_audio_smmu.c	standard
 +bsd/dev/mi8_hostsvc_k.c	standard
 +bsd/dev/mi8_wlfw_k.c	standard
@@ -13419,10 +13420,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..cfb1585f3385716d249222c10e3e0571849b395b
+index 0000000000000000000000000000000000000000..68d18b2d8adcb7de8d0efc9aa90150d58067661f
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4321 @@
+@@ -0,0 +1,4345 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -13488,6 +13489,7 @@ index 0000000000000000000000000000000000000000..cfb1585f3385716d249222c10e3e0571
 +#include <sys/param.h>
 +#include "mi8_glink.h"
 +#include "mi8_audio.h"
++#include "mi8_tas2557.h"
 +#include "mi8_audio_smmu.h"
 +#include "mi8_hostsvc.h"
 +#include "mi8_wlfw.h"
@@ -17449,6 +17451,24 @@ index 0000000000000000000000000000000000000000..cfb1585f3385716d249222c10e3e0571
 +	thread_terminate(current_thread());
 +}
 +
++/* Step 14 is an independent, shutdown-only amplifier probe, not step 13 plus
++ * another operation. Partition readiness and the probe share a 10 s budget. */
++static void
++audio_amp_thread(__unused void *parameter, __unused wait_result_t wr)
++{
++	uint64_t deadline=now_us()+10000000;
++	uint8_t probe;
++	for (unsigned i=0;i<100 && now_us()+200000<deadline;i++) {
++		if (redwood_ufs_read_named("modem",0,&probe,1)==0) {
++			mi8_tas2557_probe(deadline);
++			thread_terminate(current_thread());return;
++		}
++		delay_for_interval(100,NSEC_PER_MSEC);
++	}
++	say("mi8rp: 14: partition readiness timeout; TAS2557 untouched\n");
++	thread_terminate(current_thread());
++}
++
 +/* The partitions are there some time after the system starts; steps 5 and on run on a thread that waits for them. */
 +static void
 +steps_from_five(void *parameter, __unused wait_result_t wr)
@@ -17709,6 +17729,11 @@ index 0000000000000000000000000000000000000000..cfb1585f3385716d249222c10e3e0571
 +		return;
 +	}
 +	PE_parse_boot_argn("mi8rp_pause", &pause_ms, sizeof(pause_ms));
++	if (last == 14) {
++		thread_t thread;
++		if (kernel_thread_start(audio_amp_thread,NULL,&thread)==KERN_SUCCESS) thread_deallocate(thread);
++		return;
++	}
 +	say("mi8rp: steps up to %u\n", last);
 +	if (last >= 13) {
 +		thread_t thread;
@@ -17744,6 +17769,459 @@ index 0000000000000000000000000000000000000000..cfb1585f3385716d249222c10e3e0571
 +		}
 +	}
 +}
+diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..c422962d55291a1a2a7e91573235b777cedc675c
+--- /dev/null
++++ b/bsd/dev/mi8_tas2557.c
+@@ -0,0 +1,403 @@
++/* SPDX-License-Identifier: MIT
++ * TAS2557 shutdown-only firmware probe. Independently written from the TI
++ * firmware format and Qualcomm register interfaces, without vendor code.
++ * No startup, unmute, calibration, ADSP, DMA, or audio routing here.
++ */
++#include "mi8_tas2557.h"
++#ifdef MI8_TAS_HOST_TEST
++#include <string.h>
++#else
++#include <libkern/libkern.h>
++#include <kern/clock.h>
++#include <mach/mach_types.h>
++#include <vm/vm_kern.h>
++#endif
++
++struct cursor { const uint8_t *data; size_t size, at; bool bad; };
++static const uint8_t *
++take(struct cursor *c, size_t n)
++{
++	if (c->bad || n > c->size-c->at) { c->bad=true; return NULL; }
++	const uint8_t *p=c->data+c->at; c->at+=n; return p;
++}
++static uint32_t
++number(struct cursor *c, unsigned n)
++{
++	const uint8_t *p=take(c,n); uint32_t v=0;
++	if (p) for (unsigned i=0;i<n;i++) v=(v<<8)|p[i];
++	return v;
++}
++static bool
++named(struct cursor *c)
++{
++	if (!take(c,64)) return false;
++	while (!c->bad) if (!number(c,1)) return !c->bad;
++	return false;
++}
++static bool
++commands(const struct mi8_tas_block *b, mi8_tas_visit visit, void *ctx)
++{
++	for (uint32_t i=0;i<b->words;) {
++		uint32_t at=i++; const uint8_t *p=b->commands+4*at, *values=p+3;
++		unsigned n=1, wait=0; uint8_t book=p[0],page=p[1],reg=p[2];
++		if (reg==0x81) { wait=((unsigned)book<<8)|page; n=0; }
++		else if (reg==0x85) {
++			n=((unsigned)book<<8)|page;
++			if (!n || n>128 || (size_t)(b->words-i)*4<3+n) return false;
++			p=b->commands+4*i; book=p[0]; page=p[1]; reg=p[2]; values=p+3;
++			i+=(3+n+3)/4;
++			if (i>b->words || reg+n>128) return false;
++		} else if (reg>127) return false;
++		if (visit && !visit(ctx,b,b->offset+12+4*at,book,page,reg,values,n,wait)) return false;
++	}
++	return true;
++}
++static bool
++block(struct cursor *c, struct mi8_tas_block *b, uint32_t types, mi8_tas_visit v, void *ctx)
++{
++	memset(b,0,sizeof(*b)); b->offset=(uint32_t)c->at; b->type=number(c,4);
++	b->p_present=(uint8_t)number(c,1); b->p_crc=(uint8_t)number(c,1);
++	b->y_present=(uint8_t)number(c,1); b->y_crc=(uint8_t)number(c,1); b->words=number(c,4);
++	if (c->bad || b->type>=32 || !(types & (1u<<b->type)) || b->p_present>1 || b->y_present>1 ||
++	    !b->words || b->words>(c->size-c->at)/4) return false;
++	b->commands=take(c,(size_t)b->words*4);
++	return b->commands && commands(b,v,ctx);
++}
++bool
++mi8_tas2557_parse(const uint8_t *raw, size_t size, struct mi8_tas_firmware *out,
++    mi8_tas_visit visit, void *ctx)
++{
++	struct cursor c={raw,size,0,false}; struct mi8_tas_block plls[16], b;
++	unsigned np,ng,nc; struct mi8_tas_firmware f={0};
++	if (!raw || !out || size!=42730 || memcmp(raw,"5552",4)) return false;
++	c.at=4;
++	if (number(&c,4)!=size || number(&c,4)!=0x08fb9f42 || number(&c,4)!=0x68700 ||
++	    number(&c,4)!=0x1010000 || number(&c,4)!=0x400) return false;
++	(void)number(&c,4);
++	if (!named(&c) || number(&c,4)!=0 || number(&c,4)!=2) return false;
++	np=number(&c,2); if (!np || np>16) return false;
++	for (unsigned i=0;i<np;i++) if (!named(&c) || !block(&c,&plls[i],1,visit,ctx)) return false;
++	ng=number(&c,2); if (!ng || ng>16) return false;
++	for (unsigned i=0;i<ng;i++) {
++		if (!named(&c)) return false;
++		(void)number(&c,1); (void)number(&c,2);
++		if (!named(&c)) return false;
++		unsigned n=number(&c,2); if (!n || n>16 || (!i && n!=1)) return false;
++		for (unsigned j=0;j<n;j++) {
++			if (!block(&c,&b,1u<<1,visit,ctx)) return false;
++			if (!i) f.program=b;
++		}
++	}
++	nc=number(&c,2); if (!nc || nc>64) return false;
++	for (unsigned i=0;i<nc;i++) {
++		if (!named(&c) || number(&c,2)!=1) return false;
++		unsigned program=number(&c,1),pll=number(&c,1); uint32_t rate=number(&c,4);
++		unsigned source=number(&c,1); uint32_t input=number(&c,4);
++		if (program>=ng || pll>=np || !rate || !input || source>3) return false;
++		if (!i) { if (program || pll || rate!=48000 || input!=1536000) return false; f.pll=plls[pll]; }
++		if (!named(&c)) return false;
++		unsigned n=number(&c,2),seen=0; if (!n || n>16) return false;
++		for (unsigned j=0;j<n;j++) {
++			if (!block(&c,&b,(1u<<3)|(1u<<4),visit,ctx) || (seen&(1u<<b.type))) return false;
++			seen|=1u<<b.type;
++			if (!i) { if (b.type==4) f.pre=b; else f.coeff=b; }
++		}
++	}
++	/* This image has no calibration payload. Reject unsupported tails. */
++	if (c.bad || c.at!=size || !f.program.commands || !f.pll.commands || !f.pre.commands || !f.coeff.commands) return false;
++	*out=f; return true;
++}
++
++#define GCC 0x00100000u
++#define SE 0x00894000u
++#define PIN(n) (0x03500000u+0x1000u*(n))
++#define VOTE (GCC+0x5200c)
++#define VOTES ((1u<<6)|(1u<<7)|(1u<<15))
++#define RCG (GCC+0x17624)
++#define ERRORS ((1u<<1)|(1u<<2)|(1u<<3)|(0x3fu<<9))
++/* gcc-sdm845.c: wrap0 M/S AHB and SE5 voted clocks, XO source 0/div1.
++ * clk-rcg2.c: DFS +0x14, performance CFG +0x1c +4*level.
++ * There is no QUP GDSC in the SDM845 GCC domain table or its I2C DT node.
++ * No guessed power-domain register or RPMh request is used.
++ */
++static const uint32_t halts[]={GCC+0x17004,GCC+0x17008,GCC+0x17620};
++static const uint16_t saved_regs[]={0x24,0x28,0x48,0x7c,0x254,0x258,0x260,0x264,
++    0x26c,0x270,0x278,0x284,0x288,0x614,0x80c,0x810,0x814,0xe18,0xe1c,0xe30};
++#define NSAVE (sizeof(saved_regs)/sizeof(saved_regs[0]))
++struct tas {
++	const struct mi8_tas_io *io; struct mi8_tas_result *r; uint64_t end;
++	uint32_t votes,rcg_cfg,rcg_cmd,regs[NSAVE],pins[2],depth;
++	unsigned book,page,word; bool clocks,se,pins_set,reset,rcg_changed,active;
++};
++static uint32_t rd(struct tas *t,uint32_t a) { return t->io->read(t->io->ctx,a); }
++static void wr(struct tas *t,uint32_t a,uint32_t v) { t->io->write(t->io->ctx,a,v); }
++static uint64_t now(struct tas *t) { return t->io->now(t->io->ctx); }
++static bool fail(struct tas *t,const char *s) { if (!t->r->error) t->r->error=s; return false; }
++#define LOG(t,...) do { if ((t)->io->log) (t)->io->log((t)->io->ctx,__VA_ARGS__); } while(0)
++static bool pause_us(struct tas *t,unsigned us) {
++	uint64_t n=now(t); if (n>=t->end || us>t->end-n) return fail(t,"deadline");
++	t->io->delay(t->io->ctx,us); return true;
++}
++static bool poll(struct tas *t,uint32_t a,uint32_t mask,uint32_t value,unsigned count) {
++	for (unsigned i=0;i<count;i++) { if ((rd(t,a)&mask)==value) return true; if (!pause_us(t,10)) break; }
++	return false;
++}
++static bool
++transfer(struct tas *t,bool receive,uint8_t *bytes,unsigned n,bool stretch)
++{
++	unsigned done=0; uint64_t limit=now(t)+20000; uint32_t status=0;
++	if (!n || n>129 || now(t)>=t->end) return fail(t,"deadline/length");
++	if (limit>t->end) limit=t->end;
++	t->r->transfers++;
++	wr(t,SE+0x618,0xffffffff); wr(t,SE+(receive?0x270:0x26c),n);
++	t->active=true;
++	wr(t,SE+0x600,((receive?2u:1u)<<27)|(0x4cu<<9)|(stretch?4u:0u));
++	for (unsigned loops=0;loops<4000 && now(t)<limit;loops++) {
++		status=rd(t,SE+0x610); if (status&ERRORS) break;
++		if (receive) {
++			uint32_t fifo=rd(t,SE+0x804),words=fifo&0x1ffffff,valid=fifo>>28&7;
++			if (words>t->depth) return fail(t,"RX FIFO count");
++			for (uint32_t i=0;i<words;i++) {
++				uint32_t v=rd(t,SE+0x780); unsigned count=4;
++				if (i+1==words && (fifo&0x80000000u) && valid && valid<4) count=valid;
++				for (unsigned j=0;j<count;j++) { if (done>=n) return fail(t,"RX length"); bytes[done++]=(uint8_t)(v>>(8*j)); }
++			}
++		} else if (!(status&1)) {
++			uint32_t used=rd(t,SE+0x800)&0xfffffff;
++			if (used>t->depth) return fail(t,"TX FIFO count");
++			for (unsigned i=used;i<t->depth && done<n;i++) {
++				uint32_t v=0; for (unsigned j=0;j<4 && done<n;j++) v|=(uint32_t)bytes[done++]<<(8*j);
++				wr(t,SE+0x700,v);
++			}
++		}
++		if (status&1) {
++			wr(t,SE+0x618,status); t->active=stretch;
++			return done==n || fail(t,"short transfer");
++		}
++		if (!pause_us(t,5)) break;
++	}
++	if (status&(1u<<10)) { t->r->nacks++; return fail(t,"NACK"); }
++	if (status&(1u<<13)) { t->r->arbitration++; return fail(t,"arbitration"); }
++	if (status&ERRORS) return fail(t,"GENI error");
++	t->r->timeouts++; return fail(t,"timeout");
++}
++static bool raw_write(struct tas *t,uint8_t reg,const uint8_t *v,unsigned n) {
++	uint8_t buf[129]; if (!n || n>128 || reg+n>128) return fail(t,"register length");
++	buf[0]=reg;memcpy(buf+1,v,n);return transfer(t,false,buf,n+1,false);
++}
++static bool byte_write(struct tas *t,uint8_t reg,uint8_t v) { return raw_write(t,reg,&v,1); }
++static bool select_page(struct tas *t,unsigned book,unsigned page) {
++	if (t->book!=book) { if (!byte_write(t,0,0) || !byte_write(t,127,(uint8_t)book)) return false; t->book=book;t->page=0; }
++	if (t->page!=page) { if (!byte_write(t,0,(uint8_t)page)) return false; t->page=page; }
++	return true;
++}
++static bool read_regs(struct tas *t,unsigned b,unsigned p,uint8_t reg,uint8_t *v,unsigned n) {
++	return select_page(t,b,p) && transfer(t,false,&reg,1,true) && transfer(t,true,v,n,false);
++}
++static bool yram(unsigned b,unsigned p,unsigned r) {
++	if (b==0 && p==53 && r>=44 && r<=48) return false;
++	return (b==140 && ((p==42 && r>=88) || (p>=43 && p<=49 && r>=8) || (p==50 && r>=8 && r<=27))) ||
++	    (b==0 && ((p>=50 && p<=60 && r>=8) || (p==61 && r>=8 && r<=27)));
++}
++static uint8_t crc_byte(uint8_t v) { for (unsigned i=0;i<8;i++) v=(uint8_t)((v<<1)^((v&128)?0x4d:0)); return v; }
++struct download { struct tas *t; uint8_t y; };
++static bool safe_write(unsigned b,unsigned p,unsigned r) {
++	/* Firmware is executable input: forbid power, mute, reset and page/book controls.
++	 * Swaps and coefficients remain allowed in their own books/pages. */
++	return r && !(p==0 && r==127) && !(b==0 && p==0 && (r==1 || r==4 || r==5 || r==7 || r==44)) &&
++	    !(b==0 && p==1 && (r==61 || r==62 || r==77)) && !(b==100 && p==0 && r==7);
++}
++static bool validate_command(void *ctx,const struct mi8_tas_block *b,uint32_t at,uint8_t book,uint8_t page,uint8_t reg,const uint8_t *v,unsigned n,unsigned ms) {
++	(void)ctx;(void)b;(void)at;(void)v;
++	if (ms>100) return false;
++	for (unsigned i=0;i<n;i++) if (!safe_write(book,page,reg+i)) return false;
++	return true;
++}
++static bool execute(void *ctx,const struct mi8_tas_block *b,uint32_t at,uint8_t book,uint8_t page,uint8_t reg,const uint8_t *v,unsigned n,unsigned ms) {
++	struct download *d=ctx;struct tas *t=d->t;uint8_t got[128]; t->word=(at-b->offset-12)/4;t->r->commands++;
++	if (!n) return pause_us(t,ms*1000);
++	if (!select_page(t,book,page) || !raw_write(t,reg,v,n)) return false;
++	if (b->y_present) {
++		unsigned first=0,last=n;while(first<n && !yram(book,page,reg+first)) first++;
++		while(last>first && !yram(book,page,reg+last-1)) last--;
++		if (first<last) {
++			if (!read_regs(t,book,page,(uint8_t)(reg+first),got,last-first)) return false;
++			for (unsigned i=first;i<last;i++) if (yram(book,page,reg+i)) {
++				if (got[i-first]!=v[i]) return fail(t,"Y readback MISMATCH");
++				d->y=(uint8_t)(d->y+crc_byte(got[i-first]));
++			}
++		}
++	}
++	return true;
++}
++static bool load(struct tas *t,const struct mi8_tas_block *b,const char *name) {
++	struct download d={t,0};uint8_t p=0;t->r->stage=name;
++	if (b->p_present && (!select_page(t,0,0) || !byte_write(t,33,1))) return false;
++	if (!commands(b,execute,&d)) return false;
++	if (b->p_present && !read_regs(t,0,0,32,&p,1)) return false;
++	bool ok=(!b->p_present || p==b->p_crc) && (!b->y_present || d.y==b->y_crc);
++	LOG(t,"mi8rp: 14: %s P=%s (%02x/%02x) Y=%s (%02x/%02x)\n",name,
++	    b->p_present?(p==b->p_crc?"match":"MISMATCH"):"absent",p,b->p_crc,
++	    b->y_present?(d.y==b->y_crc?"match":"MISMATCH"):"absent",d.y,b->y_crc);
++	if (!ok) return fail(t,"CRC MISMATCH");
++	t->r->blocks++;return true;
++}
++static bool
++prepare_bus(struct tas *t)
++{
++	t->r->stage="protocol";
++	uint32_t fw=rd(t,SE+0x68),fifo=rd(t,SE+0x64);
++	t->votes=rd(t,VOTE);t->rcg_cmd=rd(t,RCG);t->rcg_cfg=rd(t,RCG+4);
++	uint32_t dfs=rd(t,RCG+0x14),h[3];unsigned slot=0;
++	for (unsigned i=0;i<3;i++) h[i]=rd(t,halts[i]);
++	LOG(t,"mi8rp: 14: SE5 protocol=%u fifo_disabled=%u votes=%08x halt=%08x/%08x/%08x RCG=%08x/%08x DFS=%08x GDSC=not-exposed\n",(fw>>8)&255,fifo&1,t->votes,h[0],h[1],h[2],t->rcg_cmd,t->rcg_cfg,dfs);
++	if (((fw>>8)&255)!=3) return fail(t,"protocol is not I2C");
++	if (fifo&1) return fail(t,"FIFO disabled (DMA prohibited)");
++	t->depth=(rd(t,SE+0xe24)>>16)&63;
++	unsigned rxdepth=(rd(t,SE+0xe28)>>16)&63;
++	if (t->depth<4 || rxdepth<4) return fail(t,"FIFO depth");
++	if (rxdepth<t->depth) t->depth=rxdepth;
++	/* Never cancel another owner's command or discard its pending FIFO/IRQ. */
++	if (rd(t,SE+0x40)&3 || rd(t,SE+0x800) || rd(t,SE+0x804) || rd(t,SE+0x610) || rd(t,SE+0x640)) return fail(t,"SE busy");
++	t->r->stage="clocks";
++	if (t->rcg_cmd&0xf1) return fail(t,"RCG update pending");
++	if (dfs&1) {
++		bool found=false;
++		for (slot=0;slot<8;slot++) {
++			uint32_t cfg=rd(t,RCG+0x1c+4*slot);
++			if ((cfg&0x371f)==1 || !(cfg&0x371f)) { found=true;break; }
++		}
++		if (!found) return fail(t,"no XO DFS level");
++	}
++	for (unsigned i=0;i<NSAVE;i++) t->regs[i]=rd(t,SE+saved_regs[i]);
++	t->clocks=true;wr(t,VOTE,rd(t,VOTE)|VOTES);
++	if (!(dfs&1) && (t->rcg_cfg&0x371f)!=1 && (t->rcg_cfg&0x371f)!=0) {
++		t->rcg_changed=true;wr(t,RCG+4,(t->rcg_cfg&~0x371fu)|1);
++		wr(t,RCG,rd(t,RCG)|1);
++		if (!poll(t,RCG,1,0,100)) return fail(t,"RCG timeout");
++	}
++	for (unsigned i=0;i<3;i++) if (!poll(t,halts[i],1u<<31,0,200)) return fail(t,"clock halt");
++	t->r->stage="SE configuration"; t->se=true;
++	wr(t,SE+0xe18,0);wr(t,SE+0xe1c,0);wr(t,SE+0x614,0);
++	wr(t,SE+0x28,rd(t,SE+0x28)|0x7f);wr(t,SE+0xe30,rd(t,SE+0xe30)|0xf);
++	wr(t,SE+0x24,0x7f);wr(t,SE+0x20,1);wr(t,SE+0x258,rd(t,SE+0x258)&~1u);
++	wr(t,SE+0x254,0);wr(t,SE+0x260,0x7f8fe);wr(t,SE+0x264,0xffefe);
++	wr(t,SE+0x284,0x7f8fe);wr(t,SE+0x288,0xffefe);
++	wr(t,SE+0x80c,1);wr(t,SE+0x810,t->depth-1);wr(t,SE+0x814,t->depth);
++	wr(t,SE+0x7c,slot);wr(t,SE+0x48,7u<<4|1);
++	/* Vendor 100 kHz table: XO 19.2 MHz /7, high10, low11, cycle26. */
++	wr(t,SE+0x278,10u<<20|11u<<10|26);
++	if (rd(t,SE+0x7c)!=slot || rd(t,SE+0x48)!=(7u<<4|1)) return fail(t,"SE clock readback");
++	t->r->stage="pins";
++	for (unsigned i=0;i<2;i++) t->pins[i]=rd(t,PIN(85+i));
++	t->pins_set=true;
++	for (unsigned i=0;i<2;i++) wr(t,PIN(85+i),4); /* qup5 function1, 2mA, no pull */
++	for (unsigned i=0;i<2;i++) if (rd(t,PIN(85+i))!=4) return fail(t,"pin readback");
++	LOG(t,"mi8rp: 14: XO DFS slot=%u I2C=100kHz spkid=%u (read only; goer selected from board evidence)\n",slot,rd(t,PIN(87)+4)&1);
++	return true;
++}
++static void
++restore(struct tas *t,uint64_t deadline)
++{
++	t->end=deadline;
++	if (t->reset) { wr(t,PIN(76)+4,0);t->r->reset_low=(rd(t,PIN(76)+4)&3)==0; }
++	else t->r->reset_low=(rd(t,PIN(76)+4)&3)==0;
++	bool idle=true;
++	if (t->se) {
++		if (t->active || (rd(t,SE+0x40)&3)) {
++			wr(t,SE+0x604,4);idle=poll(t,SE+0x610,1u<<4,1u<<4,200);
++			if (!idle) { wr(t,SE+0x604,2);idle=poll(t,SE+0x610,1u<<5,1u<<5,200); }
++		}
++		for (unsigned i=0;i<64 && (rd(t,SE+0x804)&0x1ffffff);i++) (void)rd(t,SE+0x780);
++		wr(t,SE+0x618,0xffffffff);
++		idle=idle && !(rd(t,SE+0x40)&3) && !(rd(t,SE+0x800)&0xfffffff) && !(rd(t,SE+0x804)&0x1ffffff);
++		for (unsigned i=NSAVE;i>0;i--) wr(t,SE+saved_regs[i-1],t->regs[i-1]);
++		for (unsigned i=0;i<NSAVE;i++) idle=idle && rd(t,SE+saved_regs[i])==t->regs[i];
++	}
++	t->r->se_restored=idle;
++	t->r->pins_restored=true;
++	if (t->pins_set) for (unsigned i=0;i<2;i++) { wr(t,PIN(85+i),t->pins[i]);t->r->pins_restored&=rd(t,PIN(85+i))==t->pins[i]; }
++	t->r->clocks_restored=true;
++	if (t->clocks) {
++		if (t->rcg_changed) {
++			wr(t,RCG+4,t->rcg_cfg);wr(t,RCG,rd(t,RCG)|1);
++			t->r->clocks_restored=poll(t,RCG,1,0,100) && rd(t,RCG+4)==t->rcg_cfg;
++		}
++		/* Preserve other SE/FTS/BT clock votes, including changes since entry. */
++		wr(t,VOTE,(rd(t,VOTE)&~VOTES)|(t->votes&VOTES));
++		t->r->clocks_restored&=(rd(t,VOTE)&VOTES)==(t->votes&VOTES);
++	}
++}
++bool
++mi8_tas2557_run(const struct mi8_tas_io *io,const uint8_t *raw,size_t size,
++    uint64_t deadline,struct mi8_tas_result *r)
++{
++	struct mi8_tas_firmware fw;struct tas t={.io=io,.r=r,.end=deadline>100000?deadline-100000:0,.book=256,.page=256};
++	uint8_t regs[16]={0},flags[3]={0};bool match=false;
++	static const uint8_t reference[16]={0,0,0,0xa0,0,0,0x7c,3,0,0x25,8,0x18,0,0x20,0x33,0x28};
++	if (!r || !io || !io->read || !io->write || !io->now || !io->delay) return false;
++	memset(r,0,sizeof(*r));r->stage="firmware";
++	if (!mi8_tas2557_parse(raw,size,&fw,NULL,NULL)) { fail(&t,"invalid firmware");goto out; }
++	if (!commands(&fw.program,validate_command,NULL) || !commands(&fw.pll,validate_command,NULL) ||
++	    !commands(&fw.pre,validate_command,NULL) || !commands(&fw.coeff,validate_command,NULL)) { fail(&t,"forbidden firmware command");goto out; }
++	if (now(&t)>=t.end) { fail(&t,"deadline");goto out; }
++	/* Entry must match the board's reset-low state; do not take a live amp. */
++	if ((rd(&t,PIN(76)+4)&3) || (rd(&t,PIN(76))&0x3c)) { fail(&t,"reset entry state");goto out; }
++	if (!prepare_bus(&t)) goto out;
++	r->stage="reset";t.reset=true;
++	wr(&t,PIN(76)+4,0);wr(&t,PIN(76),(rd(&t,PIN(76))&~0x3cu)|0x200);
++	if (!pause_us(&t,5000)) goto out;
++	wr(&t,PIN(76)+4,2);
++	if (!pause_us(&t,2000) || !select_page(&t,0,0) || !byte_write(&t,1,1) || !pause_us(&t,1000)) goto out;
++	t.book=t.page=256;r->stage="ID";
++	if (!read_regs(&t,0,0,0,regs,16)) goto out;
++	match=!memcmp(regs,reference,16);
++	LOG(&t,"mi8rp: 14: B0P0 00..0f %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x regs=%s\n",regs[0],regs[1],regs[2],regs[3],regs[4],regs[5],regs[6],regs[7],regs[8],regs[9],regs[10],regs[11],regs[12],regs[13],regs[14],regs[15],match?"match":"MISMATCH");
++	if (regs[3]!=0xa0) { fail(&t,"ID is not PG2.1");goto out; }
++	/* Power/mute reset values must be known before any script is executed. */
++	if (!match) { fail(&t,"reset registers MISMATCH");goto out; }
++	if (!load(&t,&fw.program,"prog0") || !load(&t,&fw.pll,"pll0") || !load(&t,&fw.pre,"cfg0 pre") || !load(&t,&fw.coeff,"cfg0 coeff")) goto out;
++	r->stage="flags";
++	if (!read_regs(&t,0,0,0x68,&flags[0],1) || !read_regs(&t,0,0,0x6c,&flags[1],1) || !read_regs(&t,0,0,0x64,&flags[2],1)) goto out;
++	LOG(&t,"mi8rp: 14: INT1=%02x INT2=%02x PowerUpFlag=%02x (shutdown observation; PLL lock unknown)\n",flags[0],flags[1],flags[2]);
++	r->ok=true;r->stage="complete";
++out:
++	restore(&t,deadline);
++	if (!r->pins_restored || !r->clocks_restored || !r->se_restored || !r->reset_low) { r->ok=false;fail(&t,"restore incomplete"); }
++	LOG(&t,"mi8rp: 14: tas2557 id=%02x regs=%s fw=goer blocks=%u/4 powered=no reset=%s pins=%s SE=%s clocks=%s result=%s stage=%s word=%u commands=%u transfers=%u NACK=%u arbitration=%u timeout=%u\n",regs[3],match?"match":"unconfirmed",r->blocks,r->reset_low?"low":"UNKNOWN",r->pins_restored?"restored":"Pending",r->se_restored?"restored":"Pending",r->clocks_restored?"restored":"Pending",r->error?r->error:"PASS",r->stage,t.word,r->commands,r->transfers,r->nacks,r->arbitration,r->timeouts);
++	return r->ok;
++}
++
++#ifndef MI8_TAS_HOST_TEST
++extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
++extern const uint8_t *redwood_image_file(const char *,const char *,uint64_t *,int *);
++extern void loader_log_putc(char);
++static struct { uint32_t phys,size;vm_offset_t va; } maps[]={
++	{GCC,0x60000,0},{SE,0x4000,0},{PIN(76),0x4000,0},{PIN(84),0x4000,0}
++};
++static vm_offset_t address(uint32_t pa) {
++	for (unsigned i=0;i<sizeof(maps)/sizeof(maps[0]);i++)
++		if (pa>=maps[i].phys && pa-maps[i].phys<maps[i].size) return maps[i].va+pa-maps[i].phys;
++	return 0;
++}
++static uint32_t native_read(void *ctx,uint32_t pa) { (void)ctx;return *(volatile uint32_t *)address(pa); }
++static void native_write(void *ctx,uint32_t pa,uint32_t v) { (void)ctx;*(volatile uint32_t *)address(pa)=v;__asm__ volatile("dsb sy":::"memory"); }
++static uint64_t native_now(void *ctx) { uint64_t n;(void)ctx;absolutetime_to_nanoseconds(mach_absolute_time(),&n);return n/1000; }
++static void native_delay(void *ctx,unsigned us) { (void)ctx;delay_for_interval(us,NSEC_PER_USEC); }
++static void native_log(void *ctx,const char *fmt,...) {
++	char line[600];va_list ap;(void)ctx;va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);
++	for (const char *p=line;*p;p++) loader_log_putc(*p);printf("%s",line);
++}
++void mi8_tas2557_probe(uint64_t deadline) {
++	uint64_t size=0;struct mi8_tas_result result;
++	const uint8_t *fw=redwood_image_file("fw","tas2557_uCDSP_goer.bin",&size,NULL);
++	if (!fw || size!=42730) { native_log(NULL,"mi8rp: 14: missing/invalid TAS2557 firmware; no hardware writes\n");return; }
++	/* Permanent, aligned mappings: never ml_io_unmap with 16 KiB kernel pages. */
++	for (unsigned i=0;i<sizeof(maps)/sizeof(maps[0]);i++) {
++		if (!maps[i].va) maps[i].va=ml_io_map(maps[i].phys,maps[i].size);
++		if (!maps[i].va) { native_log(NULL,"mi8rp: 14: MMIO mapping failed; no hardware writes\n");return; }
++	}
++	const struct mi8_tas_io io={NULL,native_read,native_write,native_now,native_delay,native_log};
++	(void)mi8_tas2557_run(&io,fw,(size_t)size,deadline,&result);
++}
++#endif
+diff --git a/bsd/dev/mi8_tas2557.h b/bsd/dev/mi8_tas2557.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..88f2e04f1033d919350e4128d54c0da87ceadc56
+--- /dev/null
++++ b/bsd/dev/mi8_tas2557.h
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef MI8_TAS2557_H
++#define MI8_TAS2557_H
++#include <stdint.h>
++#include <stddef.h>
++#include <stdbool.h>
++
++/* Borrowed immutable firmware bytes; no allocation or hardware access in parse. */
++struct mi8_tas_block {
++	const uint8_t *commands;
++	uint32_t offset, words, type;
++	uint8_t p_present, p_crc, y_present, y_crc;
++};
++struct mi8_tas_firmware { struct mi8_tas_block program, pll, pre, coeff; };
++typedef bool (*mi8_tas_visit)(void *, const struct mi8_tas_block *, uint32_t,
++    uint8_t, uint8_t, uint8_t, const uint8_t *, unsigned, unsigned);
++bool mi8_tas2557_parse(const uint8_t *, size_t, struct mi8_tas_firmware *, mi8_tas_visit, void *);
++
++/* Addresses are physical; the native adapter owns permanent MMIO mappings. */
++struct mi8_tas_io {
++	void *ctx;
++	uint32_t (*read)(void *, uint32_t);
++	void (*write)(void *, uint32_t, uint32_t);
++	uint64_t (*now)(void *);
++	void (*delay)(void *, unsigned);
++	void (*log)(void *, const char *, ...);
++};
++struct mi8_tas_result {
++	const char *stage, *error;
++	unsigned commands, transfers, nacks, arbitration, timeouts, blocks;
++	bool ok, pins_restored, clocks_restored, se_restored, reset_low;
++};
++bool mi8_tas2557_run(const struct mi8_tas_io *, const uint8_t *, size_t,
++    uint64_t, struct mi8_tas_result *);
++#ifndef MI8_TAS_HOST_TEST
++void mi8_tas2557_probe(uint64_t deadline);
++#endif
++#endif
 diff --git a/bsd/dev/mi8_wlfw.c b/bsd/dev/mi8_wlfw.c
 new file mode 100644
 index 0000000000000000000000000000000000000000..f9fc4a5fccfecc97bddc4c5d1c227d29070e4690

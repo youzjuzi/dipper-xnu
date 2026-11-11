@@ -8,7 +8,7 @@
       "upstream_file_exists": true,
       "license": "LicenseRef-CMU",
       "basis": "Original CMU header retained upstream; see pinned XNU file",
-      "sha256": "2c3e5e31982b973e6ce25d6e6cef3894ef91419cb78ff494a788b333430b87e5"
+      "sha256": "2e8f0cf484b4cef81d0e54a26648828c473093a96ed6a919ecd0dc828b74a98b"
     },
     {
       "component": "xnu-mi8",
@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "73538d12dc23938ab5c4e1e16d5732ac31a19d28a01acede89b94fa54bdcdef2"
+      "sha256": "ba65e33723139f8ef6976a6b2d741a6f019bd03d4e3a7c0de83e5cc144070654"
     },
     {
       "component": "xnu-mi8",
@@ -480,7 +480,7 @@
       "upstream_file_exists": true,
       "license": "MIT",
       "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "f3f9b3f2c6df75d1896b6f561552f73af03511443be990db6d8c57b9fce59144"
+      "sha256": "2289caa6a3a0f9eaab1fcb8909604f93c74199d17d94baaf2b62ed8477be73ac"
     },
     {
       "component": "hackios-userland",
@@ -753,6 +753,22 @@
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
       "sha256": "0f16fd42cb47c8a251352ea05c368d11c6182065fb3962bc075c19066832f7c6"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/dev/mi8_tas2557.c",
+      "upstream_file_exists": false,
+      "license": "MIT",
+      "basis": "本项目新写，参考 TI tas2557 驱动的固件格式，未复制代码",
+      "sha256": "405ef0d5aab804ae51716e3604e24628bdcc351040f16c0801c3cde61cccb185"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/dev/mi8_tas2557.h",
+      "upstream_file_exists": false,
+      "license": "MIT",
+      "basis": "本项目新写，参考 TI tas2557 驱动的固件格式，未复制代码",
+      "sha256": "9ed782c58cac44efb222f6104a2cbd03c0d3ea8b7533d1576b292dceb61d0cb2"
     }
   ]
 }
