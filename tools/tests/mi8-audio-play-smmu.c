@@ -33,4 +33,36 @@ static void dual_test(unsigned scenario){
     CHECK(!mi8_smmu_faults(&map,&f)&&!mi8_smmu_clear_faults(&map,~0u));
     free(m);
 }
-int main(void){for(unsigned n=0;n<5;n++)dual_test(n);printf("Dual SMMU SELFTEST PASS %u/%u\n",checks,checks);return 0;}
+
+#include "mi8_audio_pcm.h"
+struct finish_model {struct mi8_smmu_mapping *map;unsigned calls;};
+static bool finish_end(void*v,bool safe){struct finish_model*f=v;f->calls++;CHECK(safe);return mi8_smmu_end(f->map,safe);}
+static void finish_log(void*v,const char*text){(void)v;CHECK(text&&strlen(text)<320);}
+static void finish_paths(void){
+    for(unsigned mode=0;mode<3;mode++){
+        struct model*m=fresh();struct mi8_smmu_mapping map;struct mi8_smmu_result r;
+        const struct mi8_smmu_ops ops={m,read_reg,write_reg,wait_us,log_line,allocate,release,cache,table_read,&m->claim};
+        m->regs[S2CR(8)/4]=0x200ff;m->s2cr_locked=true;
+        CHECK(mi8_smmu_begin(&ops,&map,&r,true));
+        unsigned before=m->writes;
+        uint32_t*registers=malloc(sizeof(m->regs));CHECK(registers);memcpy(registers,m->regs,sizeof(m->regs));
+        struct finish_model f={&map,0};
+        const struct mi8_pcm_ops memory={.ctx=&f,.end=finish_end,.log=finish_log};
+        struct mi8_pcm_state pcm={.io=&memory,.mapped=true,.result={.dsp_safe=mode==0}};
+        CHECK(mi8_pcm_finish(&pcm,mode==1)==(mode!=2));
+        if(mode==2){
+            CHECK(!f.calls&&!m->releases&&pcm.result.retained&&map.active&&map.allocated);
+            CHECK(m->writes==before&&!memcmp(registers,m->regs,sizeof(m->regs)));
+            CHECK((m->regs[CB(43)/4]&1)&&m->regs[SMR(8)/4]==0x80001821);
+        }else{
+            CHECK(f.calls==1&&m->releases==1&&!pcm.result.retained&&!map.allocated);
+            CHECK(r.restored&&!r.retained&&m->regs[S2CR(8)/4]==0x2b&&!m->regs[SMR(8)/4]);
+            CHECK(!(m->regs[CB(43)/4]&1)&&logged(m,"S2CR sticky (inert: SMR invalid)"));
+        }
+        unsigned writes=m->writes;
+        CHECK(mi8_pcm_finish(&pcm,mode==1)==(mode!=2));CHECK(m->writes==writes); /* no duplicate end/free */
+        free(registers);free(m);
+    }
+}
+
+int main(void){for(unsigned n=0;n<5;n++)dual_test(n);finish_paths();printf("Dual SMMU SELFTEST PASS %u/%u\n",checks,checks);return 0;}

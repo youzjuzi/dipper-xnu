@@ -102,6 +102,9 @@ static void step_aop(void){}
 static bool step_header(void){return true;}
 static bool step_image(void){return true;}
 static bool mi8_audio_play_proven(void){return false;}
+static bool mi8_audio_finish_play(bool down){return down;}
+static pthread_mutex_t wsmmu_lock;static bool audio_play_locked;
+static void lck_mtx_unlock(pthread_mutex_t *lock);
 static int audio_play_thread;static bool audio_play_brief;static uint64_t audio_play_until;static char audio_play_note[400];
 static uint64_t now_us(void){return 0;}
 static bool adsp_glink_prepare(void){return prep_ok;}

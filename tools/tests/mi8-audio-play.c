@@ -8,10 +8,11 @@ struct play_peer {
     uint8_t buffer[32768];
     uint32_t ops[200]; unsigned count,writes,normal,cache,begin,end,clear;
     uint32_t fail,drop,status;
-    bool no_begin,no_end,retain,drop_writes,canary_timeout,canary_close_error,bad_map,bad_copp,ordinary_fault;
+    bool hung,reset,no_pas,no_begin,no_end,retain,drop_writes,canary_timeout,canary_close_error,bad_map,bad_copp,ordinary_fault;
     unsigned canary_mode; /* 0=A CB fault, 1=B global fault, 2=neither, 3=A low FAR */
     struct mi8_smmu_fault fault;
-    uint64_t last_write,budget;
+    uint64_t last_write,budget,canary_at,close_at,adm_at;
+    char log[16384];size_t log_length;
 };
 static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
     struct play_peer *m=p->extension;uint32_t op=rd(q+16);
@@ -19,6 +20,9 @@ static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
     CHECK(m->count<200);m->ops[m->count++]=op;
     b[4]=b[8]=q[4];memcpy(b+6,q+10,2);memcpy(b+10,q+6,2);
     *n=28;wr(b+16,0x110e8);wr(b+20,op);wr(b+24,op==m->fail?m->status:0);
+    if(op==0x10bcd)m->close_at=p->now;
+    if(op==0x10327)m->adm_at=p->now;
+    if(m->hung&&(op==0x10bcd||op==0x10327))return -1;
     if(op==m->drop)return -1;
     if(op==m->fail)return 1;
     if(op==0x10d92){*n=24;wr(b+16,0x10d93);wr(b+20,m->bad_map?m->status:0x42);}
@@ -42,13 +46,14 @@ static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
             if(m->ordinary_fault)m->fault.fsr=2;
             if(m->drop_writes)return -1;
         }else{
+            m->canary_at=p->now;
             if(address>UINT32_MAX && (m->canary_mode==0||m->canary_mode==3)){
                 m->fault.fsr=0x402;m->fault.far=m->canary_mode==3?(uint32_t)address:address;
             }
             if(address<=UINT32_MAX&&m->canary_mode==1)m->fault.gfsr=2;
-            if(m->canary_timeout)return -1;
+            if(m->canary_timeout||m->hung)return -1;
         }
-        *n=36;wr(b+16,0x10d99);memcpy(b+20,q+20,12);wr(b+32,canary&&m->canary_mode!=2?1:0);
+        *n=36;wr(b+16,0x10d99);memcpy(b+20,q+20,12);wr(b+32,canary?2:0);
     }
     if(op==0x10bcd&&m->canary_close_error)wr(b+24,1);
     return 1;
@@ -64,16 +69,31 @@ static bool play_clear(void*v,uint32_t observed){struct play_peer*m=((struct pee
 static bool play_end(void*v,bool safe){
     struct peer*p=v;struct play_peer*m=p->extension;m->end++;m->retain=!safe||m->no_end;
     if(p->afe_count>=5)CHECK(p->actions[p->afe_count-2]==4&&p->actions[p->afe_count-1]==5);
-    else CHECK(!safe);
+    else CHECK(m->reset||!safe);
     CHECK(p->pin_writes==8);for(unsigned i=0;i<4;i++)CHECK(p->pin_cfg[i]==p->saved_cfg[i]&&p->pin_io[i]==p->saved_io[i]);
     return !m->retain;
 }
-static bool run_play(struct peer *p,struct play_peer *m){
+static void play_log(void*v,const char*fmt,...){
+    struct peer*p=v;struct play_peer*m=p->extension;char line[512];va_list ap;
+    va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);
+    log_line(v,"%s",line);size_t n=strlen(line);CHECK(m->log_length+n<sizeof(m->log));
+    memcpy(m->log+m->log_length,line,n+1);m->log_length+=n;
+}
+static bool start_play(struct peer *p,struct play_peer *m){
     p->extension=m;p->extra_response=play_reply;p->reply=p->header8=p->afe_mode=true;
     struct mi8_audio_pin_ops pins={pin_read,pin_write,p};
-    struct mi8_glink_cfg c=cfg(p);
+    struct mi8_glink_cfg c=cfg(p);c.log=play_log;
     struct mi8_pcm_ops memory={.ctx=p,.begin=play_begin,.cache=play_cache,.fault=play_fault,.clear=play_clear,.end=play_end};
     return mi8_audio_run_play(&c,alive,p,&pins,&memory,p->now+(m->budget?m->budget:15000000));
+}
+static bool run_play(struct peer*p,struct play_peer*m){
+    bool okay=start_play(p,m),deferred=mi8_audio_play_needs_finish();
+    if(deferred)CHECK(!m->end&&!p->closes);
+    m->reset=!m->no_pas;
+    bool clean=mi8_audio_finish_play(m->reset);
+    if(deferred&&!m->reset&&!m->end)m->retain=true;
+    CHECK(!mi8_audio_play_needs_finish());
+    return okay&&clean;
 }
 static void prepare(struct peer*p,struct play_peer*m){
     init(p);memset(m,0,sizeof(*m));m->fault.fsr=0x400;m->status=1;
@@ -84,8 +104,8 @@ static void integration(void){
     struct peer p;struct play_peer m;
     for(unsigned mode=0;mode<4;mode++){
         prepare(&p,&m);m.canary_mode=mode;CHECK(run_play(&p,&m));
-        CHECK(mi8_audio_play_proven()==(mode==0||mode==3));CHECK(m.normal==150&&m.writes==152&&m.cache==150);
-        CHECK(m.begin==1&&m.end==1&&!m.retain&&m.clear==4);CHECK(p.closes==1&&p.now<15000000&&p.logs<=45);
+        CHECK(mi8_audio_play_proven()==(mode==0||mode==3));CHECK(m.normal==150&&m.writes==((mode==0||mode==3)?151u:152u)&&m.cache==150);
+        CHECK(m.begin==1&&m.end==1&&!m.retain&&m.clear==((mode==0||mode==3)?2u:4u));CHECK(p.closes==1&&p.now<15000000&&p.logs<=45);
         CHECK(m.ops[0]==0x10d92&&m.ops[1]==0x10db3&&m.ops[2]==0x10326&&m.ops[3]==0x10325&&m.ops[4]==0x10d98&&m.ops[5]==0x10daa);
         CHECK(m.ops[m.count-3]==0x10bcd&&m.ops[m.count-2]==0x10d94&&m.ops[m.count-1]==0x10327);
         printf("play mode %u: %u log lines, %llu us, PROVEN=%u\n",mode,p.logs,(unsigned long long)p.now,mi8_audio_play_proven());
@@ -93,7 +113,7 @@ static void integration(void){
     const uint32_t commands[]={0x10d92,0x10db3,0x10326,0x10325,0x10d98,0x10daa,0x10bcd,0x10d94,0x10327};
     for(unsigned i=0;i<9;i++)for(unsigned kind=0;kind<3;kind++){
         prepare(&p,&m);if(kind==2)m.drop=commands[i];else{m.fail=commands[i];m.status=kind==1?3:1;}
-        CHECK(run_play(&p,&m)==(i==6&&kind==0));CHECK(p.closes==1&&p.now<=15000000&&p.logs<=45);CHECK(!mi8_audio_play_proven()||i>=6);
+        CHECK(!run_play(&p,&m));CHECK(p.closes==1&&p.now<=15000000&&p.logs<=45);CHECK(!mi8_audio_play_proven()||i>=6);
         if(i<6){CHECK(m.normal==0);for(unsigned j=i+1;j<6;j++)CHECK(!saw(&m,commands[j]));}
         if(i==0&&kind!=2){CHECK(!saw(&m,0x10bcd)&&!saw(&m,0x10d94)&&!saw(&m,0x10327));CHECK(!m.retain&&!p.pending_logs);}
         if(i==1&&kind!=2){CHECK(!saw(&m,0x10bcd)&&saw(&m,0x10d94));}
@@ -106,18 +126,18 @@ static void integration(void){
     }
     prepare(&p,&m);m.no_begin=true;CHECK(!run_play(&p,&m));CHECK(!m.end&&!m.count);
     prepare(&p,&m);m.no_end=true;CHECK(!run_play(&p,&m));CHECK(m.retain&&m.end==1);
-    prepare(&p,&m);m.drop_writes=true;CHECK(!run_play(&p,&m));CHECK(m.retain&&p.now<=15000000);
+    prepare(&p,&m);m.drop_writes=true;CHECK(!run_play(&p,&m));CHECK(!m.retain&&p.now<=17000000);
     prepare(&p,&m);m.ordinary_fault=true;CHECK(!run_play(&p,&m));CHECK(m.normal==1&&!m.clear);
-    prepare(&p,&m);m.canary_timeout=true;m.canary_close_error=true;CHECK(!run_play(&p,&m));CHECK(m.retain&&!saw(&m,0x10d94));
-    prepare(&p,&m);m.canary_close_error=true;CHECK(run_play(&p,&m));CHECK(!m.retain&&saw(&m,0x10d94));
-    prepare(&p,&m);m.bad_map=true;m.status=0;CHECK(!run_play(&p,&m));CHECK(m.retain&&!m.normal);
+    prepare(&p,&m);m.canary_timeout=true;m.canary_close_error=true;CHECK(!run_play(&p,&m));CHECK(!m.retain&&!saw(&m,0x10d94));
+    prepare(&p,&m);m.canary_close_error=true;CHECK(!run_play(&p,&m));CHECK(!m.retain&&!saw(&m,0x10d94));
+    prepare(&p,&m);m.bad_map=true;m.status=0;CHECK(!run_play(&p,&m));CHECK(!m.retain&&!m.normal);
     prepare(&p,&m);m.bad_copp=true;m.status=0xffff;CHECK(!run_play(&p,&m));CHECK(!m.normal&&!saw(&m,0x10327));
-    prepare(&p,&m);m.bad_map=true;m.status=UINT32_MAX;CHECK(!run_play(&p,&m));CHECK(m.retain&&!saw(&m,0x10d94));
+    prepare(&p,&m);m.bad_map=true;m.status=UINT32_MAX;CHECK(!run_play(&p,&m));CHECK(!m.retain&&!saw(&m,0x10d94));
     prepare(&p,&m);m.bad_copp=true;m.status=0xff;CHECK(!run_play(&p,&m));CHECK(!saw(&m,0x10327));
     prepare(&p,&m);p.amp_high=true;CHECK(!run_play(&p,&m));CHECK(!p.pin_writes&&!m.begin);
     prepare(&p,&m);p.legacy=true;CHECK(!run_play(&p,&m));CHECK(!p.pin_writes&&!m.begin);
     prepare(&p,&m);m.budget=1000000;CHECK(!run_play(&p,&m));CHECK(!p.pin_writes&&!m.begin&&p.now<=m.budget);
-    prepare(&p,&m);m.budget=6000000;m.drop_writes=true;CHECK(!run_play(&p,&m));CHECK(m.retain&&p.now<=m.budget);
+    prepare(&p,&m);m.budget=6000000;m.drop_writes=true;CHECK(!run_play(&p,&m));CHECK(!m.retain&&p.now<=m.budget+2500000);
     prepare(&p,&m);p.bad_afe_version=true;CHECK(!run_play(&p,&m));CHECK(!p.pin_writes&&!m.begin);
 }
 static void event_packet(uint8_t*b,unsigned token,uint64_t address,unsigned handle,unsigned status){
@@ -160,7 +180,7 @@ static void layouts(void){
         CHECK(b[0]==0x50&&b[1]==2&&b[2]==n&&rd(b+12)==9&&b[5]==5&&b[9]==4);
     }
     mi8_pcm_encode(MI8_PCM_OPEN,1,0,0,b,sizeof(b),&n);CHECK(rd(b+20)==0&&rd(b+24)==0x100000&&rd(b+28)==0x10c68&&rd(b+32)==0x10da5);
-    mi8_pcm_encode(MI8_PCM_MAP,1,0,0,b,sizeof(b),&n);CHECK(rd(b+20)==0x10003&&!rd(b+24)&&rd(b+28)==0x10000000&&rd(b+32)==1&&rd(b+36)==32768);
+    mi8_pcm_encode(MI8_PCM_MAP,1,0,0,b,sizeof(b),&n);CHECK(rd(b+20)==0x10003&&!rd(b+24)&&rd(b+28)==0x10000000&&rd(b+32)==1&&rd(b+36)==65536);
     mi8_pcm_encode(MI8_PCM_ADM_OPEN,1,0,0,b,sizeof(b),&n);CHECK(rd(b+20)==0x10000&&rd(b+24)==0xffff1006&&rd(b+28)==0x10312&&rd(b+32)==0x100002&&rd(b+36)==48000&&rd(b+40)==0x201&&!rd(b+44));
     mi8_pcm_encode(MI8_PCM_ROUTE,1,0,5,b,sizeof(b),&n);CHECK(!rd(b+20)&&rd(b+24)==1&&rd(b+28)==0x10001&&rd(b+32)==5);
     mi8_pcm_encode(MI8_PCM_FORMAT,1,0,0,b,sizeof(b),&n);CHECK(rd(b+20)==20&&rd(b+24)==0x100002&&rd(b+28)==48000&&rd(b+32)==1&&rd(b+36)==0x201&&!rd(b+40));
@@ -172,4 +192,120 @@ static void layouts(void){
     after.gfsr=2;CHECK(mi8_pcm_canary_verdict(0x110008000ull,&before,&after)==2);
     after=(struct mi8_smmu_fault){.fsr=0x400};CHECK(!mi8_pcm_canary_verdict(0x110008000ull,&before,&after));
 }
-int main(void){layouts();events();integration();printf("PCM SELFTEST PASS %u/%u\n",checks,checks);return 0;}
+
+/* Execute the real rproc worker and PAS shutdown ordering with fake hardware.
+ * The APR/GLINK/AFE/PCM stack above stays real; only the SCM boundary is fake. */
+#define __unused __attribute__((unused))
+#define NSEC_PER_MSEC 1000000
+#define SCM_PAS_SHUTDOWN 1
+#define SCM_ONE_VALUE 1
+#define PAS_ADSP 1
+typedef int wait_result_t;
+static struct peer *worker_peer;
+static struct play_peer *worker_memory;
+static bool adsp_started,adsp_last_stop_acked,adsp_last_aop_off;
+static bool audio_play_brief,audio_play_locked,stop_ack,aop_off;
+static void *audio_play_thread;
+static uint64_t audio_play_until;
+static char audio_play_note[400];
+static int wsmmu_lock;
+static unsigned pas_calls,stop_calls,aop_calls,unlocks;
+static uint64_t worker_now_us(void){return worker_peer->now;}
+static int worker_say(const char *fmt,...){
+    char line[512];va_list ap;va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);
+    if(audio_play_brief)snprintf(audio_play_note,sizeof(audio_play_note),"%.399s",line);
+    else play_log(worker_peer,"%s",line);
+    return 0;
+}
+static bool audio_play_worker(void){return audio_play_thread!=NULL;}
+static bool dsp_ask_to_stop(unsigned ms){
+    CHECK(ms>0&&ms<=3000);CHECK(worker_peer->pin_writes==8);stop_calls++;
+    if(!stop_ack)worker_peer->now+=(uint64_t)ms*1000;
+    return stop_ack;
+}
+static int32_t scm(const char*why,unsigned cmd,unsigned nargs,unsigned dsp,unsigned b,unsigned c,unsigned d,uint64_t*answer){
+    (void)why;CHECK(cmd==SCM_PAS_SHUTDOWN&&nargs==SCM_ONE_VALUE&&dsp==PAS_ADSP&&!b&&!c&&!d);
+    CHECK(worker_peer->afe_count==5&&worker_peer->actions[3]==4&&worker_peer->actions[4]==5);
+    CHECK(worker_memory->end==(worker_memory->hung?0u:1u));
+    CHECK(audio_play_locked==worker_memory->hung);pas_calls++;
+    worker_memory->reset=!worker_memory->no_pas;*answer=worker_memory->no_pas?1:0;
+    play_log(worker_peer,"PAS boundary: %s\n",*answer?"failed":"reset confirmed");
+    return 0;
+}
+static bool qmp_send(const char*text){
+    CHECK(strstr(text,"val: off"));aop_calls++;
+    worker_say(aop_off?"mi8rp: qmp: the AOP has taken it\n":"mi8rp: qmp: THE AOP DOES NOT TAKE THE MESSAGE within a second; taken back\n");
+    return aop_off;
+}
+/* @dsp_shutdown */
+static int redwood_ufs_read_named(const char*n,unsigned a,void*p,unsigned b){(void)n;(void)a;(void)p;(void)b;return 0;}
+static void delay_for_interval(unsigned ms,unsigned unit){(void)unit;worker_peer->now+=(uint64_t)ms*1000;}
+static void step_firmware(void){worker_peer->now+=11000000;CHECK(audio_play_until==45000000);}
+static void step_aop(void){}
+static bool step_header(void){return true;}
+static bool step_image(void){return true;}
+static bool adsp_glink_prepare(void){return true;}
+static bool step_start(void){adsp_started=true;return true;}
+static bool adsp_audio_handshake(uint32_t last){
+    CHECK(last==13);audio_play_locked=true;
+    bool okay=start_play(worker_peer,worker_memory);
+    audio_play_until=mi8_audio_play_teardown_end();
+    if(!mi8_audio_play_needs_finish())audio_play_locked=false;
+    return okay;
+}
+static void lck_mtx_unlock(int*lock){CHECK(lock==&wsmmu_lock&&audio_play_locked);unlocks++;}
+static void *current_thread(void){return worker_peer;}
+static void thread_terminate(void*t){CHECK(t==worker_peer);}
+/* @steps_from_five */
+static void log_order(const char*text,const char*const*lines,unsigned n){
+    for(unsigned i=0;i<n;i++){const char*at=strstr(text,lines[i]);CHECK(at);text=at+strlen(lines[i]);}
+}
+static unsigned count_op(struct play_peer*m,uint32_t op){unsigned n=0;for(unsigned i=0;i<m->count;i++)n+=m->ops[i]==op;return n;}
+static void lifecycle(void){
+    struct peer p;struct play_peer m;
+    for(unsigned scenario=0;scenario<4;scenario++){
+        prepare(&p,&m);worker_peer=&p;worker_memory=&m;
+        p.extension=&m;m.canary_mode=scenario?3:2;m.hung=scenario!=0;m.no_pas=scenario==2;
+        if(scenario==3)p.drop_stop=p.drop_off=true;
+        stop_ack=aop_off=scenario==0;pas_calls=stop_calls=aop_calls=unlocks=0;
+        steps_from_five((void*)(uintptr_t)13,0);
+        CHECK(pas_calls==1&&stop_calls==1&&aop_calls==1);
+        CHECK(!audio_play_locked&&!audio_play_thread&&!mi8_audio_play_needs_finish());
+        CHECK(m.normal==150&&m.writes==(scenario?151u:152u));
+        CHECK(mi8_audio_play_proven()==(scenario!=0));
+        CHECK(count_op(&m,0x10bcd)==1&&count_op(&m,0x10327)==1);
+        CHECK(p.pin_writes==8&&p.actions[3]==4&&p.actions[4]==5);
+        CHECK(m.end==(scenario==2?0u:1u)&&unlocks==(scenario?1u:0u));
+        if(scenario){
+            CHECK(m.close_at-m.canary_at<=500000&&m.adm_at-m.close_at<=500000);
+            CHECK(m.adm_at-m.close_at==500000); /* No hidden drain or retry. */
+            CHECK(!saw(&m,0x10d94)&&!strstr(m.log,"canary B:"));
+            CHECK(strstr(m.log,"canary A: asm status=0xffffffff timeout GFSR=0 FSR=0x402 FAR=0x10008000"));
+            CHECK(strstr(m.log,"translation: ENGAGED (canary A, SMMU saw FAR=0x10008000 low32)"));
+            const char*const lines[]={"canary A:","translation: ENGAGED","asm stream close","adm device close",
+                "afe port 0x1006 stop","afe clock off",scenario==3?"AFE FAILED; cleanup Pending":"pins restored",
+                "PAS boundary:","ADSP shutdown",scenario==2?"mapping unchanged, memory retained":"memory released",
+                "channel close local","Pending ADSP stop-ack","Pending AOP off","step 13: PROVEN=1 cleanup="};
+            log_order(m.log,lines,sizeof(lines)/sizeof(*lines));
+            CHECK(strstr(m.log,scenario==1?"cleanup=complete (stop-ack missing) (AOP off Pending)":"cleanup=Pending (AFE/PAS/SMMU)"));
+            CHECK(strstr(m.log,"taken back"));
+            if(scenario==2)CHECK(strstr(m.log,"Pending PAS shutdown"));
+        }else{
+            const char*const lines[]={"canary A: asm status=0x2","canary B: asm status=0x2","translation: NOT PROVEN",
+                "asm stream close errno=0 status=0","asm unmap regions errno=0 status=0","adm device close errno=0 status=0",
+                "afe port 0x1006 stop status=0","afe clock off status=0","smmu: end inert","pins restored",
+                "channel close errno=0","ADSP shutdown ok","step 13: PROVEN=0 cleanup=complete"};
+            log_order(m.log,lines,sizeof(lines)/sizeof(*lines));
+        }
+        printf("LIFECYCLE scenario %u BEGIN\n%sLIFECYCLE scenario %u END\n",scenario,m.log,scenario);
+    }
+    /* A timeout without a CB fault must still attempt B and cannot prove DMA. */
+    prepare(&p,&m);m.canary_mode=2;m.canary_timeout=true;
+    CHECK(run_play(&p,&m)&&!mi8_audio_play_proven()&&m.writes==152);
+    CHECK(strstr(m.log,"canary A:")&&strstr(m.log,"canary B:")&&strstr(m.log,"translation: NOT PROVEN"));
+    /* Proof survives a failed detach; incomplete cleanup must not erase it. */
+    prepare(&p,&m);m.hung=true;m.canary_mode=3;m.no_end=true;
+    CHECK(!run_play(&p,&m)&&mi8_audio_play_proven()&&m.retain&&m.end==1);
+}
+
+int main(void){layouts();events();integration();lifecycle();printf("PCM SELFTEST PASS %u/%u\n",checks,checks);return 0;}

@@ -38,9 +38,18 @@ def main():
         subprocess.run([str(exe)], check=True, env=env)
         for name, define, sources in [
             ('mi8-audio-play', 'MI8_GLINK_HOST_TEST', ['mi8_glink.c', 'mi8_audio.c', 'mi8_audio_pcm.c']),
-            ('mi8-audio-play-smmu', 'MI8_SMMU_HOST_TEST', ['mi8_audio_smmu.c'])]:
+            ('mi8-audio-play-smmu', 'MI8_SMMU_HOST_TEST', ['mi8_audio_smmu.c', 'mi8_glink.c', 'mi8_audio.c', 'mi8_audio_pcm.c'])]:
             exe = Path(tmp) / name
-            subprocess.run(['cc', *flags, '-D' + define, str(ROOT / 'tools/tests' / (name + '.c')),
+            fixture = ROOT / 'tools/tests' / (name + '.c')
+            if name == 'mi8-audio-play':
+                text = fixture.read_text()
+                for fn in ['dsp_shutdown', 'steps_from_five']:
+                    signature = ('static bool\n' if fn == 'dsp_shutdown' else 'static void\n') + fn + '('
+                    actual = body(source, signature).replace('now_us(', 'worker_now_us(').replace('say(', 'worker_say(')
+                    text = text.replace('/* @' + fn + ' */', actual)
+                fixture = Path(tmp) / (name + '.c')
+                fixture.write_text(text)
+            subprocess.run(['cc', *flags, '-I' + str(ROOT / 'tools/tests'), '-DMI8_GLINK_HOST_TEST', '-D' + define, str(fixture),
                             *(str(dev / s) for s in sources), '-o', str(exe)], check=True)
             subprocess.run([str(exe)], check=True, env=env)
 

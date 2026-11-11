@@ -5568,10 +5568,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70dff101ae9
+index 0000000000000000000000000000000000000000..453acc55c0d538f0fc2ab3c71690e04af517c9be
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,727 @@
+@@ -0,0 +1,755 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
@@ -5818,8 +5818,9 @@ index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70d
 +	struct mi8_apr_pending *pending;
 +	bool afe_active, afe_event, play;
 +	struct mi8_pcm_state *pcm;
++	struct mi8_pcm_ops play_ops;
 +	const struct mi8_pcm_ops *memory_ops;
-+	uint64_t play_deadline, overall_deadline, request_deadline;
++	uint64_t play_deadline, request_deadline;
 +	bool (*alive)(void *);
 +	void *alive_ctx;
 +	uint32_t token, rejected;
@@ -5885,10 +5886,9 @@ index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70d
 +service_request(struct audio_session *s, const uint8_t *packet, size_t bytes,
 +    struct mi8_apr_pending *pending, bool cleanup, bool *submitted)
 +{
-+	uint64_t deadline = time_us(s) + 1000000;
-+	if (s->play) {
-+		uint64_t limit = cleanup ? s->overall_deadline : s->play_deadline;
-+		if (s->pcm && cleanup && s->pcm->teardown_end && s->pcm->teardown_end < limit) limit = s->pcm->teardown_end;
++	uint64_t deadline = time_us(s) + (s->play && cleanup ? 500000 : 1000000);
++	if (s->play && !cleanup) {
++		uint64_t limit = s->play_deadline;
 +		if (deadline > limit) deadline = limit;
 +	}
 +	if (s->request_deadline && deadline > s->request_deadline) deadline = s->request_deadline;
@@ -6017,21 +6017,44 @@ index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70d
 +	return false;
 +#endif
 +}
-+static bool last_play_proven;
++/* One serialized play worker owns this state through the outer PAS shutdown.
++ * Copy callback tables: the caller's cfg and AFE stack frames may have returned. */
++static struct audio_session play_session;
++static struct mi8_pcm_state play_pcm;
++static struct mi8_glink_cfg play_cfg;
++static struct mi8_pcm_ops play_memory_ops;
++static bool play_live, last_play_clean, last_play_proven;
 +static uint64_t last_play_teardown;
 +uint64_t mi8_audio_play_teardown_end(void) { return last_play_teardown; }
 +bool mi8_audio_play_proven(void) { return last_play_proven; }
++bool mi8_audio_play_needs_finish(void) { return play_live; }
++
++bool
++mi8_audio_finish_play(bool pas_shutdown)
++{
++	if (play_live) {
++		bool inert=mi8_pcm_finish(&play_pcm,pas_shutdown);
++		last_play_clean=last_play_clean && inert;
++		/* After reset there is no peer to ACK a close. Destroy sends one
++		 * best-effort CLOSE and drops only the local GLINK allocations. */
++		mi8_glink_destroy(play_session.link);
++		play_session.link=NULL;
++		TELL(play_session,"mi8rp: 9: channel close local after PAS shutdown %s; peer ACK not awaited\n",pas_shutdown?"ok":"FAILED");
++		play_live=false;
++	}
++	return last_play_clean;
++}
 +
 +static bool
 +afe_sequence(struct audio_session *s, const struct mi8_audio_pin_ops *pins)
 +{
 +	uint32_t cfg[4], io[4], at_cfg, at_io, amp[3];
 +	static const unsigned amp_pins[] = { 76, 87, 30 };
-+	const struct mi8_pcm_ops play_ops = {s,pcm_now,pcm_sleep,pcm_exchange,pcm_send,pcm_poll,pcm_tell,
++	s->play_ops = (struct mi8_pcm_ops){s,pcm_now,pcm_sleep,pcm_exchange,pcm_send,pcm_poll,pcm_tell,
 +	    pcm_begin,pcm_cache,pcm_fault,pcm_clear,pcm_end};
 +	unsigned changed = 0;
 +	bool clock_attempted = false, started = false, uncertain = false;
-+	bool success = false, clean = true;
++	bool success = false, clean = true, pins_clean = true;
 +	int error = mi8_apr_service_version(&s->reply, 4, 2);
 +	if (error) { TELL((*s), "mi8rp: 10: AFE version mismatch/missing errno=%d; no pins touched\n", error); return false; }
 +	if (s->play && (mi8_apr_service_version(&s->reply, 7, 1) || mi8_apr_service_version(&s->reply, 8, 2))) {
@@ -6074,7 +6097,7 @@ index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70d
 +	started = !error || uncertain;
 +	if (error) goto out;
 +	if (s->play) {
-+		success=mi8_pcm_run(s->pcm,&play_ops,s->play_deadline);
++		success=mi8_pcm_run(s->pcm,&s->play_ops,s->play_deadline);
 +		goto out;
 +	}
 +	{
@@ -6090,10 +6113,6 @@ index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70d
 +	}
 +	success = true;
 +out:
-+	if (s->play && !s->pcm->teardown_end) {
-+		s->pcm->teardown_end=time_us(s)+3000000;
-+		if (s->pcm->teardown_end>s->overall_deadline) s->pcm->teardown_end=s->overall_deadline;
-+	}
 +	if (started && afe_command(s, MI8_AFE_STOP, true, &uncertain)) {
 +		clean = false; TELL((*s), "mi8rp: 10: Pending DEVICE_STOP; DSP shutdown still required\n");
 +	}
@@ -6104,16 +6123,18 @@ index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70d
 +		unsigned i = --changed;
 +		if (!pins->write(pins->ctx, 58 + i, cfg[i], io[i]) ||
 +		    !pins->read(pins->ctx, 58 + i, &at_cfg, &at_io) || at_cfg != cfg[i] || ((at_io ^ io[i]) & 2)) {
-+			clean = false; TELL((*s), "mi8rp: 10: Pending pin %u CFG/output latch restore\n", 58 + i);
++			clean = pins_clean = false; TELL((*s), "mi8rp: 10: Pending pin %u CFG/output latch restore\n", 58 + i);
 +		}
 +	}
-+	if (s->play && s->pcm->mapped) {
-+		if (!clean || time_us(s)>=s->pcm->teardown_end) s->pcm->result.dsp_safe=false;
-+		(void)mi8_pcm_finish(s->pcm);
-+		if (s->pcm->result.retained) clean=false;
++	if (s->play) {
++		/* A refused begin may itself have retained a prior reservation. */
++		last_play_clean=clean && (!s->pcm->io || s->pcm->mapped);
++		if (s->pcm->mapped && !s->pcm->result.deferred) {
++			if (!mi8_pcm_finish(s->pcm,false)) clean=last_play_clean=false;
++		}
 +		last_play_proven=s->pcm->result.proven;
 +	}
-+	if (clean) TELL((*s), "mi8rp: 10: pins restored (CFG and output latches)\n");
++	if (clean || (s->play && pins_clean)) TELL((*s), "mi8rp: 10: pins restored (CFG and output latches)\n");
 +	TELL((*s), s->play ? "mi8rp: 13: AFE %s\n" : "mi8rp: step 10 AFE %s\n", success && clean ? "completed" : clean ? "FAILED; cleanup acknowledged" : "FAILED; cleanup Pending");
 +	s->afe_active = false;
 +	return success && clean;
@@ -6126,8 +6147,8 @@ index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70d
 +		512, 512, 512, 512, 512, 512, 512, 512, 512, 512,
 +		512, 512, 512, 512, 512, 512, 512, 512, 512, 512
 +	};
-+	struct audio_session session;
-+	struct mi8_pcm_state pcm_state;
++	struct audio_session local_session;
++	struct audio_session *session=play?&play_session:&local_session;
 +	struct mi8_glink_cfg transport;
 +	struct mi8_glink_channel_status status = { 0 };
 +	uint64_t deadline, core_end, now;
@@ -6136,13 +6157,17 @@ index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70d
 +	const char *phase = "create";
 +	unsigned found = 0;
 +	if (!cfg || !cfg->now_us || !cfg->sleep_us) return false;
-+	memset(&session, 0, sizeof(session));
-+	session.io = cfg; session.alive = alive; session.alive_ctx = alive_ctx;
++	if (play && play_live) return false;
 +	if (play) {
-+		memset(&pcm_state,0,sizeof(pcm_state));last_play_proven=false;
-+		session.play=true;session.pcm=&pcm_state;session.memory_ops=memory_ops;
-+		session.overall_deadline=play_until;
-+		session.play_deadline=play_until>3000000?play_until-3000000:0;
++		play_cfg=*cfg;cfg=&play_cfg;
++		if (memory_ops) { play_memory_ops=*memory_ops;memory_ops=&play_memory_ops; }
++	}
++	memset(session, 0, sizeof(*session));
++	session->io = cfg; session->alive = alive; session->alive_ctx = alive_ctx;
++	if (play) {
++		memset(&play_pcm,0,sizeof(play_pcm));last_play_proven=false;last_play_clean=false;
++		session->play=true;session->pcm=&play_pcm;session->memory_ops=memory_ops;
++		session->play_deadline=play_until>3000000?play_until-3000000:0;
 +		last_play_teardown=play_until;
 +	}
 +	transport = *cfg;
@@ -6151,71 +6176,74 @@ index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70d
 +	transport.log = cfg->log; /* Raw GLINK filters to errors and bounded summaries. */
 +	transport.raw.name = "apr_audio_svc"; transport.raw.local_cid = 2;
 +	transport.raw.intent_sizes = intents; transport.raw.intent_count = 20;
-+	transport.raw.receive = receive; transport.raw.ctx = &session;
-+	session.link = mi8_glink_create(&transport);
-+	if (!session.link) { TELL(session, "mi8rp: 9: create failed\n"); return false; }
-+	error = mi8_glink_start(session.link);
++	transport.raw.receive = receive; transport.raw.ctx = session;
++	session->link = mi8_glink_create(&transport);
++	if (!session->link) { TELL((*session), "mi8rp: 9: create failed\n"); return false; }
++	error = mi8_glink_start(session->link);
 +	if (error) goto out;
 +	phase = "GLINK version/open";
-+	deadline = time_us(&session) + 8000000ull;
-+	if (play && deadline>session.play_deadline) deadline=session.play_deadline;
++	deadline = time_us(session) + 8000000ull;
++	if (play && deadline>session->play_deadline) deadline=session->play_deadline;
 +	do {
-+		mi8_glink_poll_once(session.link);
-+		error = mi8_glink_raw_status(session.link, &status);
-+		if (error != EAGAIN || !still_alive(&session)) break;
++		mi8_glink_poll_once(session->link);
++		error = mi8_glink_raw_status(session->link, &status);
++		if (error != EAGAIN || !still_alive(session)) break;
 +		cfg->sleep_us(cfg->ctx, 1000);
-+	} while (time_us(&session) < deadline);
-+	if (error || !still_alive(&session)) { if (!error || error == EAGAIN) error = ETIMEDOUT; goto out; }
-+	TELL(session, "mi8rp: 9: apr_audio_svc open both ways (local %u remote %u)\n", status.local_cid, status.remote_cid);
-+	core_end = time_us(&session) + 5000000ull;
-+	if (play && core_end>session.play_deadline) core_end=session.play_deadline;
++	} while (time_us(session) < deadline);
++	if (error || !still_alive(session)) { if (!error || error == EAGAIN) error = ETIMEDOUT; goto out; }
++	TELL((*session), "mi8rp: 9: apr_audio_svc open both ways (local %u remote %u)\n", status.local_cid, status.remote_cid);
++	core_end = time_us(session) + 5000000ull;
++	if (play && core_end>session->play_deadline) core_end=session->play_deadline;
 +	phase = "GET_STATE/intent";
-+	if (play && (core_end <= time_us(&session) || core_end-time_us(&session)<2000000)) { error=ETIMEDOUT;goto out; }
++	if (play && (core_end <= time_us(session) || core_end-time_us(session)<2000000)) { error=ETIMEDOUT;goto out; }
 +	do {
-+		now = time_us(&session);
++		now = time_us(session);
 +		deadline = now + 500000;
 +		if (deadline > core_end - 2000000) deadline = core_end - 2000000;
-+		error = ask(&session, GET_STATE, deadline);
-+		if (!error && session.reply.state == 1) break;
++		error = ask(session, GET_STATE, deadline);
++		if (!error && session->reply.state == 1) break;
 +		if (error && error != ETIMEDOUT) goto out;
-+		if (time_us(&session) + 200000 >= core_end - 2000000) break;
++		if (time_us(session) + 200000 >= core_end - 2000000) break;
 +		cfg->sleep_us(cfg->ctx, 200000);
-+	} while (still_alive(&session));
-+	if (error || session.reply.state != 1) { if (!error) error = ETIMEDOUT; goto out; }
-+	TELL(session, "mi8rp: 9: core state=1\n");
++	} while (still_alive(session));
++	if (error || session->reply.state != 1) { if (!error) error = ETIMEDOUT; goto out; }
++	TELL((*session), "mi8rp: 9: core state=1\n");
 +	phase = "GET_FWK_VERSION/intent";
-+	deadline = time_us(&session) + 1000000;
++	deadline = time_us(session) + 1000000;
 +	if (deadline > core_end) deadline = core_end;
-+	error = ask(&session, GET_FWK, deadline);
++	error = ask(session, GET_FWK, deadline);
 +	if (error == ENOTSUP && !play) {
 +		phase = "GET_VERSIONS/intent";
-+		error = ask(&session, GET_VERSIONS, core_end);
++		error = ask(session, GET_VERSIONS, core_end);
 +	}
 +	if (error) goto out;
-+	for (uint32_t i = 0; i < session.reply.num_services; i++) {
-+		const struct mi8_audio_service *service = &session.reply.services[i];
++	for (uint32_t i = 0; i < session->reply.num_services; i++) {
++		const struct mi8_audio_service *service = &session->reply.services[i];
 +		const char *name = service->id == 4 ? "AFE" : service->id == 7 ? "ASM" : service->id == 8 ? "ADM" : NULL;
 +		if (!name) continue;
-+		TELL(session, "mi8rp: 9: service %s=%u version=%#x branch=%#x\n", name, service->id, service->version, service->branch);
++		TELL((*session), "mi8rp: 9: service %s=%u version=%#x branch=%#x\n", name, service->id, service->version, service->branch);
 +		found++;
 +	}
 +	if (found != 3) { phase = "required services missing"; error = ENOENT; goto out; }
-+	TELL(session, "mi8rp: 9: parsed %u complete service entries, rejected %u unrelated/bad packets\n", session.reply.num_services, session.rejected);
++	TELL((*session), "mi8rp: 9: parsed %u complete service entries, rejected %u unrelated/bad packets\n", session->reply.num_services, session->rejected);
 +	success = true;
-+	if (pins && !afe_sequence(&session, pins)) { success = false; phase = "AFE step10"; error = EIO; }
++	if (pins && !afe_sequence(session, pins)) { success = false; phase = "AFE step10"; error = EIO; }
 +out:
-+	if (!success) TELL(session, "mi8rp: 9: failed at %s errno=%d version=%u peer=%u rejected=%u\n", phase, error, status.negotiated, status.remote_cid, session.rejected);
++	if (!success) TELL((*session), "mi8rp: 9: failed at %s errno=%d version=%u peer=%u rejected=%u\n", phase, error, status.negotiated, status.remote_cid, session->rejected);
 +	uint32_t close_ms=1000;
 +	if (play) {
-+		uint64_t now=time_us(&session), until=pcm_state.teardown_end?pcm_state.teardown_end:session.overall_deadline;
-+		if (until>session.overall_deadline) until=session.overall_deadline;
-+		last_play_teardown=until;
-+		if (now>=until) close_ms=0; else if ((until-now)/1000<close_ms) close_ms=(uint32_t)((until-now)/1000);
++		/* Independent stop-ack/PAS/AOP budget after bounded service cleanup. */
++		last_play_teardown=time_us(session)+4000000;
++		if (play_pcm.mapped && play_pcm.result.deferred) {
++			play_live=true;
++			return success;
++		}
++		close_ms=500;
 +	}
-+	closed = mi8_glink_raw_close(session.link, close_ms);
-+	if (pins && closed) TELL(session, "mi8rp: 10: Pending GLINK_CLOSE_ACK errno=%d; DSP shutdown follows\n", closed);
-+	TELL(session, "mi8rp: 9: channel close errno=%d; DSP shutdown follows\n", closed);
-+	mi8_glink_destroy(session.link);
++	closed = mi8_glink_raw_close(session->link, close_ms);
++	if (pins && closed) TELL((*session), "mi8rp: 10: Pending GLINK_CLOSE_ACK errno=%d; DSP shutdown follows\n", closed);
++	TELL((*session), "mi8rp: 9: channel close errno=%d; DSP shutdown follows\n", closed);
++	mi8_glink_destroy(session->link);
 +	return success && !closed;
 +}
 +
@@ -6301,10 +6329,10 @@ index 0000000000000000000000000000000000000000..5ee38d84895fb665a69fadc6d32ab70d
 +}
 diff --git a/bsd/dev/mi8_audio.h b/bsd/dev/mi8_audio.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b7cc5c960a46dbc7af7594787b2b52f717b91b54
+index 0000000000000000000000000000000000000000..4a54e2437ba219c6bc4837787778a6c2f07a1b8e
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,59 @@
 +/* SPDX-License-Identifier: MIT */
 +/* APR core handshake and explicit AFE MI2S control. The explicit playback entry never controls the amplifier. */
 +#ifndef MI8_AUDIO_H
@@ -6353,6 +6381,11 @@ index 0000000000000000000000000000000000000000..b7cc5c960a46dbc7af7594787b2b52f7
 +struct mi8_pcm_ops;
 +bool mi8_audio_play_proven(void);
 +uint64_t mi8_audio_play_teardown_end(void);
++/* Finish must run after the caller attempts PAS shutdown. Callbacks and their
++ * contexts stay valid until finish returns; callback tables are copied. The
++ * caller serializes run/finish and the SMMU lifetime with other claimants. */
++bool mi8_audio_play_needs_finish(void);
++bool mi8_audio_finish_play(bool pas_shutdown);
 +bool mi8_audio_run_play(const struct mi8_glink_cfg *, bool (*)(void *), void *, const struct mi8_audio_pin_ops *, const struct mi8_pcm_ops *, uint64_t);
 +bool mi8_audio_run_afe(const struct mi8_glink_cfg *, bool (*)(void *), void *, const struct mi8_audio_pin_ops *);
 +/* Synchronous and bounded; caller owns DSP boot/shutdown. cfg callbacks must
@@ -6361,10 +6394,10 @@ index 0000000000000000000000000000000000000000..b7cc5c960a46dbc7af7594787b2b52f7
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..9f08dbedce8ffac0e408cc9379e913774bea9131
+index 0000000000000000000000000000000000000000..8e2d5a70931c876759778d898403055fd6a2ed8b
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,286 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6406,7 +6439,7 @@ index 0000000000000000000000000000000000000000..9f08dbedce8ffac0e408cc9379e91377
 +	case MI8_PCM_OPEN: n=16; put16(p+6,16); put32(p+8,0x10c68); put32(p+12,0x10da5); break;
 +	case MI8_PCM_MAP:
 +		port=remote=0; n=20; put16(p,3); put16(p+2,1);
-+		put32(p+8,(uint32_t)MI8_PCM_ADDRESS); put32(p+12,(uint32_t)(MI8_PCM_ADDRESS>>32)); put32(p+16,32768); break;
++		put32(p+8,(uint32_t)MI8_PCM_ADDRESS); put32(p+12,(uint32_t)(MI8_PCM_ADDRESS>>32)); put32(p+16,MI8_PCM_MAP_BYTES); break;
 +	case MI8_PCM_ADM_OPEN:
 +		svc=8; port=remote=0x1006; n=28; put16(p+2,1); put16(p+4,0x1006); put16(p+6,0xffff);
 +		put32(p+8,0x10312); put16(p+12,2); put16(p+14,16); put32(p+16,48000); p[20]=1;p[21]=2; break;
@@ -6473,7 +6506,8 @@ index 0000000000000000000000000000000000000000..9f08dbedce8ffac0e408cc9379e91377
 +	if (error) return error;
 +	uint16_t local=(uint16_t)packet[6]|(uint16_t)packet[7]<<8,remote=(uint16_t)packet[10]|(uint16_t)packet[11]<<8;
 +	mi8_apr_expect(&pending,packet[4],local,remote,s->token,commands[action],response,n,n);
-+	uint64_t end=cleanup?s->teardown_end:s->deadline, now=s->io->now(s->io->ctx);
++	uint64_t now=s->io->now(s->io->ctx);
++	uint64_t end=cleanup?now+500000:s->deadline;
 +	if (now>=end) error=ETIMEDOUT;
 +	else error=s->io->exchange(s->io->ctx,packet,bytes,&pending,cleanup,end,&submitted);
 +	if (action==MI8_PCM_OPEN && submitted && !(pending.done && pending.error)) s->stream_attempted=true;
@@ -6512,7 +6546,7 @@ index 0000000000000000000000000000000000000000..9f08dbedce8ffac0e408cc9379e91377
 +	return true;
 +}
 +static bool
-+submit(struct mi8_pcm_state *s, unsigned slot, uint64_t address, bool canary)
++submit(struct mi8_pcm_state *s, unsigned slot, uint64_t address, bool canary, uint64_t until)
 +{
 +	uint8_t packet[52],p[32]={0};size_t bytes;
 +	struct mi8_pcm_job *j=&s->jobs[slot];
@@ -6521,7 +6555,7 @@ index 0000000000000000000000000000000000000000..9f08dbedce8ffac0e408cc9379e91377
 +	put32(p,(uint32_t)address);put32(p+4,(uint32_t)(address>>32));put32(p+8,s->handle);
 +	put32(p+12,MI8_PCM_PERIOD);put32(p+16,j->token);
 +	mi8_apr_encode_service(7,0x101,0x101,j->token,WRITE,p,sizeof(p),packet,sizeof(packet),&bytes);
-+	if (s->io->send(s->io->ctx,packet,bytes,s->deadline)) return false;
++	if (s->io->send(s->io->ctx,packet,bytes,until)) return false;
 +	if (!canary) s->result.submitted++;
 +	return true;
 +}
@@ -6544,33 +6578,39 @@ index 0000000000000000000000000000000000000000..9f08dbedce8ffac0e408cc9379e91377
 +canaries(struct mi8_pcm_state *s)
 +{
 +	struct mi8_smmu_fault before,after;
-+	bool engaged=false; unsigned engaged_at=0,unmatched=0;
++	unsigned unmatched=0;
 +	for (unsigned k=0;k<2;k++) {
 +		if (!s->io->fault(s->io->ctx,&before) || !s->io->clear(s->io->ctx,before.fsr) || !s->io->fault(s->io->ctx,&before)) return false;
 +		uint64_t address=MI8_AS_IOVA+32768+(k?0:1ull<<32);
-+		if (!submit(s,8+k,address,true)) return false;
-+		uint64_t until=s->io->now(s->io->ctx)+1000000;
++		uint64_t until=s->io->now(s->io->ctx)+500000;
 +		if (until>s->deadline) until=s->deadline;
-+		while (s->jobs[8+k].active) if (poll_once(s,until)) break;
++		bool sent=submit(s,8+k,address,true,until);
++		while (sent && s->jobs[8+k].active) if (poll_once(s,until)) break;
 +		if (!s->io->fault(s->io->ctx,&after)) return false;
 +		int verdict=mi8_pcm_canary_verdict(address,&before,&after);
 +		pcm_log(s,"canary %c: asm status=%#x%s GFSR=%#x FSR=%#x FAR=%#llx",'A'+k,s->jobs[8+k].status,
 +		    s->jobs[8+k].active?" timeout":"",after.gfsr,after.fsr,(unsigned long long)after.far);
-+		if (verdict==1) { engaged=true;engaged_at=k; }
++		if (verdict==1) {
++			/* A terminated DMA need not return an ASM completion. Keep the
++			 * proof even if fault clearing or later shutdown fails. */
++			s->result.proven=true;
++			pcm_log(s,"translation: ENGAGED (canary %c, SMMU saw FAR=%#llx %s)",'A'+k,
++			    (unsigned long long)after.far,after.far==(uint32_t)address?"low32":"full");
++			return s->io->clear(s->io->ctx,after.fsr);
++		}
 +		if (verdict==2) unmatched|=1u<<k;
 +		if (!s->io->clear(s->io->ctx,after.fsr) || s->result.unsupported) return false;
 +	}
-+	if (engaged) pcm_log(s,"translation: ENGAGED (canary %c); stream-not-matched mask=%u",'A'+engaged_at,unmatched);
-+	else if (unmatched) pcm_log(s,"translation: stream not matched (canary %s) mask=%u; NOT PROVEN",unmatched==1?"A":unmatched==2?"B":"A/B",unmatched);
++	if (unmatched) pcm_log(s,"translation: stream not matched (canary %s) mask=%u; NOT PROVEN",unmatched==1?"A":unmatched==2?"B":"A/B",unmatched);
 +	else pcm_log(s,"translation: NOT PROVEN");
-+	s->result.proven=engaged;return true;
++	return true;
 +}
 +
 +bool
 +mi8_pcm_run(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end)
 +{
 +	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;
-+	bool success=false,closed=false,unmapped=false,drained=false,cleanup_uncertain=false;
++	bool success=false,closed=false,unmapped=false,adm_closed=true;
 +	if (!io->begin(io->ctx,&s->memory)) { pcm_log(s,"smmu: begin failed; no PCM submitted");return false; }
 +	s->mapped=true;
 +	pcm_log(s,"smmu: claimed bank %u slot %u, low/SID aliases mapped, software walk ok",s->memory.bank,s->memory.slot);
@@ -6590,7 +6630,7 @@ index 0000000000000000000000000000000000000000..9f08dbedce8ffac0e408cc9379e91377
 +			pcm_log(s,"play: unexpected GFSR=%#x FSR=%#x FAR=%#llx",f.gfsr,f.fsr,(unsigned long long)f.far); goto cleanup;
 +		}
 +		fill_period(s,slot);
-+		if (!submit(s,slot,MI8_PCM_ADDRESS+(uint64_t)slot*MI8_PCM_PERIOD,false)) goto cleanup;
++		if (!submit(s,slot,MI8_PCM_ADDRESS+(uint64_t)slot*MI8_PCM_PERIOD,false,s->deadline)) goto cleanup;
 +	}
 +	while (io->now(io->ctx)<start+3000000) if (poll_once(s,s->deadline)) goto cleanup;
 +	if (!drain(s,s->deadline) || s->result.errors || s->result.done!=MI8_PCM_PERIODS) goto cleanup;
@@ -6604,48 +6644,52 @@ index 0000000000000000000000000000000000000000..9f08dbedce8ffac0e408cc9379e91377
 +	if (!canaries(s)) goto cleanup;
 +	success=true;
 +cleanup:
-+	/* Single shared 3s budget, including subsequent AFE/pins/SMMU/GLINK work. */
-+	s->teardown_end=io->now(io->ctx)+3000000;
-+	if (s->teardown_end>end+3000000) s->teardown_end=end+3000000;
-+	drained=drain(s,s->teardown_end);
++	/* Never drain a faulted stream here: terminated DMA may never complete.
++	 * Each close/unmap gets its own bounded attempt, independent of AFE. */
 +	if (s->stream_attempted) {
 +		int e=command(s,MI8_PCM_CLOSE,true); closed=!e;
-+		if (e==ETIMEDOUT) cleanup_uncertain=true;
-+		if (e && (!s->canary_phase || e!=EIO)) success=false;
-+		if (e==EIO && s->canary_phase) pcm_log(s,"asm: close returned error after canary; unmap/ownership checks still required");
++		if (e) { success=false;pcm_log(s,"Pending ASM stream close; no retry, PAS shutdown required"); }
 +	} else closed=true;
-+	if (s->map_attempted && s->handle && (closed || drained)) { int e=command(s,MI8_PCM_UNMAP,true);unmapped=!e; if (e) success=false; if (e==ETIMEDOUT) cleanup_uncertain=true; }
++	if (s->map_attempted && s->handle && closed) { int e=command(s,MI8_PCM_UNMAP,true);unmapped=!e; if (e) success=false; }
 +	else unmapped=!s->map_attempted;
 +	if (s->adm_attempted) {
++		adm_closed=false;
 +		if (s->copp==0xffff) { pcm_log(s,"Pending: ADM open completion/COPP unknown; no guessed close port");success=false; }
-+		else { int e=command(s,MI8_PCM_ADM_CLOSE,true);if (e) success=false; if (e==ETIMEDOUT) cleanup_uncertain=true; }
++		else { int e=command(s,MI8_PCM_ADM_CLOSE,true);adm_closed=!e;if (e) { success=false;pcm_log(s,"Pending ADM device close; no retry, PAS shutdown required"); } }
 +	}
-+	/* A successful close plus unmap can quiesce a timed-out canary; an error
-+	 * close alone never authorizes freeing RAM that still has outstanding DMA. */
-+	s->result.dsp_safe=unmapped && (closed || drained) && !cleanup_uncertain;
++	/* DSP-safe requires confirmed close AND unmap, or an outer PAS reset.
++	 * A drained queue or an error reply alone cannot authorize releasing RAM. */
++	s->result.dsp_safe=closed && unmapped;
++	s->result.deferred=!s->result.dsp_safe || !adm_closed;
 +	s->result.completed=success && s->result.dsp_safe && !s->result.errors && !s->result.unsupported;
 +	if (!success) pcm_log(s,"play failed: opcode=%#x status=%#x submitted=%u done=%u errors=%u rejected=%u",s->result.failed_opcode,s->result.dsp_status,s->result.submitted,s->result.done,s->result.errors,s->result.rejected);
-+	if (!s->result.dsp_safe) pcm_log(s,"Pending: DSP memory ownership unconfirmed; backing memory will be retained");
++	if (s->result.deferred) pcm_log(s,"Pending stream teardown; SMMU mapping and memory kept until PAS shutdown");
 +	return s->result.completed;
 +}
 +
 +bool
-+mi8_pcm_finish(struct mi8_pcm_state *s)
++mi8_pcm_finish(struct mi8_pcm_state *s, bool pas_shutdown)
 +{
-+	if (!s->mapped || s->finished) return !s->mapped;
++	if (!s->mapped || s->finished) return !s->mapped || !s->result.retained;
 +	s->finished=true;
-+	bool inert=s->io->end(s->io->ctx,s->result.dsp_safe);
++	s->result.dsp_safe=s->result.dsp_safe || pas_shutdown;
++	if (!s->result.dsp_safe) {
++		s->result.retained=true;
++		pcm_log(s,"smmu: end Pending; DSP-safe=0 mapping unchanged, memory retained");
++		return false;
++	}
++	bool inert=s->io->end(s->io->ctx,true);
 +	s->result.retained=!inert || !s->result.dsp_safe;
 +	s->result.completed=s->result.completed && inert;
 +	pcm_log(s,"smmu: end %s; DSP-safe=%u memory %s",inert?"inert (SMR restored, M=0, TLB synced)":"Pending",s->result.dsp_safe,s->result.retained?"retained":"released");
-+	return s->result.completed;
++	return !s->result.retained;
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5793031a69389a5453a5c4bbafee2b94e7d4667e
+index 0000000000000000000000000000000000000000..ac17def71fbeb6506bb5f50a54fa184d45b533c9
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,60 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
@@ -6655,6 +6699,10 @@ index 0000000000000000000000000000000000000000..5793031a69389a5453a5c4bbafee2b94
 +#define MI8_PCM_PERIOD 3840u
 +#define MI8_PCM_PERIODS 150u
 +#define MI8_PCM_ADDRESS (MI8_AS_IOVA | 1ull << 32)
++/* Register 64 KiB with ASM, but map only the first 32 KiB in the SMMU.
++ * The canary at +32 KiB must pass ASM bounds checking before it can test DMA
++ * translation. All ordinary PCM periods stay within the mapped 32 KiB. */
++#define MI8_PCM_MAP_BYTES 65536u
 +struct mi8_pcm_memory {
 +	void *buffer;
 +	uint64_t address, pages[8];
@@ -6676,7 +6724,7 @@ index 0000000000000000000000000000000000000000..5793031a69389a5453a5c4bbafee2b94
 +};
 +struct mi8_pcm_job { uint64_t address; uint32_t token, handle, status; bool active, canary; };
 +struct mi8_pcm_result {
-+	bool proven, completed, dsp_safe, retained, unsupported;
++	bool proven, completed, dsp_safe, retained, unsupported, deferred;
 +	uint32_t failed_opcode, dsp_status, submitted, done, errors, underflow, rejected;
 +	unsigned lines;
 +};
@@ -6685,7 +6733,7 @@ index 0000000000000000000000000000000000000000..5793031a69389a5453a5c4bbafee2b94
 +	struct mi8_pcm_memory memory;
 +	struct mi8_pcm_job jobs[10];
 +	struct mi8_pcm_result result;
-+	uint64_t deadline, teardown_end;
++	uint64_t deadline;
 +	uint32_t token, handle;
 +	uint16_t copp;
 +	unsigned phase;
@@ -6698,8 +6746,9 @@ index 0000000000000000000000000000000000000000..5793031a69389a5453a5c4bbafee2b94
 +bool mi8_pcm_receive(struct mi8_pcm_state *, const void *, size_t);
 +int mi8_pcm_canary_verdict(uint64_t, const struct mi8_smmu_fault *, const struct mi8_smmu_fault *);
 +bool mi8_pcm_run(struct mi8_pcm_state *, const struct mi8_pcm_ops *, uint64_t);
-+/* Called only after AFE stop/clock off/pin restore. */
-+bool mi8_pcm_finish(struct mi8_pcm_state *);
++/* Called after AFE stop/clock off/pin restore; pass true only after PAS reset.
++ * Without confirmed close+unmap or PAS success, leaves the mapping untouched. */
++bool mi8_pcm_finish(struct mi8_pcm_state *, bool pas_shutdown);
 +#endif
 diff --git a/bsd/dev/mi8_audio_smmu.c b/bsd/dev/mi8_audio_smmu.c
 new file mode 100644
@@ -13343,10 +13392,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..ba980bf428171bf9cd78b0e8e03730b316412c49
+index 0000000000000000000000000000000000000000..feb1a61a7551d3047e9dda7d808351a6f3642328
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4286 @@
+@@ -0,0 +1,4294 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -13431,7 +13480,7 @@ index 0000000000000000000000000000000000000000..ba980bf428171bf9cd78b0e8e03730b3
 +/* Only the explicit playback worker uses the compact boot log and deadline.
 + * Other threads (including Wi-Fi/modem) retain their existing logging/timing. */
 +static thread_t audio_play_thread;
-+static bool audio_play_brief;
++static bool audio_play_brief, audio_play_locked;
 +static uint64_t audio_play_until;
 +static char audio_play_note[400];
 +static bool audio_play_worker(void) { return audio_play_thread && current_thread() == audio_play_thread; }
@@ -17322,9 +17371,14 @@ index 0000000000000000000000000000000000000000..ba980bf428171bf9cd78b0e8e03730b3
 +	if (last >= 13) {
 +		/* Serialize the complete claim/use/detach lifetime with Wi-Fi. */
 +		lck_mtx_lock(&wsmmu_lock);
++		audio_play_locked=true;
++		/* Firmware loading has its own budget; playback starts with ADSP up. */
++		audio_play_until = now_us() + 15000000;
 +		bool okay = mi8_audio_run_play(&cfg, audio_alive, &adsp_remote, NULL, NULL, audio_play_until);
 +		audio_play_until=mi8_audio_play_teardown_end();
-+		lck_mtx_unlock(&wsmmu_lock);
++		if (!mi8_audio_play_needs_finish()) {
++			lck_mtx_unlock(&wsmmu_lock);audio_play_locked=false;
++		}
 +		return okay;
 +	}
 +	return last >= 10 ? mi8_audio_run_afe(&cfg, audio_alive, &adsp_remote, NULL) :
@@ -17347,7 +17401,7 @@ index 0000000000000000000000000000000000000000..ba980bf428171bf9cd78b0e8e03730b3
 +{
 +	uint32_t last = (uint32_t)(uintptr_t)parameter;
 +	uint8_t probe;
-+	if (last >= 13) { audio_play_thread=current_thread();audio_play_until=now_us()+15000000; }
++	if (last >= 13) { audio_play_thread=current_thread();audio_play_until=now_us()+45000000; /* partition readiness, firmware loading and ADSP start */ }
 +
 +	for (unsigned i = 0; i < 600; i++) {
 +		if (last >= 13 && now_us()>=audio_play_until-3000000) {
@@ -17397,12 +17451,15 @@ index 0000000000000000000000000000000000000000..ba980bf428171bf9cd78b0e8e03730b3
 +			qmp_send("{class: image, res: load_state, name: adsp, val: off}");
 +		}
 +		if (last >= 13) {
-+			bool complete = apr && down && adsp_last_stop_acked && adsp_last_aop_off;
++			bool complete = mi8_audio_finish_play(down) && down;
++			if (audio_play_locked) { lck_mtx_unlock(&wsmmu_lock);audio_play_locked=false; }
 +			if (started_here && !adsp_last_stop_acked) say("mi8rp: 13: Pending ADSP stop-ack\n");
 +			if (started_here && !down) say("mi8rp: 13: Pending PAS shutdown\n");
 +			if (started_here && !adsp_last_aop_off) say("mi8rp: 13: Pending AOP off\n");
-+			say("mi8rp: step 13: PROVEN=%u %s (PCM/AFE/close/stop/PAS/AOP)\n",
-+			    complete && mi8_audio_play_proven(), complete ? (mi8_audio_play_proven() ? "completed" : "NOT PROVEN; cleanup complete") : "FAILED/Pending");
++			say("mi8rp: step 13: PROVEN=%u cleanup=%s%s%s\n",mi8_audio_play_proven(),
++			    complete?"complete":"Pending (AFE/PAS/SMMU)",
++			    started_here && !adsp_last_stop_acked?" (stop-ack missing)":"",
++			    started_here && !adsp_last_aop_off?" (AOP off Pending)":"");
 +		} else if (last >= 10) {
 +			if (started_here && !adsp_last_stop_acked) say("mi8rp: 10: Pending ADSP stop-ack\n");
 +			if (started_here && !down) say("mi8rp: 10: Pending PAS shutdown\n");
