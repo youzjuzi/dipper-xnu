@@ -48,7 +48,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original modules; third-party portions excluded",
-      "sha256": "75925396d4638b2aa5124801b621494cddd9d817005345679105279ca792756b"
+      "sha256": "afa20c4fd42246a8ba0298e169075bb6ad8c7d0d42be0a5176365b0fc05cd7dd"
     },
     {
       "component": "xnu-mi8",
@@ -712,7 +712,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 Linux apr.c/q6core.c 的协议，未复制代码",
-      "sha256": "8a36238666b4ef95f01cad8ccdf20ae17fa800d202985fd55c1c617ea6218896"
+      "sha256": "9d96d5c1f84f52baed624055470f22d712375d34bf26984cd134580d6df591e9"
     },
     {
       "component": "xnu-mi8",

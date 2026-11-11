@@ -5566,10 +5566,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e6d17134daeafdfa6f524799361b16826a218a71
+index 0000000000000000000000000000000000000000..d19d798b0440f1b155d1ec821e5053a3b965e752
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,269 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
@@ -5647,29 +5647,33 @@ index 0000000000000000000000000000000000000000..e6d17134daeafdfa6f524799361b1682
 +mi8_apr_receive(struct mi8_apr_reply *reply, const void *data, size_t length)
 +{
 +	const uint8_t *p = data;
-+	uint32_t opcode, count, base, width;
++	uint32_t opcode, count, base, width, hl;
 +	if (!reply || !p || reply->done || !reply->token || !reply->response) return EINVAL;
-+	if (length < 20 || length > 4096 || p[0] != 0x50 || p[1] != 1 ||
++	/* The DSP's replies carry a header of 8 words (hdr_field 0x0081, EVENT, version 1), longer than our 5-word requests
++	 * (0x0250): the header length is in bits 4..7 of hdr_field, in words. The payload follows it. */
++	if (length < 20 || length > 4096) return EPROTO;
++	hl = (uint32_t)(p[0] >> 4) * 4;
++	if ((p[0] & 0xf) != 1 || hl < 20 || hl > length ||
 +	    ((size_t)p[2] | (size_t)p[3] << 8) != length ||
 +	    p[4] != 3 || p[5] != 4 || p[6] || p[7] ||
 +	    p[8] != 3 || p[9] != 5 || p[10] || p[11] || read32(p + 12) != reply->token) return EPROTO;
 +	opcode = read32(p + 16);
 +	if (opcode == BASIC_REPLY) {
-+		if (length != 28 || read32(p + 20) != reply->request) return EPROTO;
++		if (length != hl + 8 || read32(p + hl) != reply->request) return EPROTO;
 +		/* A successful basic ACK is not the requested state/version payload. */
-+		if (!read32(p + 24)) return 0;
-+		reply->dsp_status = read32(p + 24);
++		if (!read32(p + hl + 4)) return 0;
++		reply->dsp_status = read32(p + hl + 4);
 +		reply->error = reply->dsp_status == 3 ? ENOTSUP : EIO;
 +		reply->done = true;
 +		return 0;
 +	}
 +	if (opcode != reply->response) return EPROTO;
 +	if (opcode == STATE_REPLY) {
-+		if (length != 24) return EPROTO;
-+		reply->state = read32(p + 20); reply->done = true;
++		if (length != hl + 4) return EPROTO;
++		reply->state = read32(p + hl); reply->done = true;
 +		return 0;
 +	}
-+	base = opcode == FWK_REPLY ? 40 : 28;
++	base = hl + (opcode == FWK_REPLY ? 20 : 8);
 +	width = opcode == FWK_REPLY ? 12 : 8;
 +	if (length < base) return EPROTO;
 +	count = read32(p + base - 4);
@@ -5706,7 +5710,15 @@ index 0000000000000000000000000000000000000000..e6d17134daeafdfa6f524799361b1682
 +receive(void *ctx, const void *packet, size_t length)
 +{
 +	struct audio_session *session = ctx;
-+	if (mi8_apr_receive(&session->reply, packet, length)) session->rejected++;
++	if (mi8_apr_receive(&session->reply, packet, length)) {
++		/* One bounded diagnostic for the first rejected packet. */
++		if (!session->rejected) {
++			const uint8_t *q = packet; uint32_t w[8] = { 0 };
++			memcpy(w, q, length < 32 ? length : 32);
++			if (session->io->log) session->io->log(session->io->ctx, "mi8au: rx rejected len=%u %08x %08x %08x %08x %08x %08x %08x %08x\n", (unsigned)length, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
++		}
++		session->rejected++;
++	}
 +}
 +
 +static bool
@@ -5769,7 +5781,7 @@ index 0000000000000000000000000000000000000000..e6d17134daeafdfa6f524799361b1682
 +	transport = *cfg;
 +	/* Low-level per-intent logs would fill the loader's 32 KiB log. Report
 +	 * the phase and status here once; never print a packet in a retry loop. */
-+	transport.log = NULL;
++	transport.log = cfg->log; /* Raw GLINK filters to errors and bounded summaries. */
 +	transport.raw.name = "apr_audio_svc"; transport.raw.local_cid = 2;
 +	transport.raw.intent_sizes = intents; transport.raw.intent_count = 20;
 +	transport.raw.receive = receive; transport.raw.ctx = &session;
@@ -9706,10 +9718,10 @@ index 0000000000000000000000000000000000000000..f860b0c6c5f0ec72ee9ddbeef1191daf
 +}
 diff --git a/bsd/dev/mi8_glink.c b/bsd/dev/mi8_glink.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b089a2e6c51
+index 0000000000000000000000000000000000000000..035000e3d793c64eeb780acd16f22f9947e182f0
 --- /dev/null
 +++ b/bsd/dev/mi8_glink.c
-@@ -0,0 +1,1082 @@
+@@ -0,0 +1,1115 @@
 +#include "mi8_glink.h"
 +
 +#ifdef MI8_GLINK_HOST_TEST
@@ -9741,12 +9753,14 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +#define LOOKUPS 16
 +#define SERVERS 64
 +#define INTENTS 64
++#define FOREIGN_INTENTS 256 /* the audio DSP offers 65 or more receive buffers on apr_audio_svc at once */
 +#define MAX_PACKET 65536u
 +#define WAIT_US 5000000u
 +#define CTRL 0xfffffffeu
 +#define BCAST 0xffffffffu
 +#define RESERVE 16u
-+#define LOG(g, ...) do { if ((g)->cfg.log) (g)->cfg.log((g)->cfg.ctx, __VA_ARGS__); } while (0)
++#define REPORT(g, ...) do { if ((g)->cfg.log) (g)->cfg.log((g)->cfg.ctx, __VA_ARGS__); } while (0)
++#define LOG(g, ...) do { if (!(g)->cfg.raw.name) REPORT(g, __VA_ARGS__); } while (0)
 +
 +enum {
 +	VERSION = 0, VERSION_ACK = 1, OPEN = 2, CLOSE = 3, OPEN_ACK = 4,
@@ -9796,14 +9810,17 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +	struct mi8_glink_cfg cfg;
 +	char raw_name[32];
 +	uint32_t raw_sizes[INTENTS];
-+	bool raw_stopping;
++	bool raw_stopping, raw_reported;
++	uint32_t ignored_foreign;
++	uint16_t unsupported_cids[8];
++	unsigned unsupported_count;
 +	uintptr_t owner;
 +	unsigned depth, slot;
 +	uint32_t desc, tx, tx_size, rx, rx_size;
 +	bool up, broken, agreed, asked, acked, opened, closing, hello;
 +	bool notified;
 +	uint32_t notify_tail, features, remote, peer, next_port, next_intent;
-+	struct intent local[INTENTS], foreign[INTENTS];
++	struct intent local[INTENTS], foreign[FOREIGN_INTENTS];
 +	struct command *commands, *command_last;
 +	unsigned command_count, outgoing_count;
 +	struct outgoing *outgoing, *outgoing_last;
@@ -9821,6 +9838,25 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +local_cid(struct mi8_glink *g)
 +{
 +	return g->cfg.raw.name ? g->cfg.raw.local_cid : 1;
++}
++
++/* Keep the original modem limit; only raw ADSP needs the larger table. */
++static unsigned
++foreign_limit(struct mi8_glink *g)
++{
++	return g->cfg.raw.name ? FOREIGN_INTENTS : INTENTS;
++}
++
++static void
++unsupported_channel(struct mi8_glink *g, uint16_t cid, const char *name)
++{
++	if (g->cfg.raw.name) {
++		for (unsigned i = 0; i < g->unsupported_count; i++)
++			if (g->unsupported_cids[i] == cid) return;
++		if (g->unsupported_count == 8) return;
++		g->unsupported_cids[g->unsupported_count++] = cid;
++	}
++	REPORT(g, "mi8gl: unsupported remote channel %u %s: acknowledged, data ignored\n", cid, name);
 +}
 +
 +static uint32_t
@@ -9880,7 +9916,7 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +broken(struct mi8_glink *g, const char *why)
 +{
 +	if (!g->broken)
-+		LOG(g, "mi8gl: GLINK error: %s (%s pid %u)\n", why, g->cfg.name, g->cfg.remote_pid);
++		REPORT(g, "mi8gl: GLINK error: %s (%s pid %u)\n", why, g->cfg.name, g->cfg.remote_pid);
 +	g->broken = true;
 +}
 +
@@ -10069,7 +10105,7 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +{
 +	struct outgoing *o = g->outgoing;
 +	unsigned i;
-+	if (error && !o->offset && (o->iid || (g->cfg.raw.name && o->intent_selected))) for (i = 0; i < INTENTS; i++)
++	if (error && !o->offset && (o->iid || (g->cfg.raw.name && o->intent_selected))) for (i = 0; i < foreign_limit(g); i++)
 +		if (g->foreign[i].there && g->foreign[i].id == o->iid) g->foreign[i].busy = false;
 +	if (error && o->length > 1000) LOG(g, "mi8gl: send of %u bytes FAILED (%d), offset %u, intent %u\n", o->length, error, o->offset, o->iid);
 +	g->outgoing = o->next;
@@ -10077,7 +10113,7 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +	g->outgoing_count--;
 +	o->done = true; o->error = error;
 +	if (!o->synchronous) {
-+		if (error) LOG(g, "mi8gl: GLINK error: QRTR control send errno %d\n", error);
++		if (error) REPORT(g, "mi8gl: GLINK error: QRTR control send errno %d\n", error);
 +		MI8_FREE(o, sizeof(*o) + o->length);
 +	}
 +}
@@ -10104,7 +10140,7 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +		}
 +		if (g->commands) return;
 +		if (g->cfg.raw.name ? !o->intent_selected : !o->iid) {
-+			for (i = 0; i < INTENTS; i++) {
++			for (i = 0; i < foreign_limit(g); i++) {
 +				struct intent *v = &g->foreign[i];
 +				if (v->there && !v->busy && v->size >= o->length &&
 +				    (best < 0 || v->size < g->foreign[best].size)) best = (int)i;
@@ -10281,7 +10317,7 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +	}
 +	return;
 +bad:
-+	LOG(g, "mi8gl: GLINK error: malformed QRTR packet dropped\n");
++	REPORT(g, "mi8gl: GLINK error: malformed QRTR packet dropped\n");
 +}
 +
 +static void
@@ -10365,13 +10401,18 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +				/* Linux does not refuse these: the modem's firmware numbers its intents from 0 (EXP-0200); a zero size is of no use, skip it */
 +				LOG(g, "mi8gl: remote intent id %u size %u (%s)\n", id, size, g->cfg.name);
 +				if (!size) continue;
-+				for (j = 0; j < INTENTS; j++) if (g->foreign[j].there && g->foreign[j].id == id) break;
-+				if (j < INTENTS) {
++				for (j = 0; j < foreign_limit(g); j++) if (g->foreign[j].there && g->foreign[j].id == id) break;
++				if (j < foreign_limit(g)) {
 +					if (g->foreign[j].busy || g->foreign[j].size != size) { broken(g, "conflicting remote intent"); return; }
 +					continue;
 +				}
-+				for (j = 0; j < INTENTS; j++) if (!g->foreign[j].there) break;
-+				if (j == INTENTS) { broken(g, "remote intent table exhausted"); return; }
++				for (j = 0; j < foreign_limit(g); j++) if (!g->foreign[j].there) break;
++				if (j == foreign_limit(g)) {
++					if (!g->cfg.raw.name) { broken(g, "remote intent table exhausted"); return; }
++					/* Excess advertisements do not invalidate retained intents. */
++					if (g->ignored_foreign != UINT32_MAX) g->ignored_foreign++;
++					continue;
++				}
 +				g->foreign[j].there = true; g->foreign[j].id = id; g->foreign[j].size = size;
 +			}
 +		}
@@ -10425,7 +10466,7 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +			    (!g->cfg.raw.name && (arg & 0xffff) == 7 && !memcmp(extra, "IPCRTR", 7))) {
 +				if (g->remote && g->remote != cid) { broken(g, "IPCRTR channel changed without close"); break; }
 +				g->remote = cid;
-+			} else LOG(g, "mi8gl: unsupported remote channel %u %s: acknowledged, data ignored\n", cid, extra);
++			} else unsupported_channel(g, (uint16_t)cid, (const char *)extra);
 +			break;
 +		case OPEN_ACK:
 +			if (cid == local_cid(g) && g->asked && !g->closing) g->acked = true;
@@ -10445,7 +10486,7 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +			break;
 +		case DONE:
 +		case DONE_REUSE:
-+			if (cid == g->remote) for (i = 0; i < INTENTS; i++) if (g->foreign[i].there && g->foreign[i].id == arg) {
++			if (cid == g->remote) for (i = 0; i < foreign_limit(g); i++) if (g->foreign[i].there && g->foreign[i].id == arg) {
 +				/* The modem can answer before emit() has returned and offset has been counted (it is quick, EXP-0200): not an error. */
 +				if (g->foreign[i].size > 1000) LOG(g, "mi8gl: remote done with intent %u (size %u), %s\n", arg, g->foreign[i].size, cmd == DONE_REUSE ? "reusable" : "gone");
 +				g->foreign[i].busy = false;
@@ -10647,7 +10688,7 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +	if (g->broken) error = EIO;
 +	goto out;
 +bad:
-+	LOG(g, "mi8gl: GLINK error: invalid or missing FIFO\n");
++	REPORT(g, "mi8gl: GLINK error: invalid or missing FIFO\n");
 +out:
 +	leave(g);
 +	return error;
@@ -10779,12 +10820,16 @@ index 0000000000000000000000000000000000000000..43f24286f41bd982bb510b70cbd05b08
 +	if (!g || !g->cfg.raw.name || !timeout_ms || timeout_ms > 5000) return EINVAL;
 +	enter(g);
 +	g->raw_stopping = true;
++
 +	start = g->cfg.now_us(g->cfg.ctx);
 +	if (g->up && g->asked && !g->closing) { g->closing = true; say(g, CLOSE, local_cid(g), 0, NULL, 0); }
 +	while (g->asked && !g->broken && g->cfg.now_us(g->cfg.ctx) - start < (uint64_t)timeout_ms * 1000) {
 +		pump(g); progress(g);
 +		if (g->asked) g->cfg.sleep_us(g->cfg.ctx, 1000);
 +	}
++	if (!g->raw_reported && g->ignored_foreign)
++		REPORT(g, "mi8gl: ignored %u excess remote intent advertisements\n", g->ignored_foreign);
++	g->raw_reported = true;
 +	if (g->asked) error = g->broken ? EIO : ETIMEDOUT;
 +	/* stop must not send a second close after a timeout. */
 +	g->up = false;
