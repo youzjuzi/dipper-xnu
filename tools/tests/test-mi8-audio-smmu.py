@@ -79,6 +79,45 @@ int main(void){
     subprocess.run([str(exe)], env=run_env, check=True)
 
 
+def check_native_claim(engine, dev, tmp, cflags, run_env):
+    # Compile the real native reservation bridge, not a hand-written surrogate.
+    bridge = body(engine, 'bool\nmi8_audio_smmu_reserved(')
+    native_run = body(engine, 'void\nmi8_audio_smmu_run(')
+    assert 'native_table_read, &native_claim' in native_run
+    assert 'if (native_result.retained)' in native_run
+    code = r'''
+#include "mi8_audio_smmu.h"
+#include <stdio.h>
+#include <stdlib.h>
+static struct mi8_smmu_claim native_claim;
+static struct mi8_smmu_result native_result;
+static unsigned checks;
+#define CHECK(x) do {checks++; if(!(x)) abort();} while(0)
+''' + bridge + r'''
+int main(void) {
+ CHECK(!mi8_audio_smmu_reserved(~0u,43));
+ native_claim.owned=true; native_claim.bank=43;
+ CHECK(mi8_audio_smmu_reserved(~0u,43));
+ CHECK(!mi8_audio_smmu_reserved(8,~0u));
+ CHECK(!mi8_audio_smmu_reserved(~0u,44));
+ native_result.retained=true; native_result.slot=8; native_result.bank=43;
+ CHECK(mi8_audio_smmu_reserved(8,~0u));
+ CHECK(mi8_audio_smmu_reserved(~0u,43));
+ native_result.retained=false;
+ CHECK(!mi8_audio_smmu_reserved(8,~0u));
+ CHECK(mi8_audio_smmu_reserved(~0u,43));
+ printf("Native SMMU claim bridge SELFTEST PASS %u/%u\n",checks,checks);
+ return 0;
+}
+'''
+    c, exe = Path(tmp) / 'claim.c', Path(tmp) / 'claim'
+    c.write_text(code)
+    subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', *cflags,
+                    '-DMI8_SMMU_HOST_TEST', '-I' + str(dev), str(c),
+                    str(dev / 'mi8_audio_smmu.c'), '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], env=run_env, check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tree', type=Path, default=ROOT / 'work')
@@ -101,6 +140,7 @@ def main():
         assert source.index('if (last >= 11)') < source.index('if (last >= 1)', source.index('if (last >= 11)'))
         assert 'audio_smmu_serial = shared_step >= 12;' in source
         assert 'mi8_audio_smmu_reserved(n, ~0u)' in source and 'mi8_audio_smmu_reserved(~0u, n)' in source
+        check_native_claim((dev / 'mi8_audio_smmu.c').read_text(), dev, tmp, cflags, run_env)
         check_shared_allocation(source, tmp, cflags, run_env)
 
 

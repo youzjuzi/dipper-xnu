@@ -6205,10 +6205,10 @@ index 0000000000000000000000000000000000000000..43386b9ab0d51a1864305486a25c1384
 +#endif
 diff --git a/bsd/dev/mi8_audio_smmu.c b/bsd/dev/mi8_audio_smmu.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c770d1bdf
+index 0000000000000000000000000000000000000000..d262099b58fb8e8b6d71c2eb47b47d351cd56e6f
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_smmu.c
-@@ -0,0 +1,459 @@
+@@ -0,0 +1,512 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independently written from SMMUv2 register/descriptor formats and the
 + * existing apps SMMU adapters. Software checks do not establish DMA reachability. */
@@ -6236,6 +6236,9 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +#define AS_SCTLR (1u | 1u << 1 | 1u << 2 | 1u << 5 | 1u << 12)
 +#define AS_CBAR_VALUE (1u << 16 | 3u << 8 | 15u << 12)
 +#define AS_MAIR 0xf404ff44u
++/* Measured FSR=0x400 in five hypervisor-configured idle banks (CB0..4).
++ * Bit 10 is outside the SMMUv2 standard fault flags; no other bit is exempt. */
++#define AS_FSR_CONFIGURED_IDLE (1u << 10)
 +
 +struct as_bank_regs { uint32_t cbar, cba2r, ctl, lo, hi, tcr, fsr; };
 +struct as_state {
@@ -6243,10 +6246,10 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +	struct mi8_smmu_result *out;
 +	uint32_t scr, id0, id1, id2, gfsr, page, cbbase, oas;
 +	uint32_t smr[76], s2cr[76];
-+	bool used[45], failed, truncated;
++	bool used[45], failed, truncated, reuse_allowed;
 +	unsigned rejected[6]; /* referenced, CBAR, CBA2R, M, FSR, unstable */
 +	struct as_bank_regs selected;
-+	uint32_t restored_ctl_difference;
++	uint32_t fsr;
 +};
 +struct as_reg { uint32_t at, old, value; };
 +
@@ -6362,25 +6365,32 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +	if (!as_bank_read(s, bank, r) || !as_read(s, b, &ctl) || !as_read(s, b + 0x20, &lo) ||
 +	    !as_read(s, b + 0x24, &hi) || !as_read(s, b + 0x30, &tcr)) return false;
 +	/* Disabled, unconfigured banks can contain stable power-on residue. */
-+	reason[0] = r->cbar != 0; reason[1] = r->cba2r != 0; reason[2] = (r->ctl & 1) != 0;
-+	reason[3] = r->fsr != 0; reason[4] = r->ctl != ctl || r->lo != lo || r->hi != hi || r->tcr != tcr;
++	bool ours = s->reuse_allowed && s->io->claim->owned && s->io->claim->bank == bank;
++	reason[0] = !ours && r->cbar != 0; reason[1] = !ours && r->cba2r != 0; reason[2] = (r->ctl & 1) != 0;
++	reason[3] = ours ? (r->fsr & ~AS_FSR_CONFIGURED_IDLE) != 0 : r->fsr != 0;
++	reason[4] = r->ctl != ctl || r->lo != lo || r->hi != hi || r->tcr != tcr;
 +	for (unsigned n = 0; n < 5; n++) if (reason[n]) { s->rejected[n + 1]++; free = false; }
 +	return free;
 +}
 +
-+/* Only restoration may tolerate non-M differences. Configuration/hold checks
-+ * still require exact echoes; M must always be zero on this path. */
-+static bool
-+as_restore_ctl(struct as_state *s, uint32_t cb, uint32_t saved, bool write, bool report)
++/* Shared with the native Wi-Fi allocator; a successfully detached slot is
++ * reusable, but a claimed bank remains ours even if CBAR accepted restoration. */
++bool
++mi8_smmu_reserved(const struct mi8_smmu_claim *claim, const struct mi8_smmu_result *result,
++    unsigned slot, unsigned bank)
 +{
-+	uint32_t got;
-+	if (saved & 1) return false;
-+	if (write && (!as_read(s, cb, &got) || !s->io->write(s->io->ctx, cb, saved))) return false;
-+	if (!as_read(s, cb, &got)) return false;
-+	if (got & 1) { as_log(s, "Pending: SCTLR restore M mismatch saved=%#x got=%#x", saved, got); return false; }
-+	if (report && (got ^ saved)) as_log(s, "SCTLR restore diff=%#x saved=%#x got=%#x (M=0)", got ^ saved, saved, got);
-+	if (!write) s->restored_ctl_difference = got ^ saved;
-+	return true;
++	return (claim->owned && bank == claim->bank) ||
++	    (result->retained && (slot == (unsigned)result->slot || bank == (unsigned)result->bank));
++}
++
++/* Best-effort clearing of claimed, disabled state. Never short-circuit the
++ * remaining registers on an ignored write or failed readback. */
++static void
++as_sticky(char *summary, size_t size, uint32_t at, bool readable, uint32_t got)
++{
++	size_t len = strlen(summary);
++	if (readable) snprintf(summary + len, size - len, " +%#x=%#x", at, got);
++	else snprintf(summary + len, size - len, " +%#x=unreadable", at);
 +}
 +
 +static bool
@@ -6426,11 +6436,21 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +		if (!as_bank_read(s, n, &r)) return false;
 +		as_bank_report(s, n, &r, false);
 +	}
-+	/* Bank 44 is reserved for Wi-Fi even before its SMR is installed. */
-+	for (unsigned n = 44; n-- > ((s->id1 >> 16) & 255);) {
-+		if (s->used[n]) { s->rejected[0]++; continue; }
-+		if (as_bank_free(s, n, &s->selected)) { s->out->bank = (int)n; as_bank_report(s, n, &s->selected, true); break; }
-+		if (s->failed) break;
++	/* Prefer our existing claim. A referenced, enabled or unstable claim is
++	 * refused rather than abandoned in favor of stealing another bank. */
++	if (s->reuse_allowed && s->io->claim->owned) {
++		unsigned n = s->io->claim->bank;
++		if (n < 44 && n >= ((s->id1 >> 16) & 255) && !s->used[n] && as_bank_free(s, n, &s->selected)) {
++			s->out->bank = (int)n; as_bank_report(s, n, &s->selected, true);
++			as_log(s, "reuse claimed bank %u: M=0, no S2CR references", n);
++		}
++	} else {
++		/* Bank 44 is reserved for Wi-Fi even before its SMR is installed. */
++		for (unsigned n = 44; n-- > ((s->id1 >> 16) & 255);) {
++			if (s->used[n]) { s->rejected[0]++; continue; }
++			if (as_bank_free(s, n, &s->selected)) { s->out->bank = (int)n; as_bank_report(s, n, &s->selected, true); break; }
++			if (s->failed) break;
++		}
 +	}
 +	as_log(s, "candidate SMR=%d CB=%d (CB44 reserved for Wi-Fi)", s->out->slot, s->out->bank);
 +	if (s->out->bank < 0) as_log(s, "bank rejects: referenced=%u CBAR!=0=%u CBA2R!=0=%u M=1=%u FSR!=0=%u unstable=%u",
@@ -6445,7 +6465,8 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +	uint32_t global, local, farlo, farhi;
 +	if (!as_read(s, 0x48, &global) || !as_read(s, cb + 0x58, &local) ||
 +	    !as_read(s, cb + 0x60, &farlo) || !as_read(s, cb + 0x64, &farhi)) return false;
-+	if (global || local) { as_log(s, "fault: GFSR=%#x FSR=%#x FAR=%#x:%08x", global, local, farhi, farlo); return false; }
++	s->fsr = local;
++	if (global || (local & ~AS_FSR_CONFIGURED_IDLE)) { as_log(s, "fault: GFSR=%#x FSR=%#x FAR=%#x:%08x", global, local, farhi, farlo); return false; }
 +	return true;
 +}
 +
@@ -6499,15 +6520,15 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +void
 +mi8_smmu_diagnose(const struct mi8_smmu_ops *io, unsigned step, struct mi8_smmu_result *out)
 +{
-+	struct as_state s = { .io = io, .out = out };
++	struct as_state s = { .io = io, .out = out, .reuse_allowed = step >= 12 && io->claim != NULL };
 +	struct mi8_smmu_memory mem = { 0 };
 +	struct as_reg regs[12];
-+	uint32_t cb, slot, bank, fault_far[2], global_far[2];
++	uint32_t cb, slot, bank;
 +	bool good = false, clean = true, allocated = false, touched = false;
 +	memset(out, 0, sizeof(*out)); out->slot = out->bank = -1;
 +	if (!as_probe(&s)) return;
 +	if (step < 12) { as_log(&s, "read-only report; no SMMU register writes"); return; }
-+	if (out->slot < 0 || out->bank < 0 || s.gfsr || (s.scr & 1) || !(s.scr & 1u << 10)) {
++	if (!io->claim || out->slot < 0 || out->bank < 0 || s.gfsr || (s.scr & 1) || !(s.scr & 1u << 10)) {
 +		as_log(&s, "precondition refused; no SMMU register writes"); return;
 +	}
 +	slot = (unsigned)out->slot; bank = (unsigned)out->bank; cb = AS_CB(bank);
@@ -6517,8 +6538,7 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +	for (unsigned n = 0; n < 12; n++) {
 +		regs[n].at = offsets[n]; if (!as_read(&s, offsets[n], &regs[n].old)) return;
 +	}
-+	if (!as_read(&s, cb + 0x60, &fault_far[0]) || !as_read(&s, cb + 0x64, &fault_far[1]) ||
-+	    !as_read(&s, 0x40, &global_far[0]) || !as_read(&s, 0x44, &global_far[1]) || !as_faults_clear(&s, cb)) return;
++	if (!as_faults_clear(&s, cb)) return;
 +	if (!io->allocate(io->ctx, &mem)) { as_log(&s, "allocation failed; no SMMU register writes"); return; }
 +	allocated = true;
 +	if (!as_tables(&s, &mem)) { as_log(&s, "software page-table check failed; no SMMU writes"); goto finish; }
@@ -6543,13 +6563,21 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +		as_log(&s, "candidate changed/unstable before write; no SMMU writes"); goto finish;
 +	}
 +	touched = true;
++	/* Reserve before the first attempt: a failed echo may still have claimed
++	 * hardware. The same lock is held through cleanup and Wi-Fi allocation. */
++	io->claim->owned = true; io->claim->bank = bank;
 +	for (unsigned n = 0; n < 11; n++) {
 +		if (!as_write(&s, regs[n].at, regs[n].value) || !as_faults_clear(&s, cb)) goto restore;
++		if (n % 3 == 2) as_log(&s, "write/readback +%#x=%#x +%#x=%#x +%#x=%#x exact",
++		    regs[n-2].at, regs[n-2].value, regs[n-1].at, regs[n-1].value, regs[n].at, regs[n].value);
++		else if (n == 10) as_log(&s, "write/readback +%#x=%#x +%#x=%#x exact",
++		    regs[9].at, regs[9].value, regs[10].at, regs[10].value);
 +	}
 +	if (!as_sync(&s, cb, bank) || !as_faults_clear(&s, cb)) goto restore;
 +	if (!as_write(&s, AS_S2CR(slot), regs[11].value) || !as_faults_clear(&s, cb) ||
 +	    !as_write(&s, AS_SMR(slot), 0x1821u | ((s.scr & 8) ? 0 : 1u << 31))) goto restore;
 +	if (!as_faults_clear(&s, cb)) goto restore;
++	as_log(&s, "route write/readback S2CR%u=%#x SMR%u=%#x exact; TLB synchronized", slot, regs[11].value, slot, 0x1821u | ((s.scr & 8) ? 0 : 1u << 31));
 +	io->wait_us(io->ctx, 200000);
 +	for (unsigned n = 0; n < 12; n++) if (!as_equal(&s, regs[n].at, regs[n].value)) goto restore;
 +	if (!as_equal(&s, AS_SMR(slot), 0x1821u | ((s.scr & 8) ? 0 : 1u << 31)) || !as_faults_clear(&s, cb) ||
@@ -6557,25 +6585,49 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +	if (!as_walk_pages(&s, &mem, (uint64_t)regs[3].value << 32 | regs[2].value)) {
 +		as_log(&s, "software walk changed during hold"); goto restore;
 +	}
-+	as_log(&s, "200 ms hold/readback passed; GFSR/FSR clear; hardware translation Pending"); good = true;
-+restore:
-+	/* Remove routing first. Continue independent restoration after a failure,
-+ * but retain memory unless detachment, disable and TLBSYNC are all confirmed. */
++	as_log(&s, "200 ms hold/readback exact (CBAR and SCTLR included); GFSR=0 FSR=%#x (no fault); hardware translation Pending", s.fsr); good = true;
++restore:;
++	/* No DSP or DMA is started here. Detach and disable before invalidating
++	 * TLBs; only confirmed quiescence permits freeing the backing memory. */
++	char sticky[256] = { 0 };
++	uint32_t got = 0, final_cbar = 0;
++	bool readable, wrote;
 +	if (!as_write(&s, AS_SMR(slot), s.smr[slot])) clean = false;
 +	if (!as_write(&s, AS_S2CR(slot), regs[11].old)) clean = false;
-+	if (!as_restore_ctl(&s, cb, 0, true, true)) clean = false;
++	as_log(&s, "route revoke: SMR %u / S2CR %u %s", slot, slot, clean ? "restored" : "unconfirmed");
++	(void)as_read(&s, cb, &got);
++	wrote = io->write(io->ctx, cb, 0); readable = as_read(&s, cb, &got);
++	if (!wrote || !readable || (got & 1)) clean = false;
++	if (!wrote || !readable || got) as_sticky(sticky, sizeof(sticky), cb, readable, got);
 +	if (!as_sync(&s, cb, bank)) clean = false;
-+	for (unsigned n = 0; n < 10; n++) if (!as_write(&s, regs[n].at, regs[n].old)) clean = false;
-+	if (!as_restore_ctl(&s, cb, regs[10].old, true, false)) clean = false;
-+	for (unsigned n = 0; n < 12; n++) if (n != 10 && !as_equal(&s, regs[n].at, regs[n].old)) clean = false;
-+	if (!as_restore_ctl(&s, cb, regs[10].old, false, true)) clean = false;
-+	if (!as_equal(&s, AS_SMR(slot), s.smr[slot]) || !as_faults_clear(&s, cb) ||
-+	    !as_equal(&s, cb + 0x60, fault_far[0]) || !as_equal(&s, cb + 0x64, fault_far[1]) ||
-+	    !as_equal(&s, 0x40, global_far[0]) || !as_equal(&s, 0x44, global_far[1]) || !as_equal(&s, 0, s.scr)) clean = false;
++	/* CBAR is deliberately excluded: at most one restoration attempt below. */
++	for (unsigned n = 1; n < 10; n++) {
++		(void)as_read(&s, regs[n].at, &got);
++		wrote = io->write(io->ctx, regs[n].at, 0);
++		readable = as_read(&s, regs[n].at, &got);
++		if (!wrote || !readable || got) as_sticky(sticky, sizeof(sticky), regs[n].at, readable, got);
++	}
++	/* CBAR may be a one-way hypervisor claim (inference, not established).
++	 * Try the original unconfigured value once, without retries or coercion. */
++	(void)as_read(&s, AS_CBAR(bank), &final_cbar);
++	wrote = io->write(io->ctx, AS_CBAR(bank), 0);
++	readable = as_read(&s, AS_CBAR(bank), &final_cbar);
++	if (readable) as_log(&s, "CBAR restore: wrote 0 got %#x (%s)", final_cbar,
++	    wrote && final_cbar == 0 ? "restored" : "sticky");
++	else as_log(&s, "CBAR restore: wrote 0; readback unavailable (sticky)");
++	if (!wrote || !readable || final_cbar) as_sticky(sticky, sizeof(sticky), AS_CBAR(bank), readable, final_cbar);
++	/* Verify critical detach/disable state again after all independent writes. */
++	if (!as_equal(&s, AS_SMR(slot), s.smr[slot])) clean = false;
++	if (!as_equal(&s, AS_S2CR(slot), regs[11].old)) clean = false;
++	if (!as_read(&s, cb, &got) || (got & 1)) clean = false;
++	if (!as_equal(&s, 0, s.scr)) clean = false;
++	if (!as_faults_clear(&s, cb)) good = false;
++	as_log(&s, "inert check: routes revoked, SCTLR.M=0, TLB synchronized: %s; GFSR/FSR checked (FSR=%#x)", clean ? "confirmed" : "unconfirmed", s.fsr);
++	as_log(&s, "sticky registers:%s", *sticky ? sticky : " none");
 +	out->restored = clean;
-+	as_log(&s, !clean ? "Pending: restoration unconfirmed; memory and SMR/CB reservations retained" :
-+	    s.restored_ctl_difference ? "saved registers restored except reported SCTLR non-M bits; bank disabled" :
-+	    "all saved configuration/fault registers restored exactly");
++	if (clean && readable) as_log(&s, "bank %u claimed (CBAR=%#x), inert; SMR %u / S2CR %u restored", bank, final_cbar, slot, slot);
++	else if (clean) as_log(&s, "bank %u claimed (CBAR unreadable), inert; SMR %u / S2CR %u restored", bank, slot, slot);
++	else as_log(&s, "Pending: inert state unconfirmed; memory and SMR/CB reservations retained");
 +finish:
 +	if (allocated) {
 +		io->cache(io->ctx, &mem);
@@ -6591,6 +6643,7 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +extern void mi8_rproc_smmu_log(const char *);
 +static vm_offset_t native_smmu;
 +static struct mi8_smmu_result native_result;
++static struct mi8_smmu_claim native_claim;
 +static struct mi8_smmu_memory native_memory;
 +
 +static bool
@@ -6656,13 +6709,13 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +bool
 +mi8_audio_smmu_reserved(unsigned slot, unsigned bank)
 +{
-+	return native_result.retained && (slot == (unsigned)native_result.slot || bank == (unsigned)native_result.bank);
++	return mi8_smmu_reserved(&native_claim, &native_result, slot, bank);
 +}
 +void
 +mi8_audio_smmu_run(unsigned step)
 +{
 +	const struct mi8_smmu_ops ops = { NULL, native_read, native_write, native_wait, native_log,
-+	    native_allocate, native_release, native_cache, native_table_read };
++	    native_allocate, native_release, native_cache, native_table_read, &native_claim };
 +	if (native_result.retained) { native_log(NULL, "Pending: prior SMMU reservation retained; reboot required"); return; }
 +	if (!native_smmu) native_smmu = ml_io_map(0x15000000ul, AS_SIZE);
 +	mi8_smmu_diagnose(&ops, step, &native_result);
@@ -6670,10 +6723,10 @@ index 0000000000000000000000000000000000000000..5712536a50d769a4501ccdc82edda71c
 +#endif
 diff --git a/bsd/dev/mi8_audio_smmu.h b/bsd/dev/mi8_audio_smmu.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..474d7913112a46e114ac7587d2f369a9590189e6
+index 0000000000000000000000000000000000000000..38e97a72c4289079ac39db726c803daf34550fa8
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_smmu.h
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,46 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded apps SMMU diagnostics; no remote processor or DMA operations. */
 +#ifndef MI8_AUDIO_SMMU_H
@@ -6689,6 +6742,9 @@ index 0000000000000000000000000000000000000000..474d7913112a46e114ac7587d2f369a9
 +	void *tables, *buffer;
 +	uint64_t table_phys[3], pages[8];
 +};
++/* Caller-owned, zero-initialized; all access uses the Wi-Fi allocation lock.
++ * A claim survives inert cleanup and reserves its bank until reboot. */
++struct mi8_smmu_claim { bool owned; unsigned bank; };
 +struct mi8_smmu_ops {
 +	void *ctx;
 +	bool (*read)(void *, uint32_t, uint32_t *);
@@ -6699,12 +6755,14 @@ index 0000000000000000000000000000000000000000..474d7913112a46e114ac7587d2f369a9
 +	void (*release)(void *, struct mi8_smmu_memory *);
 +	void (*cache)(void *, const struct mi8_smmu_memory *);
 +	bool (*table_read)(void *, uint64_t, uint64_t *);
++	struct mi8_smmu_claim *claim;
 +};
 +struct mi8_smmu_result {
 +	int slot, bank;
 +	bool restored, retained, passed;
 +	unsigned lines;
 +};
++bool mi8_smmu_reserved(const struct mi8_smmu_claim *, const struct mi8_smmu_result *, unsigned, unsigned);
 +bool mi8_smmu_overlap(uint32_t, uint32_t, bool, uint32_t);
 +/* 1: page, 0: invalid descriptor, -1: inaccessible/malformed table. */
 +int mi8_smmu_walk(bool (*)(void *, uint64_t, uint64_t *), void *, uint64_t,

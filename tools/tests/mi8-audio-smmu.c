@@ -19,9 +19,12 @@ struct model {
 	uint32_t regs[0x80000 / 4], before[0x80000 / 4];
 	uint64_t tables[1536], buffer[4096];
 	struct mi8_smmu_memory memory;
+	struct mi8_smmu_claim claim;
 	unsigned writes, allocations, releases, caches, lines, holds;
 	unsigned mismatch_write, drop_forever, unreadable, rewrite, corrupt;
-	unsigned syncs, timeout_sync, faults, cb_reads;
+	unsigned syncs, timeout_sync, faults, cb_reads, global_fault;
+	uint32_t fault_value, cleanup_drop;
+	bool cbar_locked, cbar_writable, no_idle;
 	uint32_t unstable_at, restore_ignore, restore_other_at;
 	unsigned flip_read, seen_reads;
 	bool restore_m;
@@ -55,16 +58,22 @@ write_reg(void *ctx, uint32_t at, uint32_t value)
 		if (at == CB(43) + 0x7f0) { m->syncs++; if (m->syncs == m->timeout_sync) m->tlb_stuck = true; }
 		return true;
 	}
-	if (at == m->drop_forever) return true;
+	if (at == m->drop_forever || (m->holds && at == m->cleanup_drop)) return true;
+	if (at == CBAR(43) && m->cbar_locked && !m->cbar_writable) return true;
 	if (m->restore_block && m->holds && at == CB(43) && value == 0) return true;
 	m->regs[at / 4] = value;
 	if (at == CB(43) && m->holds) {
-		m->regs[at / 4] &= ~m->restore_ignore;
+		m->regs[at / 4] |= m->restore_ignore;
 		if (m->restore_m) m->regs[at / 4] |= 1;
 	}
 	if (m->holds && at == m->restore_other_at) m->regs[at / 4] ^= 2;
 	if (m->mismatch_write == m->writes) m->regs[at / 4] ^= 0x100;
-	if (m->faults == m->writes) m->regs[(CB(43) + 0x58) / 4] = 2;
+	if (at == CBAR(43) && value) {
+		m->cbar_locked = true;
+		if (!m->no_idle) m->regs[(CB(43) + 0x58) / 4] = 0x400;
+	}
+	if (m->global_fault == m->writes) m->regs[0x48/4] = 2;
+	if (m->faults == m->writes) m->regs[(CB(43) + 0x58) / 4] = m->fault_value;
 	return true;
 }
 static void
@@ -114,12 +123,13 @@ static struct model *
 fresh(void)
 {
 	struct model *m = calloc(1, sizeof(*m)); CHECK(m);
-	m->drop_forever = m->unreadable = m->unstable_at = m->restore_other_at = ~0u;
+	m->drop_forever = m->unreadable = m->unstable_at = m->restore_other_at = m->cleanup_drop = ~0u;
+	m->fault_value = 2;
 	m->regs[0] = 0x250406; m->regs[0x20 / 4] = 0x4c017e4c; m->regs[0x24 / 4] = 0x5000002d;
 	m->regs[0x28 / 4] = 0x1222; /* 4K / 40-bit UBS,OAS,IAS */
 	for (unsigned n = 0; n < 76; n++) m->regs[S2CR(n) / 4] = 2u << 16;
 	for (unsigned n = 0; n < 8; n++) { m->regs[SMR(n) / 4] = 0x80000300u + n; m->regs[S2CR(n) / 4] = n; m->regs[CB(n) / 4] = 1; }
-	/* Restore must preserve dormant state too, not just zero everything. */
+	/* Stable dormant residue is accepted initially, then cleared on claim. */
 	m->regs[(CB(43) + 0x20) / 4] = 0x12340000; m->regs[(CB(43) + 0x24) / 4] = 0x43210000;
 	m->regs[(CB(43) + 0x10) / 4] = 0x123; m->regs[(CB(43) + 0x30) / 4] = 0x44;
 	m->regs[(CB(43) + 0x28) / 4] = 0x56780000; m->regs[(CB(43) + 0x2c) / 4] = 0x11110000;
@@ -130,12 +140,30 @@ static struct mi8_smmu_result
 run(struct model *m, unsigned step)
 {
 	struct mi8_smmu_result result;
-	const struct mi8_smmu_ops ops = { m, read_reg, write_reg, wait_us, log_line, allocate, release, cache, table_read };
+	const struct mi8_smmu_ops ops = { m, read_reg, write_reg, wait_us, log_line, allocate, release, cache, table_read, &m->claim };
+	m->lines = 0;
 	mi8_smmu_diagnose(&ops, step, &result);
 	CHECK(m->lines <= 38 && result.lines == m->lines);
 	return result;
 }
-static void identical(struct model *m) { CHECK(!memcmp(m->regs, m->before, sizeof(m->regs))); }
+/* Every word outside our exact register allowlist must remain byte-identical.
+ * Claimed banks clear deterministic state rather than restoring random residue. */
+static void identical(struct model *m) {
+	if (!m->claim.owned) { CHECK(!memcmp(m->regs, m->before, sizeof(m->regs))); return; }
+	CHECK(m->regs[SMR(8)/4] == m->before[SMR(8)/4]);
+	CHECK(m->regs[S2CR(8)/4] == m->before[S2CR(8)/4]);
+	CHECK(!(m->regs[CB(43)/4] & 1));
+	const uint32_t zero[] = {CBA2R(43), CB(43)+0x20, CB(43)+0x24, CB(43)+0x10,
+	    CB(43)+0x30, CB(43)+0x28, CB(43)+0x2c, CB(43)+0x38, CB(43)+0x3c};
+	for (unsigned i=0;i<sizeof(m->regs)/sizeof(*m->regs);i++) {
+		bool ours = i*4 == CBAR(43) || i*4 == CB(43) || i*4 == CB(43)+0x58;
+		for (unsigned n=0;n<9;n++) if (i*4 == zero[n]) {
+			ours=true;
+			if (i*4 != m->restore_other_at) CHECK(m->regs[i] == 0);
+		}
+		if (!ours) CHECK(m->regs[i] == m->before[i]);
+	}
+}
 
 static void
 overlap_tests(void)
@@ -228,7 +256,7 @@ flow_tests(void)
 	}
 	m = fresh(); m->timeout_sync = 1; r = run(m, 12); CHECK(!r.passed && r.retained && !m->releases); free(m);
 	m = fresh(); m->timeout_sync = 2; r = run(m, 12); CHECK(!r.passed && r.retained && !m->releases); free(m);
-	m = fresh(); m->faults = 5; r = run(m, 12); CHECK(!r.passed && r.retained && !m->releases && !m->holds); free(m);
+	m = fresh(); m->faults = 5; r = run(m, 12); CHECK(!r.passed && r.restored && !r.retained && m->releases == 1 && !m->holds); free(m);
 	m = fresh(); m->restore_block = true; r = run(m, 12); CHECK(!r.passed && !r.restored && r.retained && !m->releases); free(m);
 	for (unsigned ubs = 0; ubs < 6; ubs++) for (unsigned oas = 0; oas < 6; oas++) {
 		static const unsigned bits[] = {32,36,40,42,44,48};
@@ -243,7 +271,7 @@ static struct model *
 residue(void)
 {
 	struct model *m = fresh();
-	/* Recorded SDM845 vectors: CB43 SCTLR=0x3f35c100,
+	/* Recorded SDM845 vectors before claim: CB43 SCTLR=0x3f35c100,
 	 * TTBR0=0x6bce20cd:5ba8454b, TCR=0x5e383faa, CBAR/CBA2R/FSR=0.
 	 * Configured CB0 has CBAR=0x10003, CB3=0x10000; both have
 	 * CBA2R=1, SCTLR=0xe0, FSR=0x400 (CB3 need not have an S2CR). */
@@ -272,10 +300,11 @@ free_bank_tests(void)
 	identical(m); free(m);
 	m = residue(); r = run(m, 12);
 	CHECK(r.bank == 43 && r.passed && r.restored && !r.retained && m->releases == 1);
-	CHECK(m->regs[CB(43) / 4] == 0x3f35c100 && !(m->regs[CB(43) / 4] & 1));
-	bool restored_raw = false;
-	for (unsigned n = 0; n < m->writes; n++) if (m->addresses[n] == CB(43) && m->values[n] == 0x3f35c100) restored_raw = true;
-	CHECK(restored_raw); identical(m); free(m);
+	CHECK(m->regs[CB(43) / 4] == 0);
+	CHECK(m->regs[CBAR(43) / 4] == 0x1f300 && m->regs[(CB(43)+0x58)/4] == 0x400);
+	CHECK(logged(m, "CBAR restore: wrote 0 got 0x1f300 (sticky)"));
+	CHECK(logged(m, "bank 43 claimed (CBAR=0x1f300), inert; SMR 8 / S2CR 8 restored"));
+	identical(m); free(m);
 	/* Isolate each exclusion rather than relying on the configured vector's FSR. */
 	for (unsigned reason = 0; reason < 6; reason++) {
 		m = residue();
@@ -312,16 +341,97 @@ free_bank_tests(void)
 	m->regs[CB(39) / 4] = 0; m->unstable_at = CB(39); m->flip_read = 2;
 	r = run(m, 11); CHECK(r.bank == -1 && !m->writes);
 	CHECK(logged(m, "bank rejects: referenced=8 CBAR!=0=1 CBA2R!=0=1 M=1=32 FSR!=0=1 unstable=1")); free(m);
-	/* Non-M write-ignored residue is reported, while every other word is exact. */
+	/* SCTLR non-M residue is tolerable only while M remains clear. */
 	m = residue(); m->restore_ignore = 1u << 29; r = run(m, 12);
 	CHECK(r.passed && r.restored && !r.retained && m->releases == 1);
-	CHECK(logged(m, "SCTLR restore diff=0x20000000") && logged(m, "bank disabled"));
-	CHECK(m->regs[CB(43) / 4] == (0x3f35c100 & ~(1u << 29)));
-	m->regs[CB(43) / 4] = m->before[CB(43) / 4]; identical(m); free(m);
+	CHECK(logged(m, "sticky registers: +0x6b000=0x20000000"));
+	CHECK(m->regs[CB(43) / 4] == 1u << 29); identical(m); free(m);
 	m = residue(); m->restore_m = true; r = run(m, 12);
-	CHECK(!r.passed && !r.restored && r.retained && !m->releases && logged(m, "SCTLR restore M mismatch")); free(m);
+	CHECK(!r.passed && !r.restored && r.retained && !m->releases && logged(m, "inert state unconfirmed")); free(m);
 	m = residue(); m->restore_other_at = CB(43) + 0x38; r = run(m, 12);
-	CHECK(!r.passed && !r.restored && r.retained && !m->releases && logged(m, "readback mismatch")); free(m);
+	CHECK(r.passed && r.restored && !r.retained && m->releases == 1);
+	CHECK(logged(m, "sticky registers: +0x6b038=0x2 +0x10ac=0x1f300"));
+	CHECK(m->regs[(CB(43)+0x3c)/4] == 0 && m->regs[CBA2R(43)/4] == 0); identical(m); free(m);
+
 }
 
-int main(void) { overlap_tests(); flow_tests(); free_bank_tests(); printf("SELFTEST PASS %u/%u\n", checks, checks); return 0; }
+static void
+claim_tests(void)
+{
+	struct model *m; struct mi8_smmu_result r;
+	/* Configured idle is the only allowed FSR exception; every other bit stops. */
+	for (unsigned bit=0;bit<32;bit++) {
+		m=residue(); m->faults=1; m->fault_value=0x400 | 1u<<bit; r=run(m,12);
+		CHECK(r.passed == (bit == 10));
+		CHECK(m->holds == (bit == 10));
+		CHECK(r.restored && !r.retained && m->releases == 1);
+		if (bit != 10) CHECK(logged(m,"fault: GFSR=0 FSR="));
+		free(m);
+	}
+	m=residue(); m->no_idle=true; r=run(m,12); CHECK(r.passed && logged(m,"FSR=0 (no fault)")); free(m);
+	m=residue(); m->faults=1; m->fault_value=0x402; r=run(m,12);
+	CHECK(!r.passed && !m->holds && logged(m,"fault: GFSR=0 FSR=0x402")); free(m);
+	m=residue(); m->global_fault=1; r=run(m,12);
+	CHECK(!r.passed && !m->holds && logged(m,"fault: GFSR=0x2 FSR=0x400")); free(m);
+	/* The whole 200ms configuration is still exact, including CBAR and M. */
+	const uint32_t held[]={CBAR(43), CBA2R(43), CB(43), CB(43)+0x20, CB(43)+0x24,
+	    CB(43)+0x10, CB(43)+0x30, CB(43)+0x28, CB(43)+0x2c, CB(43)+0x38,
+	    CB(43)+0x3c, SMR(8), S2CR(8)};
+	for(unsigned i=0;i<13;i++) {
+		m=residue(); m->rewrite=held[i]; r=run(m,12);
+		CHECK(!r.passed && r.restored && !r.retained && m->releases==1);
+		CHECK(logged(m,"readback mismatch") && !logged(m,"200 ms hold/readback exact")); free(m);
+	}
+	/* Independent sticky clears all run, including ones after the ignored write. */
+	const uint32_t words[]={CBA2R(43),CB(43)+0x20,CB(43)+0x24,CB(43)+0x10,CB(43)+0x30,
+	    CB(43)+0x28,CB(43)+0x2c,CB(43)+0x38,CB(43)+0x3c};
+	for (unsigned i=0;i<9;i++) {
+		m=residue(); m->restore_other_at=words[i]; r=run(m,12);
+		CHECK(r.passed && r.restored && !r.retained && m->releases == 1);
+		CHECK(m->regs[words[i]/4] == 2);
+		for (unsigned j=0;j<9;j++) if (i!=j) CHECK(m->regs[words[j]/4] == 0);
+		CHECK(logged(m,"sticky registers:") && logged(m,"CBAR restore:"));
+		identical(m); free(m);
+	}
+	for (unsigned i=0;i<2;i++) {
+		m=residue(); m->cleanup_drop=i ? S2CR(8) : SMR(8); r=run(m,12);
+		CHECK(!r.passed && !r.restored && r.retained && !m->releases);
+		CHECK(mi8_smmu_reserved(&m->claim,&r,8,~0u));
+		CHECK(m->regs[(CB(43)+0x3c)/4] == 0); free(m);
+	}
+	/* Original free-bank policy still excludes configured FSR=0x400. */
+	m=residue(); m->regs[(CB(43)+0x58)/4]=0x400; r=run(m,11); CHECK(r.bank==42&&!m->writes); free(m);
+	m=residue(); r=run(m,12); CHECK(r.passed && m->claim.owned && m->claim.bank==43);
+	unsigned first_writes=m->writes;
+	CHECK(mi8_smmu_reserved(&m->claim,&r,~0u,43));
+	CHECK(!mi8_smmu_reserved(&m->claim,&r,8,~0u));
+	CHECK(!mi8_smmu_reserved(&m->claim,&r,~0u,44));
+	m->holds=0; r=run(m,12);
+	CHECK(r.passed && r.bank==43 && m->releases==2 && logged(m,"reuse claimed bank 43"));
+	CHECK(m->addresses[first_writes]==CBAR(43) && m->values[first_writes]==0x1f300);
+	unsigned restores=0;
+	for(unsigned i=0;i<m->writes;i++) if(m->addresses[i]==CBAR(43)&&m->values[i]==0) restores++;
+	CHECK(restores==2); /* Exactly one zero attempt per invocation, no coercion. */
+	identical(m); free(m);
+	/* Even if CBAR accepts zero, software ownership remains reserved and reused. */
+	m=residue(); m->cbar_writable=true; r=run(m,12);
+	CHECK(r.passed && m->regs[CBAR(43)/4]==0 && logged(m,"got 0 (restored)"));
+	CHECK(mi8_smmu_reserved(&m->claim,&r,~0u,43)); m->holds=0; r=run(m,12);
+	CHECK(r.passed && logged(m,"reuse claimed bank 43")); free(m);
+	/* Never steal a foreign bank, reuse a live/referenced claim, or touch CB44. */
+	for(unsigned kind=0;kind<5;kind++) {
+		m=residue(); m->claim.owned=true; m->claim.bank=kind==4?44:43;
+		m->regs[CBAR(43)/4]=0x1f300; m->regs[(CB(43)+0x58)/4]=0x400;
+		if(kind==0)m->regs[CB(43)/4]|=1;
+		if(kind==1)m->regs[S2CR(20)/4]=43;
+		if(kind==2)m->regs[(CB(43)+0x58)/4]=0x402;
+		if(kind==3){m->unstable_at=CB(43);m->flip_read=2;}
+		r=run(m,12);CHECK(!r.passed && !m->writes && !m->allocations);free(m);
+	}
+	/* Emit one representative successful trace for offline review. */
+	m=residue(); r=run(m,12); CHECK(r.passed && m->lines<38);
+	for(unsigned i=0;i<m->lines;i++) printf("MODEL: %s\n",m->logs[i]);
+	free(m);
+}
+
+int main(void) { overlap_tests(); flow_tests(); free_bank_tests(); claim_tests(); printf("SELFTEST PASS %u/%u\n", checks, checks); return 0; }
