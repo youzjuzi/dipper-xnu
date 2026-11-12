@@ -75,3 +75,7 @@ python3 tools/prepare/patchtool.py scan
 `test-mi8-audio-session-join.py` 单独提取原生 join 实现，验证 300 ms 超时、复位拉低、幂等失败及资源保留。超时不等于线程退出：失败线程及其资源保留至完整重启。栈预算工具另覆盖 session feeder 和 TAS control 两个线程。
 
 `python3 tools/tests/test-mi8-audio-panic.py [--tree <干净准备树>]` 提取原生 panic 钩子和参数处理函数，验证 held-only、单次 MMIO、重复调用锁存、84 组参数组合及首次 LIVE 后 1 秒的触发。主机用普通内存模拟 MMIO，仅替换 ARM 屏障；另静态核对 XNU 回调与 panic buffer 入口。不能替代实际 panic、复位电平或声音停止验证。
+
+`test-mi8-audio-coexist.py [--tree <准备树>] [--sanitize|--tsan]` 提取原生短锁桥接、Wi-Fi map、资源所有权和依赖等待路径，运行真实线程竞争；unmap 仅为测试模型，设备驱动仍为追加映射。`test-mi8-audio-session.py --long` 检查 300 秒、15000 周期，可与 sanitizer/TSan 组合。
+
+`build-payload.py --kernel <本轮 mach 内核> --wifi --bluetooth --seconds 420 --output <新目录>` 显式选择本轮构建；不指定 `--kernel` 时保持原默认路径。`--flashboot <镜像>` 可选择已验证的功放固件镜像，仍执行相同的权限与蓝牙固件检查；缺省保持原镜像路径。打包前仍须确认现有本机输入与固件摘要。会话参数 `audio=5 audio_seconds=300` 需写入最终载荷，默认表仍关闭音频；无线关闭的旧模式参数规则不变。

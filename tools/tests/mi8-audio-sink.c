@@ -109,7 +109,7 @@ static unsigned dispatch_gate(unsigned audio,unsigned shared_step){
 #define say capture
 /* @ring_gate */
 #undef say
- return audio==2?shared_step:0;
+ return audio==2?(audio_session_stream?17:shared_step):0;
 }
 int main(void){
  volume_muted=true;CHECK(redwood_audio_muted());volume_muted=false;CHECK(!redwood_audio_muted());
@@ -136,7 +136,7 @@ int main(void){
  audio_arg=4;CHECK(dispatch_gate(4,0)==17&&audio_clip_stream&&selected_ring);audio_clip_stream=false;
  step_arg=1;CHECK(!dispatch_gate(4,1));step_arg=0;owner_name="mi8rp_mss";owner_arg=1;CHECK(!dispatch_gate(4,0));owner_arg=0;
  audio_arg=5;CHECK(dispatch_gate(5,0)==17&&audio_session_stream&&selected_ring);audio_session_stream=false;
- step_arg=1;CHECK(!dispatch_gate(5,1));step_arg=0;owner_name="mi8rp_mss";owner_arg=1;CHECK(!dispatch_gate(5,0));owner_arg=0;
+ step_arg=1;CHECK(!dispatch_gate(5,1));step_arg=0;owner_name="mi8rp_mss";owner_arg=1;CHECK(dispatch_gate(5,0)==17);owner_arg=0;audio_session_stream=false;
  reset();audio_arg=5;mi8_audio_sink_init();CHECK(installed&&audio_sink==ring_sink);reset();
  audio_arg=3;
  platform="redwood";platform_size=8;CHECK(!dispatch_gate(3,0));platform="dipper";platform_size=7;

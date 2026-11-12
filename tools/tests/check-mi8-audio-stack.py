@@ -39,6 +39,9 @@ CALLBACKS = {
     'mi8_audio_smmu': names('mi8_audio_smmu', 'native_read native_write native_wait native_play_log native_allocate native_release native_cache native_table_read'),
     'mi8_tas2557': names('mi8_tas2557', 'native_read native_write native_now native_delay native_log'),
 }
+# WRITE_DONE receive only calls io->now. Applying the whole PCM callback
+# union here would invent receive -> exchange -> receive recursion.
+SPECIFIC = {'mi8_audio_pcm:mi8_pcm_receive': names('mi8_audio', 'pcm_now')}
 # commands() additionally dispatches the selected firmware validator/downloader.
 EXTRA = {'mi8_tas2557:commands': names('mi8_tas2557', 'validate_command execute session_y_read'),
          'mi8_rproc:fs_dir_find': names('mi8_rproc', 'list_image_entry')}
@@ -98,7 +101,7 @@ def main():
             else:
                 external[key].add(target)
         if row['indirect']:
-            graph[key].update(CALLBACKS.get(obj, []) + EXTRA.get(key, []))
+            graph[key].update(SPECIFIC.get(key, CALLBACKS.get(obj, [])) + EXTRA.get(key, []))
             if obj == 'mi8_audio_pcm':
                 external[key].add('redwood_audio_muted (clip ops)')
     seen, paths, memo = set(), {}, {}

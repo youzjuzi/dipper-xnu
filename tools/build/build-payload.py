@@ -43,6 +43,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='new directory, preferably under ignored work/runs/')
     parser.add_argument('--seconds', type=int, default=300)
+    parser.add_argument('--kernel', type=Path, help='explicit kernel from the current build; otherwise use the default build path')
+    parser.add_argument('--flashboot', type=Path, help='explicit boot APFS image, verified with the same firmware and permission checks')
     parser.add_argument('--wifi', action='store_true', help='enable Mi8 modem/ath10k station mode')
     parser.add_argument('--peripherals', action='store_true', help='enable battery reporting, iOS torch and haptics')
     parser.add_argument('--persist', action='store_true',
@@ -59,9 +61,9 @@ def main():
         raise SystemExit('Use a bounded run between 60 and 1800 seconds')
     k = ROOT / 'work/hackios'
     inputs = {
-        'kernel.macho': k / 'xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837',
+        'kernel.macho': args.kernel or k / 'xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837',
         'root.apfs': k / 'userland/root.apfs',
-        'flashboot.apfs': k / 'userland/flashboot.apfs',
+        'flashboot.apfs': args.flashboot or k / 'userland/flashboot.apfs',
         'boot-dipper.img': ROOT / 'work/edk2/boot-dipper.img',
         'loader.efi': k / 'xnuloader/loader.efi',
     }

@@ -125,11 +125,12 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-12，接手时重新核对）
 
-- 分支 `feat/audio-sink`，基线 `2b19f1a`；本提交仅固化会话音频与受控 panic 的设备结果，work 源码核对与清单一致，无未导出源码改动，未 push。
-- P22 的无线关闭会话完成 7 次 wake/mute、Y=5d 6/6、6000/6000、守恒与 cleanup，无 panic；P22-panic 单独重启后受控 panic，缓冲有复位标记，持有人确认停声无爆音。原始记录见 `work/runs/20261112-audio-session-01/DEVICE-22.md`、`DEVICE-22-panic.md`。会话主观听感仍待补充，长期/热安全未验。
-- 下一步在唯一 work 树实现音频与无线共存；运行目录 `work/runs/20261112-audio-coexist-01/`。先核对无线就绪点、CB43/SMR8 所有权和短 SMMU 临界区，旧 audio=1–4/step 13–16 与无线协议行为保持不变。
-- 累计不足 1 秒仍 wake 的问题待修；INT2 bit1 的数据手册定义为 Reserved，厂商掩码为 0x0c，不能推定该保留位的内部含义，不改健康判据。
-- 只做主机；不碰手机、不改 local/、不 push。新共存功能与载荷尚未完成，设备验证 Pending。
+- 分支 `feat/audio-sink`，从 `2b19f1a` 接手；设备证据文档已提交 `3f820db`，本次共存实现另作一个提交。唯一 work 树的 8 个音频源文件修改已导出，源码/许可摘要与清单一致，无未导出改动，未 push。
+- 无线关闭的 P22 会话与 P22-panic 设备事实保持原边界，见 `work/runs/20261112-audio-session-01/DEVICE-22.md`、`DEVICE-22-panic.md`；未重跑设备，长期/热安全未验。
+- 共存主机完成，设备待验证。运行记录 `work/runs/20261112-audio-coexist-01/RESULTS.md`；P23 与 P23-noaudio 使用同一新内核、同一全开无线/蓝牙输入，仅差 audio=5，流长 300 秒、loader 420 秒。
+- 已完成短 SMMU 临界区、CB43/SMR8 所有权、显式串行化、90 秒无线依赖等待与预算保护；累计剩余不足 1 秒不 wake。INT2 bit1 为 Reserved，仅解释，未改健康判据。旧模式与 Wi-Fi/BT 协议保持原行为。
+- 干净重放、完整主机回归/sanitizer、TSan 竞争与 300 秒流、显式 SOURCE_DIR 构建及 8 KiB 栈检查通过。主机竞争测试使用模拟寄存器，具体计数与限制见 RESULTS。
+- 下一步由持有人先验 P23-noaudio，再完整重启验 P23；检查无线/蓝牙、声音、共存时延、15000/15000、守恒及 cleanup。此轮不碰手机、不改 local/、不 push。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

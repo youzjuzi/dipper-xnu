@@ -8,6 +8,7 @@ void mi8_tas2557_prepare_tone(uint64_t);
 #include "play-fixture.c"
 #include "mi8_audio_ring.c"
 extern void session_guard_tests(void);
+extern void session_test_total(uint64_t);
 extern void session_model_submit(bool);
 extern void session_model_load(const char *,const char *);
 extern bool session_model_prepare(unsigned);
@@ -17,7 +18,7 @@ extern unsigned session_model_mutes(void),session_model_starts(void);
 extern void session_model_check_done(void);
 extern unsigned long session_model_checks(void);
 static struct peer *active;
-static unsigned mode,outputs,max_peak,ticks;
+static unsigned mode,outputs,max_peak,ticks,stream_seconds=120;
 static uint64_t stream_start;
 static bool stop_requested,threaded,control_prepared;
 static unsigned controller_quit,controller_delay;
@@ -90,24 +91,27 @@ static void observe(struct peer *p,const uint8_t *q){
  if(mode==11 && outputs==20)m->ordinary_fault=true;
  if(mode==13 && m->writes==5)m->fatal=true;
 }
+static uint64_t audio_return_deadline,audio_lock_max_us,wifi_lock_wait_max_us;
+static bool audio_session_dependency(void){return true;} /* Actual dependency policy tested separately. */
 /* @session_worker */
 int main(int argc,char **argv){
- CHECK(argc==3);session_guard_tests();threaded=getenv("SESSION_THREADS")!=NULL;session_model_load(argv[1],argv[2]);
- for(mode=0;mode<=(threaded?2u:14u);mode++){
+ CHECK(argc==3);session_guard_tests();threaded=getenv("SESSION_THREADS")!=NULL;if(getenv("SESSION_LONG"))stream_seconds=300;CHECK(mi8_pcm_session_seconds(stream_seconds));mi8_tas_session_seconds(stream_seconds);session_model_load(argv[1],argv[2]);
+ for(mode=0;mode<=(stream_seconds==300?0u:threaded?2u:16u);mode++){
   reset_ring();outputs=max_peak=ticks=0;stop_requested=false;
   struct peer p;struct play_peer m;prepare(&p,&m);active=&p;m.step=16;
   control_prepared=true;CHECK(session_model_prepare(mode==5?1:mode==6?2:mode==12?3:mode==14?4:0)==(mode!=14));p.now=session_model_now();stream_start=p.now;
+  if(mode==15 || mode==16)session_test_total(mode==15?59000001:59000000);
   if(threaded){controller_delay=mode==0?0:mode==1?50000:500000;controller_clock=p.now;controller_quit=0;CHECK(!pthread_create(&controller_thread,NULL,controller_main,NULL));}
   p.extension=&m;p.extra_response=play_reply;p.reply=p.header8=p.afe_mode=true;amp_observe=observe;amp_cache_observe=NULL;
   mi8_audio_set_ring(true);mi8_audio_set_session(&session_ops);
   struct mi8_audio_pin_ops pins={pin_read,pin_write,&p};struct mi8_glink_cfg c=cfg(&p);c.log=play_log;
   struct mi8_pcm_ops memory={.ctx=&p,.begin=play_begin,.cache=play_cache,.fault=play_fault,.clear=play_clear,.end=play_end};
-  bool ok=mi8_audio_run_play(&c,play_alive,&p,&pins,&memory,p.now+130000000,17,play_fatal);
+  bool ok=mi8_audio_run_play(&c,play_alive,&p,&pins,&memory,p.now+(uint64_t)(stream_seconds+10)*1000000,17,play_fatal);
   (void)join_control();m.reset=true;(void)mi8_audio_finish_play(true);
   struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
   CHECK(a.done && stop_requested && r.accepted==r.consumed+r.discarded&&!r.queued && max_peak<=1036);
   fprintf(stderr,"debug mode=%u wakes=%u mutes=%u reason=%u clean=%u live=%llu\n",mode,a.wakes,a.mutes,a.reason,a.clean,(unsigned long long)a.live_total);
-  if(threaded || (mode!=5 && mode!=6 && mode!=10 && mode!=11 && mode!=12 && mode!=13 && mode!=14)){if(!ok)fprintf(stderr,"mode %u %s\n",mode,m.log);CHECK(ok&&m.normal==6000);}
+  if(threaded || (mode!=5 && mode!=6 && mode!=10 && mode!=11 && mode!=12 && mode!=13 && mode!=14)){if(!ok)fprintf(stderr,"mode %u %s\n",mode,m.log);CHECK(ok&&m.normal==stream_seconds*50);}
   if(!threaded){
   if(mode==0 || mode==9)CHECK(a.wakes>=3&&a.wakes<=4&&a.live_total<=60000000);
   if(mode==1 || mode==4)CHECK(a.wakes>=3 && a.checks==a.wakes-1 && a.checks_ok==a.checks);
@@ -115,17 +119,19 @@ int main(int argc,char **argv){
   if(mode==3)CHECK(a.wakes==1&&a.mutes==1);
   if(mode==5)CHECK(a.reason==2&&a.checks>a.checks_ok);
   if(mode==6)CHECK(a.reason==4&&!outputs);
-  if(mode==7)CHECK(a.wakes<=20&&a.live_total==60000000);
-  if(mode==8)CHECK(!a.wakes&&!outputs);
+  if(mode==7)CHECK(a.wakes<=20&&a.live_total>59000000 && a.live_total<=60000000);
+  if(mode==8 || mode==15)CHECK(!a.wakes&&!outputs);
+  if(mode==16)CHECK(a.wakes==1&&a.live_total<=60000000);
   if(mode==10 || mode==11)CHECK(!ok&&outputs>0&&m.normal<6000);
   if(mode==12)CHECK(!ok&&a.reason==4&&outputs>0);
   if(mode==13)CHECK(!ok&&!outputs&&a.done);
   if(mode==14)CHECK(!ok&&a.reason==1&&!outputs&&m.normal==6000);
   }
+  const struct mi8_pcm_session_stats *stats=mi8_pcm_session_stats();CHECK(stats->late_period<=m.normal);if(m.normal>100)CHECK(stats->done_gap_us>0);
   printf("session mode=%u periods=%u wakes=%u mutes=%u checks=%u/%u live=%llu blocks=%u peak=%u reason=%u PASS\n",mode,m.normal,a.wakes,a.mutes,a.checks_ok,a.checks,(unsigned long long)a.live_total,outputs,max_peak,a.reason);
   mi8_audio_set_session(NULL);mi8_audio_set_ring(false);
  }
- if(!threaded)for(unsigned failure=0;failure<=3;failure++){
+ if(!threaded && stream_seconds==120)for(unsigned failure=0;failure<=3;failure++){
   mode=0;reset_ring();outputs=max_peak=ticks=0;control_prepared=false;
   struct peer p;struct play_peer m;prepare(&p,&m);active=&p;m.step=16;m.budget=130000000;p.extension=&m;
   worker_peer=&p;worker_memory=&m;worker_failure=failure;stop_ack=aop_off=true;

@@ -16,14 +16,18 @@ static uint64_t audio_play_until=45000000, fake_now=30000000;
 /* The play budget starts after firmware loading and DSP startup. */
 static uint64_t now_us(void){return fake_now;}
 static int adsp_remote;
-static bool audio_ring_stream;
+static bool audio_ring_stream,audio_session_stream;
+static unsigned audio_session_seconds=300;
+static uint64_t audio_return_deadline=410000000;
+static void say(const char *fmt,...){(void)fmt;}
+/* @session_stream_end */
 static bool audio_smmu_serial=true, audio_play_locked, defer_play;
 static bool mi8_audio_play_needs_finish(void){return defer_play;}
 static atomic_uint active,overlaps;
 static void allocation(void){if(atomic_fetch_add(&active,1))atomic_fetch_add(&overlaps,1);sched_yield();atomic_fetch_sub(&active,1);}
 static void lck_mtx_lock(pthread_mutex_t*l){pthread_mutex_lock(l);locks++;}
 static void lck_mtx_unlock(pthread_mutex_t*l){unlocks++;pthread_mutex_unlock(l);}
-static bool mi8_audio_run_play(void*c,void*f,void*r,void*p,void*m,uint64_t end,unsigned step,void*fatal){(void)c;(void)f;(void)r;(void)p;(void)m;(void)fatal;CHECK(step>=13);CHECK(end==fake_now+(step==17?(audio_ring_stream?130000000:70000000):(step==15||step==16)?20000000:15000000));play_calls++;allocation();return true;}
+static bool mi8_audio_run_play(void*c,void*f,void*r,void*p,void*m,uint64_t end,unsigned step,void*fatal){(void)c;(void)f;(void)r;(void)p;(void)m;(void)fatal;CHECK(step>=13);CHECK(end==fake_now+(audio_session_stream?310000000:step==17?(audio_ring_stream?130000000:70000000):(step==15||step==16)?20000000:15000000));play_calls++;allocation();return true;}
 static uint64_t mi8_audio_play_teardown_end(void){return 15000000;}
 static bool mi8_audio_run_afe(void*c,void*f,void*r,void*p){(void)c;(void)f;(void)r;(void)p;afe_calls++;return true;}
 static bool mi8_audio_run(void*c,void*f,void*r){(void)c;(void)f;(void)r;core_calls++;return true;}
@@ -53,5 +57,9 @@ CHECK(!pthread_create(&a,NULL,worker,(void*)1));CHECK(!pthread_create(&b,NULL,wo
 CHECK(handshake(15));CHECK(handshake(16));CHECK(handshake(17));audio_ring_stream=true;CHECK(handshake(17));audio_ring_stream=false;
 defer_play=true;fake_now+=17000000;CHECK(handshake(13)&&audio_play_locked);
 CHECK(pthread_mutex_trylock(&wsmmu_lock)==EBUSY);lck_mtx_unlock(&wsmmu_lock);audio_play_locked=false;defer_play=false;
+audio_session_stream=true;audio_ring_stream=true;
+unsigned before=locks;fake_now=100000000;CHECK(handshake(17)&&!audio_play_locked&&locks==before);
+fake_now++;unsigned calls=play_calls;CHECK(!handshake(17)&&play_calls==calls&&locks==before);
+audio_session_stream=false;audio_ring_stream=false;
 for(unsigned n=8;n<=13;n++) { dispatch(n); }
 CHECK(old_calls==3&&smmu_spawn==2&&play_spawn==1&&deallocated==3);printf("Play allocation/dispatch SELFTEST PASS %u/%u\n",checks,checks);return 0;}

@@ -20,7 +20,7 @@
       },
       {
         "path": "bsd/dev/mi8_audio.c",
-        "sha256": "79e91e612cb9ec890b2d20b21aab0fd43cd76026e5b28b1edc7141d492d5c617",
+        "sha256": "cbecfaec66b267a6d72ee371eca3d91aa68a9a85562c76998ead337d715bab88",
         "mode": "0o664"
       },
       {
@@ -30,12 +30,12 @@
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.c",
-        "sha256": "d6361c0b63bd4d8e32b573c23cd45258bb696f4ec8a495fb0512d59a60ad930f",
+        "sha256": "b457a737ec7a17f0b3e1fc38bf55ed7c68dd6e1348a95731a249721eed014ccc",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.h",
-        "sha256": "50cedaf1676f26b16c23988589c49588bb9927f18cdaa0b8177d723f4b9ee620",
+        "sha256": "80c7b3cc803456f91b632cce8b4e30e3f4cd4012bfda6e3bf59786eaf6e197ff",
         "mode": "0o664"
       },
       {
@@ -50,7 +50,7 @@
       },
       {
         "path": "bsd/dev/mi8_audio_sink.c",
-        "sha256": "08cb4e1502a8515db16275d6bdf7ceb51c7262c142e304eb24f8f6ec886aab94",
+        "sha256": "464e6ff1704f4c02fccad8bf926eb81265742678b3f1762cfbf21b056f7ae992",
         "mode": "0o664"
       },
       {
@@ -65,7 +65,7 @@
       },
       {
         "path": "bsd/dev/mi8_audio_smmu.h",
-        "sha256": "5c5a932a700e204ca1b2793aa62ab651b3920e1ebdb90ac33a72f6f1e535542d",
+        "sha256": "117fc1feea9e33863c9f3a04a452dfbc2f14eafff605c338c46d263537c2fd70",
         "mode": "0o664"
       },
       {
@@ -105,17 +105,17 @@
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "3db2c4fb2c15ec6089aa391d3a7d80132081ecca3b774c48e17ab023670500d7",
+        "sha256": "d6a897cd992c33f6bd05868c07a13418975fe0a2f73522344f80a11a40ddd370",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_tas2557.c",
-        "sha256": "9c9556f7fba7d91d3bd697d73fd0b7aecd2259b5920f1416eb5e98df8f7929d2",
+        "sha256": "7542ce1d7b195a0fea860ef6c2599abeeedd8b39c69b9f18fdc52fd040c955f2",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_tas2557.h",
-        "sha256": "6cf59c9c70b52945ed5adbcc5787b17bb8d440a2e189b4c142e3da7ea4f50af7",
+        "sha256": "5908f26f78d50c9330429945c04c648ef53faaeefad03daa4572faacadaa3cfe",
         "mode": "0o664"
       },
       {

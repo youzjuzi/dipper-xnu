@@ -28,6 +28,7 @@ def main():
         gate = (ROOT / 'tools/tests/mi8-audio-play-dispatch.c').read_text()
         for name in ['wsmmu_before_power', 'audio_smmu_thread']:
             gate = gate.replace('/* @' + name + ' */', body(source, 'static void\n' + name + '('))
+        gate = gate.replace('/* @session_stream_end */', body(source, 'static uint64_t audio_session_stream_end('))
         gate = gate.replace('/* @play_handshake */', body(source, 'if (last >= 13)'))
         dispatcher = source[source.index('void\nmi8_rproc_init('):]
         for number in [13, 11]:

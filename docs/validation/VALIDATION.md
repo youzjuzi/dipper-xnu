@@ -255,7 +255,7 @@ iOS 16.5 的 iPhone X 版本按博通 BCM4357 写成，桥接层为此做了几�
 
 `audio=4` 已在 GPU/触摸/按键开启、无线关闭的桌面下验证一次 iOS 铃声片段：持有人确认约 3 秒、只响一次、开头结尾无爆音。固定 −30 dB 线性衰减，无 HPF；150 块，输出峰值 269（上限 1036），静音读回 03/01、关断成功、reset 低，6000/6000 周期、守恒与 cleanup 通过，无 panic。仅此一次短窗口；idle/wake、panic 应急、无线并存及长时/热安全未验证。
 
-`audio=5` 已在无线关闭、桌面默认配置下完成单次 120 秒设备验证：7 次 wake/mute，后 6 次只读 Y 校验均为 5d，证实软关断且 reset 保持高时系数保留；warmup 225–591 ms，out_peak 1035，每次静音读回 03/01，6000/6000、守恒与 cleanup complete，无 panic。累计准入上限 60 秒、固定 −30 dB 衰减、无 HPF；累计预算末尾有过短窗口，仍待改进。
+`audio=5` 已在无线关闭、桌面默认配置下完成单次 120 秒设备验证：7 次 wake/mute，后 6 次只读 Y 校验均为 5d，证实软关断且 reset 保持高时系数保留；warmup 225–591 ms，out_peak 1035，每次静音读回 03/01，6000/6000、守恒与 cleanup complete，无 panic。累计准入上限 60 秒、固定 −30 dB 衰减、无 HPF；该轮累计预算末尾出现过短窗口；后续主机修复见下文。
 
 panic 应急复位已在单独完整重启的受控设备轮次验证：`audio=5 audio_panic_test=1` 首次 LIVE 后约 1 秒触发 panic，缓冲区记录复位拉低标记；持有人确认停声、无爆音。诊断参数默认关闭。钩子不保证早期/嵌套 panic、CPU 停止失败或无 panic 的硬挂死。
 
@@ -266,3 +266,11 @@ panic 依据：固定 XNU 的 `osfmk/kdp/kdp_callout.h` 约定回调期间关中
 上述会话与 panic 设备轮次均关闭 Wi-Fi/蓝牙；仅单次有界会话，不支持 ADSP 停后再启，无线并存、长时间与热安全未验收。
 
 会话和受控 panic 的原始记录分别见 `work/runs/20261112-audio-session-01/DEVICE-22.md` 与 `DEVICE-22-panic.md`；本次整理未操作设备。会话记录中的主观听感尚待持有人补充，不据此宣称每次播放均无爆音。
+
+`audio=5` 与无线共存主机完成，设备待验证。会话显式启用共享事务串行化，预留 CB43/SMR8；SMMU 锁仅覆盖映射建立和 detach，DMA 播放期间释放，Wi-Fi 仅允许使用 CB44 且避开 SMR8。ADSP 加载等待 WLFW FW_READY 和有效 CB44 映射，失败或最多 90 秒超时则保持音频关闭。
+
+新增 `audio_seconds=1..300`（缺省 120），共存候选使用 300 秒、15000 周期和 `loader_return_after=420`。开始流前检查完整时长及收尾余量，不足则拒绝；累计剩余不足 1 秒时不再 wake，摘要标记 `budget exhausted`。单窗 20 秒、累计 60 秒、20 次 wake、固定 −30 dB 和 ±1036 上限保持不变。最终摘要新增 DONE 最大间隔、最迟成功提交周期/迟到量、音频持锁和 Wi-Fi map 等锁最长时间；这些设备数值仍待采集。
+
+干净补丁重放覆盖旧 APR/AFE/SMMU/PCM/TAS、计数/ring/clip/session、panic 和参数门控。会话另验证 15000 周期、剩余 999999/1000000 微秒边界；真实线程竞争测试交错 100 次音频 claim/end 与 2000 次原生 Wi-Fi map，普通、ASan/UBSan 与 TSan 检查。Wi-Fi 当前没有原生 unmap，测试只模拟其锁和所有权契约，不声称验证了设备 unmap。ARM64 对象调用图与链接内核帧核对通过，音频路径低于 8 KiB；外部内核服务与调度/中断用栈仍在工具声明的边界外。证据及具体计数见 `work/runs/20261112-audio-coexist-01/RESULTS.md`。
+
+INT_DET_2 bit1 在 TI SLASEC2B §9.6.2.34/Table 56 标为 Reserved；固定厂商驱动使用 0x0c 检查 CLK1/2。不推测保留位功能，不改健康掩码。共存的新内核、无线开关、300 秒调度和听感均待设备验收，主机模拟耗时不能作为设备时延。

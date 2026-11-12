@@ -5571,7 +5571,7 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..811c0e125b328c4e5d6535fa28054f6369ba159b
+index 0000000000000000000000000000000000000000..4d1d1803785335212652e8e7500d8a837067987f
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
 @@ -0,0 +1,809 @@
@@ -5998,7 +5998,7 @@ index 0000000000000000000000000000000000000000..811c0e125b328c4e5d6535fa28054f63
 +	struct audio_session *s=ctx;
 +	if (s->memory_ops) return s->memory_ops->begin(s->memory_ops->ctx,memory);
 +#ifndef MI8_GLINK_HOST_TEST
-+	struct mi8_smmu_mapping *map=mi8_audio_smmu_begin();
++	struct mi8_smmu_mapping *map=play_session_ops?mi8_rproc_audio_smmu_begin():mi8_audio_smmu_begin();
 +	if (!map) { TELL((*s), "mi8rp: 13: smmu begin refused: %s\n",mi8_audio_smmu_problem()); return false; }
 +	memory->buffer=map->mem.buffer; memory->address=MI8_PCM_ADDRESS;
 +	memcpy(memory->pages,map->mem.pages,sizeof(memory->pages)); memory->slot=map->slot;memory->bank=map->bank;
@@ -6037,7 +6037,7 @@ index 0000000000000000000000000000000000000000..811c0e125b328c4e5d6535fa28054f63
 +	struct audio_session *s=ctx;
 +	if (s->memory_ops) return s->memory_ops->end(s->memory_ops->ctx,safe);
 +#ifndef MI8_GLINK_HOST_TEST
-+	bool clean=mi8_audio_smmu_end(safe);
++	bool clean=play_session_ops?mi8_rproc_audio_smmu_end(safe):mi8_audio_smmu_end(safe);
 +	if (!clean) TELL((*s), "mi8rp: 13: smmu Pending: %s\n",mi8_audio_smmu_problem());
 +	return clean;
 +#else
@@ -6461,10 +6461,10 @@ index 0000000000000000000000000000000000000000..3b401e70c9180a9bbb1eaecb706aa87a
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..f50f9cf35dc4a37a765005312bebc607804230ba
+index 0000000000000000000000000000000000000000..cc8b9c568de4f35791a53566dedcfe5115f5d52f
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,789 @@
+@@ -0,0 +1,803 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6529,6 +6529,15 @@ index 0000000000000000000000000000000000000000..f50f9cf35dc4a37a765005312bebc607
 +	unsigned n=0; for (unsigned i=0;i<10;i++) n+=s->jobs[i].active; return n;
 +}
 +
++static unsigned session_periods=6000;
++static struct mi8_pcm_session_stats session_stats;
++static uint64_t session_last_done;
++bool mi8_pcm_session_seconds(unsigned seconds) {
++ if(!seconds || seconds>300)return false;
++ session_periods=seconds*50;return true;
++}
++const struct mi8_pcm_session_stats *mi8_pcm_session_stats(void){return &session_stats;}
++
 +bool
 +mi8_pcm_receive(struct mi8_pcm_state *s, const void *data, size_t length)
 +{
@@ -6556,7 +6565,10 @@ index 0000000000000000000000000000000000000000..f50f9cf35dc4a37a765005312bebc607
 +		j->active=false;
 +		if (j->status==3) { s->result.unsupported=true; s->result.failed_opcode=WRITE; s->result.dsp_status=3; }
 +		if (!j->canary) {
-+			if (!j->status) s->result.done++; else { s->result.errors++; s->result.dsp_status=j->status; s->result.failed_opcode=WRITE; }
++			if (!j->status) {
++    s->result.done++;
++    if(s->session){uint64_t n=s->io->now(s->io->ctx);if(session_last_done && n>=session_last_done && n-session_last_done>session_stats.done_gap_us)session_stats.done_gap_us=n-session_last_done;session_last_done=n;}
++   } else { s->result.errors++; s->result.dsp_status=j->status; s->result.failed_opcode=WRITE; }
 +		}
 +		return true;
 +	}
@@ -7136,8 +7148,8 @@ index 0000000000000000000000000000000000000000..f50f9cf35dc4a37a765005312bebc607
 +bool
 +mi8_pcm_run_session(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end,const struct mi8_pcm_session_ops *amp)
 +{
-+	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;s->zero=true;s->periods=6000;s->session=amp;
-+ memset(&session_pcm,0,sizeof(session_pcm));
++	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;s->zero=true;s->periods=session_periods;s->session=amp;
++ memset(&session_pcm,0,sizeof(session_pcm));memset(&session_stats,0,sizeof(session_stats));session_last_done=0;
 + if(!amp || !amp->snapshot || !amp->wake || !amp->mute || !amp->zero || !amp->count || !amp->stop || !amp->join || !amp->muted || !amp->held)return false;
 +	bool success=false,closed=false,unmapped=false,adm_closed=true;
 +	if (!io->begin(io->ctx,&s->memory)) { pcm_log(s,"smmu: begin failed; no PCM submitted");amp->stop();(void)amp->join();return false; }
@@ -7170,7 +7182,9 @@ index 0000000000000000000000000000000000000000..f50f9cf35dc4a37a765005312bebc607
 +		s->period=n;
 +		session_fill(s,slot);
 +		io->cache(io->ctx,slot*MI8_PCM_PERIOD,MI8_PCM_PERIOD);
++  uint64_t sent_at=io->now(io->ctx),late=sent_at>wait?sent_at-wait:0;
 +		if (!submit(s,slot,MI8_PCM_ADDRESS+(uint64_t)slot*MI8_PCM_PERIOD,false,s->deadline)) goto cleanup;
++  if(late>session_stats.late_us){session_stats.late_us=late;session_stats.late_period=n+1;}
 +	}
 +	while (io->now(io->ctx)<start+(uint64_t)s->periods*20000) if (poll_once(s,s->deadline)) goto cleanup;
 +	if (!drain(s,s->deadline) || s->result.errors || s->result.done!=s->periods) goto cleanup;
@@ -7256,10 +7270,10 @@ index 0000000000000000000000000000000000000000..f50f9cf35dc4a37a765005312bebc607
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e1e3bfee6a749a6fa2cd4530c1fff3eab7364696
+index 0000000000000000000000000000000000000000..308b45b48003d1f1be86be52d2cf532a3cd6a4f5
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,116 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
@@ -7326,6 +7340,9 @@ index 0000000000000000000000000000000000000000..e1e3bfee6a749a6fa2cd4530c1fff3ea
 +const struct mi8_pcm_clip_result *mi8_pcm_clip_result(void);
 +void mi8_pcm_clip_reset(void);
 +bool mi8_pcm_run_clip(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,const struct mi8_pcm_clip_ops *);
++struct mi8_pcm_session_stats { uint64_t done_gap_us,late_us;unsigned late_period; };
++bool mi8_pcm_session_seconds(unsigned seconds);
++const struct mi8_pcm_session_stats *mi8_pcm_session_stats(void);
 +struct mi8_pcm_session_ops {
 + void (*snapshot)(struct mi8_amp_snapshot *);
 + void (*wake)(unsigned);
@@ -7486,7 +7503,7 @@ index 0000000000000000000000000000000000000000..5702ac034fa51420fe910174ef32106a
 +#endif
 diff --git a/bsd/dev/mi8_audio_sink.c b/bsd/dev/mi8_audio_sink.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..2d00185bed3259c3d2b0c3de3564e270989bcc32
+index 0000000000000000000000000000000000000000..74de8456809c3cffd93fdb4bb36ed35602c028c3
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_sink.c
 @@ -0,0 +1,218 @@
@@ -7663,7 +7680,7 @@ index 0000000000000000000000000000000000000000..2d00185bed3259c3d2b0c3de3564e270
 +	PE_parse_boot_argn("audio",&audio,sizeof(audio));
 +	PE_parse_boot_argn("mi8rp_step",&step,sizeof(step));
 +	PE_parse_boot_argn("mi8rp_mss",&mss,sizeof(mss));
-+	if ((audio!=3 && audio!=4 && audio!=5) || step || mss) return false;
++	if ((audio!=3 && audio!=4 && audio!=5) || step || (mss && audio!=5)) return false;
 +	static const char *const owners[]={"adsp","adsp_step","sound","virtio_sound"};
 +	for (unsigned i=0;i<sizeof(owners)/sizeof(*owners);i++) {
 +		owner=0;PE_parse_boot_argn(owners[i],&owner,sizeof(owner));if (owner) return false;
@@ -8390,10 +8407,10 @@ index 0000000000000000000000000000000000000000..af048b9810ee17654f977a1099ee288a
 +#endif
 diff --git a/bsd/dev/mi8_audio_smmu.h b/bsd/dev/mi8_audio_smmu.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..748b4e27abefe9166f96f7f6ee8d718dc21f8b00
+index 0000000000000000000000000000000000000000..e1e652481f2cf89070991764978f3aa0bea3ea7e
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_smmu.h
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,90 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded apps SMMU diagnostics; no remote processor or DMA operations. */
 +#ifndef MI8_AUDIO_SMMU_H
@@ -8474,6 +8491,8 @@ index 0000000000000000000000000000000000000000..748b4e27abefe9166f96f7f6ee8d718d
 +#ifndef MI8_SMMU_HOST_TEST
 +void mi8_audio_smmu_run(unsigned);
 +struct mi8_smmu_mapping *mi8_audio_smmu_begin(void);
++struct mi8_smmu_mapping *mi8_rproc_audio_smmu_begin(void);
++bool mi8_rproc_audio_smmu_end(bool safe);
 +bool mi8_audio_smmu_end(bool);
 +bool mi8_audio_smmu_faults(struct mi8_smmu_fault *);
 +bool mi8_audio_smmu_clear_faults(uint32_t);
@@ -14364,10 +14383,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191b0e69aa2
+index 0000000000000000000000000000000000000000..5386e1d0dd5d3e0abded1b79916061af97783184
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4618 @@
+@@ -0,0 +1,4711 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -17129,6 +17148,58 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +static LCK_MTX_DECLARE(wsmmu_lock, &wsmmu_lock_group);
 +/* Fixed before either worker starts; ordinary boots acquire no new lock. */
 +static bool audio_smmu_serial;
++/* Immutable enable flags are set before either worker. Owner bit 0 reserves
++ * CB43/SMR8 from boot; bit 1 publishes a live/retained mapping. A sticky bank
++ * claim never becomes available to Wi-Fi, even after clean detach.
++ * Lock order: wsmmu_lock is never nested with remote_shared_lock, audio_mutex
++ * or a TAS operation. The TAS thread takes none of these. Playback holds no
++ * allocation lock; only claim/table/route publication and detach take it. */
++static unsigned audio_route_owner;
++static uint64_t audio_lock_max_us,wifi_lock_wait_max_us;
++static bool audio_route_reserved(unsigned slot,unsigned bank) {
++ return __atomic_load_n(&audio_route_owner,__ATOMIC_ACQUIRE) && (slot==8 || bank==43);
++}
++static bool audio_wifi_target(unsigned slot,unsigned bank) {
++ return !__atomic_load_n(&audio_route_owner,__ATOMIC_ACQUIRE) ||
++     (!audio_route_reserved(slot,bank) && (bank==~0u || bank==44));
++}
++struct mi8_smmu_mapping *mi8_rproc_audio_smmu_begin(void) {
++ lck_mtx_lock(&wsmmu_lock);uint64_t start=now_us();
++ struct mi8_smmu_mapping *m=mi8_audio_smmu_begin();
++ if(m || mi8_audio_smmu_reserved(8,~0u))__atomic_store_n(&audio_route_owner,3,__ATOMIC_RELEASE);
++ uint64_t elapsed=now_us()-start;if(elapsed>audio_lock_max_us)audio_lock_max_us=elapsed;
++ lck_mtx_unlock(&wsmmu_lock);return m;
++}
++bool mi8_rproc_audio_smmu_end(bool safe) {
++ lck_mtx_lock(&wsmmu_lock);uint64_t start=now_us();
++ bool clean=mi8_audio_smmu_end(safe);
++ __atomic_store_n(&audio_route_owner,clean?1:3,__ATOMIC_RELEASE);
++ uint64_t elapsed=now_us()-start;if(elapsed>audio_lock_max_us)audio_lock_max_us=elapsed;
++ lck_mtx_unlock(&wsmmu_lock);return clean;
++}
++static unsigned audio_radio_state; /* acquire/release: 0 waiting, 1 READY, 2 failed */
++static bool audio_wait_radio;
++static unsigned audio_session_seconds=120;
++static uint64_t audio_return_deadline;
++/* Read only after both workers have been created; no locks held while waiting.
++ * FW_READY is a protocol event, not merely modem SMP2P or a timer estimate.
++ * A missing earlier failure event becomes a bounded timeout, never success. */
++static uint64_t audio_session_stream_end(uint64_t now,unsigned seconds,uint64_t limit) {
++ if(!seconds || seconds>300)return 0;
++ uint64_t need=(uint64_t)seconds*1000000+10000000;
++ if(limit && (now>=limit || need>limit-now))return 0;
++ return now+need;
++}
++static bool audio_session_dependency(void) {
++ if(!audio_wait_radio)return true;
++ uint64_t start=now_us(),end=start+90000000;
++ if(audio_return_deadline && end>audio_return_deadline)end=audio_return_deadline;
++ unsigned state;
++ while(!(state=__atomic_load_n(&audio_radio_state,__ATOMIC_ACQUIRE)) && now_us()<end)delay_for_interval(100,NSEC_PER_MSEC);
++ say("mi8rp: audio=5: wireless dependency wait=%llu ms state=%s\n",(now_us()-start)/1000,state==1?"FW_READY":state==2?"FAILED":"TIMEOUT");
++ return state==1;
++}
++
 +
 +void
 +mi8_rproc_smmu_log(const char *text)
@@ -17197,7 +17268,11 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +	if (!wsmmu_translating) {
 +		return true;                    /* levels 0..2: nothing to enter */
 +	}
-+	lck_mtx_lock(&wsmmu_lock);
++	uint64_t waited=audio_session_stream?now_us():0;
++ lck_mtx_lock(&wsmmu_lock);
++ if(audio_session_stream)waited=now_us()-waited;
++ if(audio_session_stream && waited>__atomic_load_n(&wifi_lock_wait_max_us,__ATOMIC_RELAXED))__atomic_store_n(&wifi_lock_wait_max_us,waited,__ATOMIC_RELEASE);
++ if(!audio_wifi_target(~0u,wsmmu_context)){lck_mtx_unlock(&wsmmu_lock);return false;}
 +	for (uint64_t at = physical & ~0xfffull; at < physical + size; at += 4096) {
 +		uint64_t *l2 = wsmmu_next(&wsmmu_table(0)[at >> 30 & 0x1ff]);
 +		uint64_t *l3 = l2 == NULL ? NULL : wsmmu_next(&l2[at >> 21 & 0x1ff]);
@@ -17274,7 +17349,7 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +		s2cr = rd(wsmmu + WSMMU_S2CR(n));
 +		if (smr >> 31) {
 +			used[s2cr & 0xff] = true;
-+		} else if (slot == ~0u) {
++		} else if (slot == ~0u && audio_wifi_target(n,~0u)) {
 +			slot = n;
 +		}
 +	}
@@ -17296,7 +17371,7 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +		for (n = contexts; n-- > 0;) {
 +			vm_offset_t cb = cbs + 0x1000ul * n;
 +
-+			if (!used[n] && !(audio_smmu_serial && mi8_audio_smmu_reserved(~0u, n)) && !(rd(cb + WSMMU_CB_SCTLR) & 1)) {
++			if (audio_wifi_target(slot,n) && !used[n] && !(audio_smmu_serial && mi8_audio_smmu_reserved(~0u, n)) && !(rd(cb + WSMMU_CB_SCTLR) & 1)) {
 +				wsmmu_cb = cb;
 +				wsmmu_context = n;
 +				break;
@@ -17383,9 +17458,12 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +	}
 +	if (ev == MI8_WLFW_FW_READY) {
 +		wl_fw_ready = true;
++  if(audio_session_stream)__atomic_store_n(&audio_radio_state,wsmmu_translating && wsmmu_context==44?1:2,__ATOMIC_RELEASE);
 +	} else if (ev == MI8_WLFW_ERROR) {
 +		wl_failed = true;
++  if(audio_session_stream)__atomic_store_n(&audio_radio_state,2,__ATOMIC_RELEASE);
 +	}
++ if(audio_session_stream && (ev==MI8_WLFW_FW_DOWN || ev==MI8_WLFW_SERVER_EXIT))__atomic_store_n(&audio_radio_state,2,__ATOMIC_RELEASE);
 +}
 +
 +/* ---- boot-arg mi8rp_lx=1: the driver (Linux ath10k on the lx layer, TASK-006) over our WLFW client; sys/mi8_lx.h ----
@@ -18317,6 +18395,7 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +	}
 +	say("mi8rp: mss: the modem partition is %s after %u ms of waiting\n", waited < 600 ? "readable" : "STILL NOT readable", waited * 100);
 +	mss_w2e(parameter != NULL);
++ if(audio_session_stream && !modem_kept)__atomic_store_n(&audio_radio_state,2,__ATOMIC_RELEASE);
 +	thread_terminate(current_thread());
 +}
 +
@@ -18425,17 +18504,22 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +	cfg.smem_item = audio_item; cfg.smem_read = svc_read; cfg.smem_write32 = svc_write32;
 +	cfg.ring = audio_ring; cfg.sleep_us = svc_sleep_us; cfg.now_us = svc_now_us; cfg.log = svc_log;
 +	if (last >= 13) {
-+		/* Serialize the complete claim/use/detach lifetime with Wi-Fi. */
-+		lck_mtx_lock(&wsmmu_lock);
-+		audio_play_locked=true;
++		/* Old diagnostic modes retain their lifetime lock. Session mode uses
++   * the native begin/end bridge's short allocation critical sections. */
++  if(!audio_session_stream){lck_mtx_lock(&wsmmu_lock);audio_play_locked=true;}
 +		/* Firmware loading has its own budget; playback starts with ADSP up. */
 +		/* Extra headroom for bounded amp transactions; the PCM window stays 3 s. */
 +		/* audio=2 (17): 60 s of zero periods plus setup and teardown. */
 +		audio_play_until = now_us() + (last==17?70000000:(last==15 || last==16)?20000000:15000000);
 +		if (audio_ring_stream && last==17) audio_play_until=now_us()+130000000;
++  if(audio_session_stream){
++   uint64_t end=audio_session_stream_end(now_us(),audio_session_seconds,audio_return_deadline);
++   if(!end){say("mi8rp: audio=5: insufficient loader budget; no stream\n");return false;}
++   audio_play_until=end;
++  }
 +		bool okay = mi8_audio_run_play(&cfg, audio_alive, &adsp_remote, NULL, NULL, audio_play_until, last, audio_fatal);
 +		audio_play_until=mi8_audio_play_teardown_end();
-+		if (!mi8_audio_play_needs_finish()) {
++		if (!mi8_audio_play_needs_finish() && audio_play_locked) {
 +			lck_mtx_unlock(&wsmmu_lock);audio_play_locked=false;
 +		}
 +		return okay;
@@ -18664,6 +18748,8 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 + mi8_tas_session_count,mi8_tas_session_stop_request,mi8_tas_session_join,redwood_audio_muted,mi8_tas_session_held,mi8_tas_session_fault,mi8_tas_session_panic_tick
 +};
 +static void audio_session_report(bool complete,const char *cleanup) {
++ const struct mi8_pcm_session_stats *t=mi8_pcm_session_stats();
++ say("mi8rp: audio=5: coexist DONE_max_gap=%llu us latest_period=%u late=%llu us smmu_audio_hold_max=%llu us wifi_map_wait_max=%llu us\n",t->done_gap_us,t->late_period,t->late_us,audio_lock_max_us,__atomic_load_n(&wifi_lock_wait_max_us,__ATOMIC_ACQUIRE));
 + bool closed=mi8_audio_ring_close();struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
 + struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);static char line[896];char status[320];
 + mi8_tas_session_report(status,sizeof(status));
@@ -18680,6 +18766,12 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +	const char *cleanup="not started (partition deadline)";
 +	audio_play_thread=current_thread();audio_play_until=now_us()+90000000;
 +	mi8_audio_set_session(&audio_session_ops);
++ cleanup="not started (wireless dependency)";
++ if(!audio_session_dependency())goto out;
++ audio_play_until=now_us()+90000000;
++ if(audio_return_deadline && audio_play_until>audio_return_deadline)audio_play_until=audio_return_deadline;
++ cleanup="not started (partition deadline)";
++ if(audio_play_until<=now_us()+3000000)goto out;
 +	for (unsigned i=0;i<600 && now_us()<audio_play_until-3000000;i++) {
 +		if (!redwood_ufs_read_named("modem",0,&probe,1)) { ready=true;break; }
 +		delay_for_interval(100,NSEC_PER_MSEC);
@@ -18704,7 +18796,7 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +	audio_play_brief=true;*audio_play_note=0;
 +	up=step_start();audio_play_brief=false;
 +	say("mi8rp: audio=5: ADSP start %s: %s",up?"ok":"FAILED",audio_play_note);
-+	if (up) apr=adsp_audio_handshake(17); /* Same lock lifetime and 130 s budget. */
++	if (up) apr=adsp_audio_handshake(17); /* Session begin/end take short locks; duration has its own budget. */
 +	(void)mi8_tas_session_join();
 +	bool started_here=adsp_started;
 +	if (started_here) {
@@ -18857,7 +18949,7 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +	PE_parse_boot_argn("mi8rp_step", &shared_step, sizeof(shared_step));
 +	PE_parse_boot_argn("audio", &audio, sizeof(audio));
 +	if(audio==5) {
-+  if(!mi8_audio_ring_requested()){say("mi8rp: audio=5 refused: platform/step/mss/owner conflict\n");audio=0;}
++  if(!mi8_audio_ring_requested()){say("mi8rp: audio=5 refused: platform/step/owner conflict\n");audio=0;}
 +  else{audio_session_stream=true;audio_ring_stream=true;mi8_audio_set_ring(true);audio=2;}
 + }
 + if (audio==4) {
@@ -18869,6 +18961,7 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +		else { audio_ring_stream=true;mi8_audio_set_ring(true);audio=2; }
 +	}
 +	if (audio == 2 && shared_step == 0) {
++ if(!audio_session_stream){
 +		uint32_t radio = 0;
 +		/* Not yet beside the modem/Wi-Fi start: they share the modem partition, SMEM, AOP and the SMMU. */
 +		if (PE_parse_boot_argn("mi8rp_mss", &radio, sizeof(radio)) && radio != 0) {
@@ -18878,8 +18971,27 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +			shared_step = 17;       /* the same serialization the diagnostics take */
 +		}
 +	}
-+	adsp_shared_serial = shared_step >= 9;
-+	audio_smmu_serial = shared_step >= 12;
++	}
++ /* Product session explicitly enables serialization, independent of the
++  * diagnostic step. The internal dispatch value is not the lock policy. */
++ adsp_shared_serial = shared_step >= 9;
++ audio_smmu_serial = shared_step >= 12;
++ if(audio_session_stream){
++  adsp_shared_serial=true;audio_smmu_serial=true;
++  __atomic_store_n(&audio_route_owner,1,__ATOMIC_RELEASE);
++  unsigned duration=120,return_seconds=0,radio=0;
++  PE_parse_boot_argn("audio_seconds",&duration,sizeof(duration));
++  PE_parse_boot_argn("loader_return_after",&return_seconds,sizeof(return_seconds));
++  PE_parse_boot_argn("mi8rp_mss",&radio,sizeof(radio));
++  audio_wait_radio=radio!=0;
++  audio_return_deadline=return_seconds>10?(uint64_t)(return_seconds-10)*1000000:0;
++  if(!mi8_pcm_session_seconds(duration) || (return_seconds && return_seconds<=10)){
++   say("mi8rp: audio=5: invalid duration/loader budget; not started\n");audio=0;audio_session_stream=false;
++   audio_ring_stream=false;mi8_audio_set_ring(false);
++   adsp_shared_serial=shared_step>=9;audio_smmu_serial=shared_step>=12;
++   __atomic_store_n(&audio_route_owner,0,__ATOMIC_RELEASE);
++  }else{audio_session_seconds=duration;mi8_tas_session_seconds(duration);}
++ }
 +	PE_parse_boot_argn("mi8rp_pause", &pause_ms, sizeof(pause_ms));
 +	{
 +		uint32_t pre = 0;
@@ -18927,11 +19039,11 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +			}
 +		}
 +	}
-+	if (audio == 2 && shared_step == 17) {
++	if (audio == 2 && (shared_step == 17 || audio_session_stream)) {
 +		thread_t thread;
 +		/* audio=2: steps 5..13 without the canary, then 60 s of zero periods; the amp stays in reset. */
 +		audio_tail_on = true;
-+		if(audio_session_stream)say("mi8rp: audio=5: bounded session in a 120 s ring stream\n");
++		if(audio_session_stream)say("mi8rp: audio=5: bounded session in a %u s ring stream\n",audio_session_seconds);
 +		else if (audio_clip_stream) say("mi8rp: audio=4: one bounded clip in a 120 s ring stream\n");
 +		else if (audio_ring_stream) say("mi8rp: audio=3: ring stream for 120 s; output forced zero, amp untouched\n");
 +		else say("mi8rp: audio=2: zero stream to the DSP for 60 s, amp untouched\n");
@@ -18988,10 +19100,10 @@ index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e8c417c22071f5e343b0e09291bec08b0487f090
+index 0000000000000000000000000000000000000000..300af5e55213639aed3e3b164a05d7c29fe44f6d
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,1102 @@
+@@ -0,0 +1,1108 @@
 +/* SPDX-License-Identifier: MIT
 + * TAS2557 firmware probe and bounded hard-muted power check. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
@@ -19761,6 +19873,8 @@ index 0000000000000000000000000000000000000000..e8c417c22071f5e343b0e09291bec08b
 + uint8_t int1,int2,puf;
 + unsigned phase;
 +} session;
++static uint64_t session_duration_limit=230000000;
++void mi8_tas_session_seconds(unsigned seconds){session_duration_limit=(uint64_t)seconds*1000000+110000000;}
 +static bool session_cancelled(void){return SA(session.expired)!=0;}
 +void mi8_tas_session_snapshot(struct mi8_amp_snapshot *o) {
 + o->state=SA(session.state);o->request=SA(session.request);
@@ -19771,7 +19885,7 @@ index 0000000000000000000000000000000000000000..e8c417c22071f5e343b0e09291bec08b
 +}
 +bool mi8_tas_session_held(void) { unsigned s=SA(session.state);return s!=MI8_AMP_PREPARING && s!=MI8_AMP_LATCHED_OFF; }
 +void mi8_tas_session_wake(unsigned peak) {
-+ if (SA(session.state)!=MI8_AMP_OFF_READY || SA(session.wakes)>=20 || SA(session.live_total)>=60000000 || SA(session.expired)) return;
++ if (SA(session.state)!=MI8_AMP_OFF_READY || SA(session.wakes)>=20 || SA(session.live_total)>59000000 || SA(session.expired)) return;
 + SP(session.trigger,peak);unsigned expected=0;
 + (void)__atomic_compare_exchange_n(&session.request,&expected,1,false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);
 +}
@@ -19838,6 +19952,9 @@ index 0000000000000000000000000000000000000000..e8c417c22071f5e343b0e09291bec08b
 + if(t->io->log)t->io->log(t->io->ctx,"audio: coefficient check Y=%02x expected=5d time=%llu ms %s\n",d.y,(unsigned long long)((now(t)-start)/1000),ok?"ok":"FAILED");
 + return ok;
 +}
++/* TI SLASEC2B section 9.6.2.34/table 56: INT_DET_2 bit1 is Reserved,
++ * not an identified alarm. Vendor tas2557-regmap.c uses mask 0x0c (CLK1/2).
++ * Do not infer the reserved bit's internal function or change this mask. */
 +static bool session_health(bool live) {
 + struct tas *t=&amp.t;uint8_t a=255,b=255,p=0,h=255,soft=255;
 + bool ok=read_regs(t,0,0,0x68,&a,1)&&read_regs(t,0,0,0x6c,&b,1)&&read_regs(t,0,0,0x64,&p,1)&&read_regs(t,0,0,7,&h,1)&&read_regs(t,100,0,7,&soft,1);
@@ -19862,7 +19979,7 @@ index 0000000000000000000000000000000000000000..e8c417c22071f5e343b0e09291bec08b
 + /* The launch path resets session before creating the sole controller. */
 + SP(session.state,MI8_AMP_PREPARING);
 + if (!mi8_tas2557_parse(raw,size,&fw,NULL,NULL) || !mi8_tas2557_hold_tone(io,raw,size,deadline)) { session_end(1);return false; }
-+ session.coeff=fw.coeff;session.limit=now(&amp.t)+230000000;
++ session.coeff=fw.coeff;session.limit=now(&amp.t)+session_duration_limit;
 + if(SA(session.expired)){session_end(8);return false;}
 + SP(session.state,MI8_AMP_OFF_READY);return true;
 +}
@@ -19871,7 +19988,7 @@ index 0000000000000000000000000000000000000000..e8c417c22071f5e343b0e09291bec08b
 + struct tas *t=&amp.t;unsigned req=SA(session.request),state=SA(session.state);uint64_t n=now(t);
 + if(req==3 || SA(session.expired) || n>=session.limit) {session_end(n>=session.limit?7:0);return false;}
 + if(state==MI8_AMP_OFF_READY && req==1) {
-+  if(SA(session.wakes)>=20 || SA(session.live_total)>=60000000){SP(session.request,0);return true;}
++  if(SA(session.wakes)>=20 || SA(session.live_total)>59000000){SP(session.request,0);return true;}
 +  SP(session.state,MI8_AMP_WARMING);session.warming_at=n;
 +  if(SA(session.wakes) && !session_check()){session_end(2);return false;}
 +  if(SA(session.request)==3 || SA(session.expired)){session_end(0);return false;}
@@ -19918,6 +20035,7 @@ index 0000000000000000000000000000000000000000..e8c417c22071f5e343b0e09291bec08b
 + static const char *const reasons[]={"no","prepare","coefficient","startup","health","mute","stream","budget","controller-timeout"};
 + snprintf(out,size,"wakes=%u mutes=%u live_total=%llu ms max_warmup=%llu ms out_peak=%u checks=%u/%u latched=%s final reset=%s controller=%s",
 + c.wakes,c.mutes,(unsigned long long)(c.live_total/1000),(unsigned long long)(c.max_warmup/1000),c.peak,c.checks_ok,c.checks,c.reason<9?reasons[c.reason]:"unknown",c.reset_low?"low":"Pending",c.done?"finished":SA(session.expired)?"retained FAILED":"running");
++ if(c.live_total>59000000){size_t used=strlen(out);if(used<size)snprintf(out+used,size-used," budget exhausted");}
 +}
 +#ifndef MI8_TAS_HOST_TEST
 +extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
@@ -20096,10 +20214,10 @@ index 0000000000000000000000000000000000000000..e8c417c22071f5e343b0e09291bec08b
 +#endif
 diff --git a/bsd/dev/mi8_tas2557.h b/bsd/dev/mi8_tas2557.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..706cb2ee070cde848cca0864fbd6db1715a071c4
+index 0000000000000000000000000000000000000000..773b4b25466375ffdcbe78c21a43243446f83cb6
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.h
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,81 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef MI8_TAS2557_H
 +#define MI8_TAS2557_H
@@ -20158,6 +20276,7 @@ index 0000000000000000000000000000000000000000..706cb2ee070cde848cca0864fbd6db17
 + bool done, clean, reset_low;
 +};
 +void mi8_tas_session_snapshot(struct mi8_amp_snapshot *);
++void mi8_tas_session_seconds(unsigned seconds);
 +void mi8_tas_session_wake(unsigned peak);
 +void mi8_tas_session_mute(uint64_t now_us);
 +void mi8_tas_session_zero(void);
