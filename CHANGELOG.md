@@ -2,6 +2,11 @@
 
 记录影响使用和构建的变化。详细测试过程见 [复现记录](docs/validation/REPRODUCTION.md)，当前支持范围见 [功能状态](docs/STATUS.md)。
 
+## 2026-11-12
+
+- 音频诊断扩展到 `mi8rp_step=11..16`：apps SMMU 映射与 DMA 翻译证明、ASM/ADM/AFE 播放、TAS2557 手工 I2C 下载及静音上电收尾已验证；内存启动、GPU 关闭时，1 kHz、−30 dBFS、1 秒诊断短音可听且结尾无爆音。越界金丝雀会使 ADSP 崩溃，仅用于步骤 13。
+- 新增默认关闭的 `audio=1` 计数与 `audio=2` 零流：内存启动、GPU 桌面默认配置及无线关闭时，前者确认 iOS PCM 到达内核，后者完成 60 秒、3000/3000 周期并正常清理，功放保持复位。iOS 声音尚不能从扬声器播放；无线并存、ADSP 停后再启、长期/热安全与物理波形未验证，历史 loader 偶发 `hung` 仍待处理。
+
 ## 2026-11-11
 
 - 新增音频诊断步骤（`mi8rp_step=8..10`，默认关闭）：音频 DSP（ADSP）经 TrustZone 启动并有序停止；GLINK 通道 `apr_audio_svc` 与 APR 握手，读到 AFE、ASM、ADM 服务版本；AFE 的 Quaternary MI2S 端口 0x1006 起停。设备上只验证了这些控制步骤；还没有声音，功放未初始化，共享内存与 SMMU 未做。

@@ -123,14 +123,13 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 接手顺序固定为：AGENTS → docs/README（文档导航）→ STATUS（功能与设备边界）→ 本文（开发流程和现场交接）。每项任务结束更新下面的现场交接，不另建多个 current/latest 状态文件。设备标识、原始日志和私人配置只引用本机位置，不复制到公共文档。
 
-### 当前开发现场交接（2026-11-11，覆盖更新，接手时重新核对）
+### 当前开发现场交接（2026-11-12，接手时重新核对）
 
-- **分支/基线**：`feat/audio-afe`，三个本地提交（GLINK 与 APR 握手、intent 表与应答头修复、AFE 端口起停及其引脚映射修复）叠在 `main` 之上，未 push。声音移植的步骤 8 至 10 已在设备上验证，见[验证记录](../validation/VALIDATION.md#音频-dsp启动apr-握手与-quat-mi2s-端口2026-11-11)。
-- **源码对应**：`work/` 与补丁一致，无未导出修改。新增 `bsd/dev/mi8_audio.c/.h`；`mi8_glink.c` 增加命名 raw 通道；`mi8_rproc.c` 把 ADSP 与 modem 的远端状态分开，`steps_from_five` 在 step 8 之后依次执行 step 9、10（`mi8rp_step=9/10`，不新增参数名）。内核增量构建复用 `work/runs/20261109-fbscale-01/kernel` 的目标目录；注意 `build-payload.py` 默认内核路径是旧文件，打载荷要换成该目录下的最新内核。
-- **设备做法**：`fastboot boot` 内存启动，载荷参数用默认短参数加 `gpu=0 fts=0 buttons=0` 和 `mi8rp_step=N`，限时 90 秒；内核日志返回后只留最后 32 KB，GPU 开启时早期日志会丢。每轮之间完整重启（`fastboot -s xnuloader reboot` 后再进 bootloader）。
-- **下一步**：步骤 11 先做只读的 apps SMMU 状态调查（不写寄存器），再设计共享内存映射与 ASM/ADM 播放；之后是 TAS2557 功放（先静音与固件，再低增益短音）、接 iOS 的声音、与 Wi-Fi 并存与收尾。
-- **边界**：没有声音；物理波形未测；默认参数（GPU 开启）下步骤 9/10 的桌面回归、与 Wi-Fi 并存、ADSP 停后再启动均未测；loader 结果偶发 `hung`（日志可取、可恢复）原因未查。GPU/基带退出恢复、首次安装逐项回归和完整 all 的边界保持原记录；设备轮次间完整重启。
-- **私人输入**：沿用现有 `local/` 配置与固件；蓝牙固件在 `local/devices/mi8/bt-firmware/`，音频配置快照（只读取得）在 `local/devices/mi8/audio-android/`，均不进 Git。
+- **分支/基线**：`feat/audio-sink`，功能基线 `051215b`，未 push。步骤 11–16 以及 `audio=1/2` 已有设备记录：诊断短音可听；iOS PCM 计数与 GPU 桌面下 60 秒零流通过。iOS 声音输出尚未接通，完整范围见[音频验证](../validation/VALIDATION.md#音频映射播放与功放2026-11-1112)。
+- **源码对应**：本次文档同步时 `work/` 56 个登记 XNU 源码摘要与清单一致，无待固化的设备修改。计数 sink 在 `mi8_audio_sink.c`；`audio=2` 走内部 step 17，`mi8_pcm_run_zero` 提交 3000 周期，工作线程尾日志与计数摘要在 loader 返回时保留。SMR8/CB43 与既有认领/惰性清理语义保持，`wsmmu_lock` 仍跨整场播放持有。
+- **构建与证据**：继续复用 `work/runs/20261109-fbscale-01/kernel` 对象目录，make 必须显式传 `SOURCE_DIR="$XNU_SRC"`；其 osfmk 生成 Makefile 曾指向旧验证树，不能仅以退出 0 判断使用了当前源码，应核对对象依赖/mtime及链接符号。构建入口参考 `work/runs/20261112-audio-zero-01/build-kernel.sh`，最新已验载荷为该目录 P18；打包须指定本轮内核。
+- **设备边界**：内存启动、不写存储，各轮完整重启。步骤 11–16 为 GPU/触摸/按键关闭的诊断；`audio=1/2` 为默认桌面、无线关闭。两个参数均默认关闭；ADSP 停后当前流程不能再启，长期/热安全、物理波形和 Wi-Fi/蓝牙并存未测，loader 偶发 `hung` 未解决。固件与系统输入仍在原本机位置，不进提交。
+- **下一步**：第三步接有界 HAL ring 并消费真实 PCM，但 DMA 强制零、功放保持复位；第四步加入限幅与功放握手，只验证有界 iOS 可听片段；第五步实现 idle/wake、故障关闭和 panic 紧急复位；第六步缩短共享锁临界区，再验证 GPU/Wi-Fi/蓝牙并存及长期门槛。各步先主机验证，再由持有人验收设备。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 
