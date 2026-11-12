@@ -103,7 +103,7 @@ static atomic_bool detached,detach_started;
 static uint32_t blocking_sink(const int16_t *p,uint32_t n){(void)p;CHECK(held);pthread_mutex_lock(&barrier_lock);entered=true;pthread_cond_broadcast(&barrier_cond);while(!released)pthread_cond_wait(&barrier_cond,&barrier_lock);pthread_mutex_unlock(&barrier_lock);return n;}
 static void *one_write(void *unused){(void)unused;int16_t frame[2]={0};audio_play(frame,1);return NULL;}
 static void *detach(void *unused){(void)unused;atomic_store(&detach_started,true);redwood_audio_set_sink("nothing",NULL);atomic_store(&detached,true);return NULL;}
-static bool audio_ring_stream,selected_ring,audio_clip_stream;
+static bool audio_ring_stream,selected_ring,audio_clip_stream,audio_session_stream;
 static void mi8_audio_set_ring(bool enabled){selected_ring=enabled;}
 static unsigned dispatch_gate(unsigned audio,unsigned shared_step){
 #define say capture
@@ -124,7 +124,7 @@ int main(void){
  step_arg=0;const char *owners[]={"adsp","adsp_step","sound","virtio_sound"};
  for(unsigned i=0;i<4;i++){owner_name=owners[i];owner_arg=1;mi8_audio_sink_init();CHECK(!spawned&&!audio_sink);}
  owner_arg=0;audio_sink=other_sink;mi8_audio_sink_init();CHECK(audio_sink==other_sink&&!spawned);audio_sink=NULL;
- audio_arg=5;mi8_audio_sink_init();CHECK(!spawned);audio_arg=1;spawn_fail=true;mi8_audio_sink_init();CHECK(!audio_sink&&!installed);spawn_fail=false;
+ audio_arg=6;mi8_audio_sink_init();CHECK(!spawned);audio_arg=1;spawn_fail=true;mi8_audio_sink_init();CHECK(!audio_sink&&!installed);spawn_fail=false;
  for(unsigned s=0;s<=8;s++){reset();audio_arg=1;step_arg=s;mi8_audio_sink_init();CHECK(installed&&audio_sink==count_sink&&spawned==1&&deallocated==1);}
  mi8_audio_sink_init();CHECK(spawned==1);CHECK(strstr(logs,"count-only sink installed (no DSP, no amp)"));
  reset();audio_arg=3;CHECK(mi8_audio_ring_requested());
@@ -135,6 +135,9 @@ int main(void){
  CHECK(!dispatch_gate(0,0)&&!dispatch_gate(1,0));
  audio_arg=4;CHECK(dispatch_gate(4,0)==17&&audio_clip_stream&&selected_ring);audio_clip_stream=false;
  step_arg=1;CHECK(!dispatch_gate(4,1));step_arg=0;owner_name="mi8rp_mss";owner_arg=1;CHECK(!dispatch_gate(4,0));owner_arg=0;
+ audio_arg=5;CHECK(dispatch_gate(5,0)==17&&audio_session_stream&&selected_ring);audio_session_stream=false;
+ step_arg=1;CHECK(!dispatch_gate(5,1));step_arg=0;owner_name="mi8rp_mss";owner_arg=1;CHECK(!dispatch_gate(5,0));owner_arg=0;
+ reset();audio_arg=5;mi8_audio_sink_init();CHECK(installed&&audio_sink==ring_sink);reset();
  audio_arg=3;
  platform="redwood";platform_size=8;CHECK(!dispatch_gate(3,0));platform="dipper";platform_size=7;
 

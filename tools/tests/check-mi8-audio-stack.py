@@ -31,15 +31,16 @@ AMP = names('mi8_tas2557', 'mi8_tas2557_held mi8_tas2557_tick mi8_tas2557_stop m
 # The separate clip table adds warmup/health and the mutex-protected cdev mute
 # accessor. The latter is an external XNU boundary, listed explicitly below.
 CLIP = names('mi8_tas2557', 'mi8_tas2557_clip_warmup mi8_tas2557_clip_audible mi8_tas2557_clip_clean')
+SESSION = names('mi8_tas2557', 'mi8_tas_session_snapshot mi8_tas_session_wake mi8_tas_session_mute mi8_tas_session_zero mi8_tas_session_count mi8_tas_session_stop_request mi8_tas_session_join mi8_tas_session_held mi8_tas_session_fault')
 CALLBACKS = {
     'mi8_glink': TRANSPORT + names('mi8_audio', 'receive'),
-    'mi8_audio': names('mi8_rproc', 'audio_alive audio_fatal svc_now_us svc_sleep_us svc_log') + names('mi8_audio', 'native_pin_read native_pin_write') + AMP + CLIP,
-    'mi8_audio_pcm': names('mi8_audio', 'pcm_now pcm_sleep pcm_exchange pcm_send pcm_poll pcm_tell pcm_begin pcm_cache pcm_fault pcm_clear pcm_end') + AMP + CLIP,
+    'mi8_audio': names('mi8_rproc', 'audio_alive audio_fatal svc_now_us svc_sleep_us svc_log') + names('mi8_audio', 'native_pin_read native_pin_write') + AMP + CLIP + SESSION,
+    'mi8_audio_pcm': names('mi8_audio', 'pcm_now pcm_sleep pcm_exchange pcm_send pcm_poll pcm_tell pcm_begin pcm_cache pcm_fault pcm_clear pcm_end') + AMP + CLIP + SESSION,
     'mi8_audio_smmu': names('mi8_audio_smmu', 'native_read native_write native_wait native_play_log native_allocate native_release native_cache native_table_read'),
     'mi8_tas2557': names('mi8_tas2557', 'native_read native_write native_now native_delay native_log'),
 }
 # commands() additionally dispatches the selected firmware validator/downloader.
-EXTRA = {'mi8_tas2557:commands': names('mi8_tas2557', 'validate_command execute'),
+EXTRA = {'mi8_tas2557:commands': names('mi8_tas2557', 'validate_command execute session_y_read'),
          'mi8_rproc:fs_dir_find': names('mi8_rproc', 'list_image_entry')}
 # A nested ADSP/modem lookup must retain independent snapshots. This frame
 # cannot be static. Its size is still included in every caller's budget.
@@ -82,7 +83,7 @@ def main():
         hashes[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
         text = subprocess.check_output(['llvm-objdump', '--macho', '--disassemble', '--no-show-raw-insn', str(p)], text=True)
         data.update(parse(text, p.stem))
-    roots = args.root or ['mi8_rproc:steps_from_five', 'mi8_rproc:steps_audio_clip']
+    roots = args.root or ['mi8_rproc:steps_from_five', 'mi8_rproc:steps_audio_clip', 'mi8_rproc:steps_audio_session', 'mi8_tas2557:session_control_thread']
     graph, external = {}, {}
     for key, row in data.items():
         obj = key.split(':')[0]

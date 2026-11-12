@@ -48,7 +48,7 @@ def main():
         (d / 'sink-host.h').write_text('/* Host declarations are provided by the harness. */\n')
         code = (ROOT / 'tools/tests/mi8-audio-sink.c').read_text()
         rproc = (x / 'bsd/dev/mi8_rproc.c').read_text()
-        gate = body(rproc, 'if (audio==4)') + '\n' + body(rproc, 'if (audio==3)') + '\n' + body(rproc, 'if (audio == 2 && shared_step == 0)')
+        gate = body(rproc, 'if(audio==5)') + '\n' + body(rproc, 'if (audio==4)') + '\n' + body(rproc, 'if (audio==3)') + '\n' + body(rproc, 'if (audio == 2 && shared_step == 0)')
         code = code.replace('/* @ring_gate */', gate)
         code = code.replace('/* @cdev */', pieces).replace('/* @sink */', source).replace('/* @loader */', final)
         (d / 'count.c').write_text(code)

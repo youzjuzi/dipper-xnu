@@ -125,10 +125,12 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-12，接手时重新核对）
 
-- 分支 `feat/audio-sink`，源码基线 `9d1a653`（栈修复 `0d5ee49`）；已核对 work 源码清单一致，无未导出源码改动，未 push。
-- `audio=4` 已有设备证据：桌面无线关闭，持有人确认一次约 3 秒铃声无爆音；150 块、输出峰值 269、静音 03/01、关断/reset 低、6000 周期与守恒通过。原始记录见 `work/runs/20261112-audio-clip-01/DEVICE.md`；不扩展为长期或无线并存结论。
-- 本轮继续主机侧会话多次播放与 panic 应急工作，先检查只读系数校验和 panic 无锁入口；证据放 `work/runs/20261112-audio-session-01/`。新功能尚未完成，不作为设备可用能力。
-- 构建继续复用 `work/runs/20261109-fbscale-01/kernel`，必须显式传 SOURCE_DIR。保留 P21 与既有验证过的源码语义，不操作设备，不改 local/。
+- 分支 `feat/audio-sink`；源码基线 `9d1a653`，设备记录文档提交 `997b2ac`，本提交增加 audio=5 会话播放，未 push。work 源码已导出，与清单对应。
+- audio=4 的一次约 3 秒 iOS 铃声已在设备通过，原始记录见 `work/runs/20261112-audio-clip-01/DEVICE.md`；旧 worker、ring、clip、tone 与 stop 函数体保持一致。
+- audio=5 由独立 TAS 控制线程执行 I2C，feeder 通过 acquire/release 原子请求握手；3 秒处理后零输出关窗，20 秒窗口、60 秒累计准入、20 次 wake 上限，mute 前提交至少 8 个零块。只读 Y 校验仅使用 book/page 选择和数据读取，第二次起要求 5d，选择寄存器随后恢复；芯片保留系数仍待设备验证。
+- 控制线程结束先发布资源静止标志，再自终止；清理同时检查标志和线程 active 状态。300 ms 超时直接 reset 低、FAILED，禁止再上电，保留线程与所有资源至重启；不把超时当 join 成功，后续清理不重复等待。
+- 主机构建、干净重放、全部回归及 ASan/UBSan/TSan 通过；session feeder 栈 7280 B，control 栈 3056 B（mi8 子图，均小于 8 KiB）。验证记录与命令在 `work/runs/20261112-audio-session-01/`；只读设备/旧轮次证据未改动。
+- 下一步继续 panic 应急实现和最终 P22/P22-panic 打包。audio=5 设备 Pending；不操作手机、不改 local/。无线并存、长期/热安全仍未验收。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

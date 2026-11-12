@@ -20,22 +20,22 @@
       },
       {
         "path": "bsd/dev/mi8_audio.c",
-        "sha256": "3f81eec94890d8ff2c22bb2fc3b162b60af15595186baac57c925dc9dfc2a04d",
+        "sha256": "79e91e612cb9ec890b2d20b21aab0fd43cd76026e5b28b1edc7141d492d5c617",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio.h",
-        "sha256": "1304ed4222783d157bc0ea63a3201e4e810a35114782268255df47e1449fe50c",
+        "sha256": "46ff2c9884086f96d3c35a4c2d57bd1d870a3a36d9d81349e8c0ea8fd4768f52",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.c",
-        "sha256": "19c1145e0a01acdd9a34673c173a00a92ed207b86b1590749e72aeca0c9063cd",
+        "sha256": "3a74c1be21edf5908575c84ca2fe9a6050380fd84d6db082c57450d309667afa",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.h",
-        "sha256": "5a7fa3a1266c7cfb48828a52f7e3ada86b914111e285db79522cb54aa8e59431",
+        "sha256": "e179ea29c249dca4a832ff201c6864e88166c558b14673b2f380543e5213493b",
         "mode": "0o664"
       },
       {
@@ -50,7 +50,7 @@
       },
       {
         "path": "bsd/dev/mi8_audio_sink.c",
-        "sha256": "f9bf1c6a97d4952e9fcc81ae6dc9267f801d846444e786fd1a4b61a218a5bada",
+        "sha256": "08cb4e1502a8515db16275d6bdf7ceb51c7262c142e304eb24f8f6ec886aab94",
         "mode": "0o664"
       },
       {
@@ -105,17 +105,17 @@
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "5ba1ead6dada4cc593783c1999266ae750cd141735569c6982ffcb46b1362346",
+        "sha256": "1fafd16fe3c27aa6d9afcf7fad8b4fcc9182a3cdec220fa285f641289eef237b",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_tas2557.c",
-        "sha256": "9d5495b335dbfcd9f60f8dd54d0571275f8f84d6581a33ff7c261688afc0e068",
+        "sha256": "510b5ebd428b53a2155008b84a0947f96b5a6d9c69a6af77d079e61d2aead9ae",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_tas2557.h",
-        "sha256": "508ba7473cdc771281ada00964264535e859f761cefcbd043371a0c3ad24cf71",
+        "sha256": "62db6cc1ad52cdfc63f466b2e6232fa378dc47267c98ee016de4b57f87e000cd",
         "mode": "0o664"
       },
       {
