@@ -32,6 +32,7 @@ def main():
 #define LOADER_LOG_SIZE (1536*1024)
 typedef unsigned thread_t;
 static thread_t audio_play_thread;
+static bool session_resident;
 static bool audio_play_brief,audio_ring_stream,audio_clip_stream,audio_session_stream,audio_tail_on;
 static unsigned audio_tail_len,audio_session_seconds=300,wake_lines;
 static char audio_tail[16384],audio_play_note[400],loader_log[LOADER_LOG_SIZE];
@@ -80,8 +81,11 @@ static void dispatch(void){uint32_t audio=5,shared_step=0;
  code+=r'''
 #undef printf
 int main(void){
- for(unsigned stress=0;stress<2;stress++){
-  audio_tail_len=0;audio_play_thread=0;audio_session_stream=audio_ring_stream=audio_tail_on=false;wake_lines=stress?200:0;
+ for(unsigned stress=0;stress<3;stress++){
+#ifdef LEGACY
+  if(stress==2)break;
+#endif
+  audio_tail_len=0;audio_play_thread=0;audio_session_stream=audio_ring_stream=audio_tail_on=false;session_resident=stress==2;wake_lines=stress==2?1000:stress?200:0;
   dispatch();assert(audio_session_stream&&audio_ring_stream&&audio_tail_on&&!audio_play_thread);
   memset(loader_log,'x',sizeof(loader_log));loader_log_len=sizeof(loader_log);
   loader_audio_summary();char tail[32769];memcpy(tail,loader_log+loader_log_len-32768,32768);tail[32768]=0;
@@ -91,7 +95,7 @@ int main(void){
   if(!stress)assert(strstr(tail,"zero: 195 s")&&!strstr(tail,"zero: 210 s"));
 #else
   assert(strstr(tail,"zero: 300 s")&&strstr(tail,"play: 15000")&&strstr(tail,"asm stream close"));
-  if(stress){assert(audio_tail_len==sizeof(audio_tail)-1);assert(strstr(tail,"wake #200 flushed="));}
+  if(stress){assert(audio_tail_len==sizeof(audio_tail)-1);assert(strstr(tail,stress==2?"wake #1000 flushed=":"wake #200 flushed="));}
 #endif
  }
 #ifdef LEGACY

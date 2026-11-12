@@ -6470,10 +6470,10 @@ index 0000000000000000000000000000000000000000..3b401e70c9180a9bbb1eaecb706aa87a
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07417afc13
+index 0000000000000000000000000000000000000000..fb230c4dbe32785484f3a9b571a2f84043fccb66
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,850 @@
+@@ -0,0 +1,858 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6497,13 +6497,14 @@ index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07
 +static void put16(uint8_t *p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
 +static const uint32_t commands[] = {0,0x10db3,0x10d92,0x10326,0x10325,0x10d98,0x10daa,0x10bcd,0x10d94,0x10327};
 +static const char *const names[] = {"invalid","asm open write","asm map regions","adm device open","adm routing","asm media format","asm run","asm stream close","asm unmap regions","adm device close"};
++static bool session_resident; /* Selected before either audio worker starts. */
 +static void
 +pcm_log(struct mi8_pcm_state *s, const char *fmt, ...)
 +{
 +	char text[320]; va_list ap;
 +	/* At most 200 wake reports, 20 progress lines and bounded setup/cleanup.
 +  * Keep the old diagnostic budget; session teardown must remain observable. */
-+ if (s->result.lines >= (s->session?256u:20u)) return;
++ if (!(s->session && session_resident) && s->result.lines >= (s->session?256u:20u)) return;
 +	va_start(ap,fmt); vsnprintf(text,sizeof(text),fmt,ap); va_end(ap);
 +	if (s->io->log) s->io->log(s->io->ctx,text);
 +	s->result.lines++;
@@ -6560,8 +6561,8 @@ index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07
 +static struct mi8_pcm_session_stats session_stats;
 +static uint64_t session_last_done,session_pending_flush,session_resume_seen;
 +bool mi8_pcm_session_seconds(unsigned seconds) {
-+ if(!seconds || seconds>900)return false;
-+ session_periods=seconds*50;return true;
++ if(seconds>900)return false;
++ session_resident=seconds==0;session_periods=seconds*50;return true;
 +}
 +const struct mi8_pcm_session_stats *mi8_pcm_session_stats(void){return &session_stats;}
 +
@@ -6737,7 +6738,7 @@ index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07
 +
 +/* Only the session feeder enters these helpers; DMA never borrows ring memory.
 + * Controller access is exclusively through nonblocking atomic callbacks. */
-+static struct { unsigned wake,periods,zero_periods;bool closing,heard;uint64_t start; } session_pcm;
++static struct { unsigned wake,zero_periods;uint64_t periods;bool closing,heard;uint64_t start; } session_pcm;
 +static bool session_guard(struct mi8_pcm_state *s,const uint8_t *data,unsigned *peak,bool *nz) {
 + *peak=0;*nz=false;
 + for(unsigned i=0;i<960;i++) {
@@ -6748,14 +6749,14 @@ index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07
 + }
 + if(!*nz)return true;
 + struct mi8_amp_snapshot a;s->session->snapshot(&a);uint64_t n=s->io->now(s->io->ctx);
-+ return a.state==MI8_AMP_LIVE && !a.request && !a.reason && a.wakes<=200 &&
-+     n>=a.live_start && n-a.live_start<SESSION_WINDOW_US && session_pcm.periods<SESSION_WINDOW_PERIODS;
++ return a.state==MI8_AMP_LIVE && !a.request && !a.reason && (session_resident || a.wakes<=200) &&
++     n>=a.live_start && (session_resident || (n-a.live_start<SESSION_WINDOW_US && session_pcm.periods<SESSION_WINDOW_PERIODS));
 +}
 +static int session_sample(int16_t left,int16_t right,unsigned frame,bool last,bool muted) {
 + if(muted)return 0;
 + int limit=(int)mi8_pcm_session_limit();
 + int value=clip_round(((int32_t)left+right)/2*limit,32768);
-+ unsigned fade_frame=session_pcm.periods*960+frame;
++ unsigned fade_frame=session_pcm.periods<3?(unsigned)session_pcm.periods*960+frame:2400;
 + if(fade_frame<2400)value=clip_round(value*(int)fade_frame,2399);
 + if(last && frame>=480)value=clip_round(value*(int)(959-frame),479);
 + if(value>limit){value=limit;session_stats.saturated_samples+=2;}
@@ -6784,14 +6785,14 @@ index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07
 + if(a.state==MI8_AMP_OFF_READY) {
 +  unsigned peak=0;
 +  for(unsigned i=0;i<960;i++){int v=((int32_t)scratch[2*i]+scratch[2*i+1])/2;unsigned p=v<0?-v:v;if(p>peak)peak=p;}
-+  if(a.wakes<200){if(write_wake)s->session->wake(0);else if(peak>=256)s->session->wake(peak);}
++  if(session_resident || a.wakes<200){if(write_wake)s->session->wake(0);else if(peak>=256)s->session->wake(peak);}
 +  return;
 + }
 + if(a.state!=MI8_AMP_LIVE)return;
 + const uint64_t remaining=SESSION_WINDOW_US;
 + if(n<a.live_start)return;
-+ if(n-a.live_start>=remaining || session_pcm.periods>=SESSION_WINDOW_PERIODS){s->session->mute(s->io->now(s->io->ctx));return;}
-+ bool last=n-a.live_start+20000>=remaining || session_pcm.periods==SESSION_WINDOW_PERIODS-1;
++ if(!session_resident && (n-a.live_start>=remaining || session_pcm.periods>=SESSION_WINDOW_PERIODS)){s->session->mute(s->io->now(s->io->ctx));return;}
++ bool last=!session_resident && (n-a.live_start+20000>=remaining || session_pcm.periods==SESSION_WINDOW_PERIODS-1);
 + bool muted=s->session->muted(),nz=false;
 + for(unsigned i=0;i<960;i++) {
 +  int value=session_sample(scratch[2*i],scratch[2*i+1],i,last,muted);
@@ -7189,7 +7190,10 @@ index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07
 +	return s->result.completed;
 +}
 +
++static bool session_therm_live;
 +static void session_therm(struct mi8_pcm_state *s,unsigned seconds) {
++ if(session_resident && !session_therm_live)return;
++ session_therm_live=false;
 + struct mi8_amp_snapshot a;s->session->snapshot(&a);int mc=0;char cpu[16];
 + bool valid=s->session->cpu_temp && s->session->cpu_temp(&mc);
 + if(valid && (!session_stats.cpu_seen || mc>session_stats.cpu_max_mc)){session_stats.cpu_seen=true;session_stats.cpu_max_mc=mc;session_stats.cpu_max_s=seconds;}
@@ -7203,7 +7207,7 @@ index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07
 +mi8_pcm_run_session(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end,const struct mi8_pcm_session_ops *amp)
 +{
 +	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;s->zero=true;s->periods=session_periods;s->session=amp;
-+ memset(&session_pcm,0,sizeof(session_pcm));memset(&session_stats,0,sizeof(session_stats));session_last_done=session_pending_flush=session_resume_seen=0;
++ memset(&session_pcm,0,sizeof(session_pcm));memset(&session_stats,0,sizeof(session_stats));session_last_done=session_pending_flush=session_resume_seen=0;session_therm_live=false;
 + if(!amp || !amp->snapshot || !amp->wake || !amp->mute || !amp->zero || !amp->count || !amp->stop || !amp->join || !amp->muted || !amp->held)return false;
 +	bool success=false,closed=false,unmapped=false,adm_closed=true;
 +	if (!io->begin(io->ctx,&s->memory)) { pcm_log(s,"smmu: begin failed; no PCM submitted");amp->stop();(void)amp->join();return false; }
@@ -7215,7 +7219,9 @@ index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07
 +	    command(s,MI8_PCM_ROUTE,false) || command(s,MI8_PCM_FORMAT,false) || command(s,MI8_PCM_RUN,false)) goto cleanup;
 +	if (!mi8_audio_ring_open()) { pcm_log(s,"ring: sink unavailable or already used");goto cleanup; }
 +	uint64_t start=io->now(io->ctx);s->run_start=start;
-+	for (unsigned n=0;n<s->periods;n++) {
++	uint64_t count=session_resident?(s->deadline>start+500000?(s->deadline-start-500000)/20000:0):s->periods;
++ if(!count)goto cleanup;
++ for (uint64_t n=0;n<count;n++) {
 +		unsigned slot=n%8;
 +		uint64_t wait=start+(uint64_t)n*20000;
 +		while (io->now(io->ctx)<wait || s->jobs[slot].active) if (poll_once(s,s->deadline)) goto cleanup;
@@ -7229,21 +7235,23 @@ index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07
 +		if (n && n%750==0) {
 +			struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
 +			pcm_log(s,"zero: %u s, submitted=%u done=%u ring: accepted=%llu consumed=%llu queued=%llu dropped=%llu underflow_frames=%llu peak=%llu/%llu",
-+			    n/50,s->result.submitted,s->result.done,(unsigned long long)r.accepted,(unsigned long long)r.consumed,
++			    (unsigned)(n/50),s->result.submitted,s->result.done,(unsigned long long)r.accepted,(unsigned long long)r.consumed,
 +			    (unsigned long long)r.queued,(unsigned long long)r.dropped,(unsigned long long)r.underflow_frames,
 +			    (unsigned long long)r.peak_l,(unsigned long long)r.peak_r);
 +		}
 +		/* Long-play record every 30 s: last amp health and CPU temperature. */
-+		if (n && n%1500==0) session_therm(s,n/50);
-+		s->period=n;
++		if (n && n%1500==0) session_therm(s,(unsigned)(n/50));
++		s->period=(unsigned)n;
 +		session_fill(s,slot);
++  struct mi8_amp_snapshot therm_snapshot;amp->snapshot(&therm_snapshot);
++  if(therm_snapshot.state==MI8_AMP_LIVE)session_therm_live=true;
 +		io->cache(io->ctx,slot*MI8_PCM_PERIOD,MI8_PCM_PERIOD);
 +  uint64_t sent_at=io->now(io->ctx),late=sent_at>wait?sent_at-wait:0;
 +		if (!submit(s,slot,MI8_PCM_ADDRESS+(uint64_t)slot*MI8_PCM_PERIOD,false,s->deadline)) goto cleanup;
-+  if(late>session_stats.late_us){session_stats.late_us=late;session_stats.late_period=n+1;}
++  if(late>session_stats.late_us){session_stats.late_us=late;session_stats.late_period=(unsigned)(n+1);}
 +	}
-+	while (io->now(io->ctx)<start+(uint64_t)s->periods*20000) if (poll_once(s,s->deadline)) goto cleanup;
-+	if (!drain(s,s->deadline) || s->result.errors || s->result.done!=s->periods) goto cleanup;
++	while (io->now(io->ctx)<start+count*20000) if (poll_once(s,s->deadline)) goto cleanup;
++	if (!drain(s,s->deadline) || s->result.errors || s->result.done!=count) goto cleanup;
 +	struct mi8_smmu_fault f;
 +	if (!io->fault(io->ctx,&f)) { pcm_log(s,"play: fault registers unreadable"); goto cleanup; }
 +		if (f.gfsr || (f.fsr&~IDLE)) {
@@ -8701,10 +8709,10 @@ index 0000000000000000000000000000000000000000..e1e652481f2cf89070991764978f3aa0
 +#endif
 diff --git a/bsd/dev/mi8_bt.c b/bsd/dev/mi8_bt.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..f981e222e65f8e0962084898975176f0c9a5fa8d
+index 0000000000000000000000000000000000000000..1b60608009a03c6ba1ea668bca49660270dcd921
 --- /dev/null
 +++ b/bsd/dev/mi8_bt.c
-@@ -0,0 +1,1953 @@
+@@ -0,0 +1,1960 @@
 +/*
 + * The Bluetooth of the Xiaomi Mi 8 (dipper, SDM845): a Qualcomm WCN3990 -- the chip whose Wi-Fi half
 + * redwood_wifi.c / mi8_rproc.c already run -- spoken to over a UART: serial engine 6 of the first QUP
@@ -10645,6 +10653,8 @@ index 0000000000000000000000000000000000000000..f981e222e65f8e0962084898975176f0
 +	thread_terminate(current_thread());
 +}
 +
++extern boolean_t PE_boot_arg_is_default(const char *);
++
 +void
 +mi8_bt_init(void)
 +{
@@ -10654,6 +10664,11 @@ index 0000000000000000000000000000000000000000..f981e222e65f8e0962084898975176f0
 +	if (!PE_parse_boot_argn("bt", &steps, sizeof(steps)) || steps == 0) {
 +		return;
 +	}
++ uint32_t radio=0;
++ PE_parse_boot_argn("mi8rp_mss",&radio,sizeof(radio));
++ if(PE_boot_arg_is_default("bt") && (!radio || !PE_parse_boot_argn("wifi_mac",NULL,0))){
++  printf("bt: default skipped: needs Wi-Fi side (wifi_mac/mi8rp_mss)\n");return;
++ }
 +	if (kernel_thread_start(bt_thread, (void *)(uintptr_t)steps, &thread) == KERN_SUCCESS) {
 +		thread_deallocate(thread);
 +	}
@@ -14581,10 +14596,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..f85905e686df2b478c768b30383d10cddd318172
+index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c368461a798f01
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4723 @@
+@@ -0,0 +1,4724 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -17385,7 +17400,8 @@ index 0000000000000000000000000000000000000000..f85905e686df2b478c768b30383d10cd
 + * FW_READY is a protocol event, not merely modem SMP2P or a timer estimate.
 + * A missing earlier failure event becomes a bounded timeout, never success. */
 +static uint64_t audio_session_stream_end(uint64_t now,unsigned seconds,uint64_t limit) {
-+ if(!seconds || seconds>900)return 0;
++ if(seconds>900)return 0;
++ if(!seconds)return limit?(limit>now+1000000?limit:0):(~(uint64_t)0>>1);
 + uint64_t need=(uint64_t)seconds*1000000+10000000;
 + if(limit && (now>=limit || need>limit-now))return 0;
 + return now+need;
@@ -19253,7 +19269,7 @@ index 0000000000000000000000000000000000000000..f85905e686df2b478c768b30383d10cd
 +		thread_t thread;
 +		/* audio=2: steps 5..13 without the canary, then 60 s of zero periods; the amp stays in reset. */
 +		audio_tail_on = true;
-+		if(audio_session_stream)say("mi8rp: audio=5: bounded session in a %u s ring stream\n",audio_session_seconds);
++		if(audio_session_stream){if(!audio_session_seconds)say("mi8rp: audio=5: resident session\n");else say("mi8rp: audio=5: bounded session in a %u s ring stream\n",audio_session_seconds);}
 +		else if (audio_clip_stream) say("mi8rp: audio=4: one bounded clip in a 120 s ring stream\n");
 +		else if (audio_ring_stream) say("mi8rp: audio=3: ring stream for 120 s; output forced zero, amp untouched\n");
 +		else say("mi8rp: audio=2: zero stream to the DSP for 60 s, amp untouched\n");
@@ -19310,10 +19326,10 @@ index 0000000000000000000000000000000000000000..f85905e686df2b478c768b30383d10cd
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..5d616a506fc59f00525930033c5d005599c0264e
+index 0000000000000000000000000000000000000000..12dbfdba00542c562fbd0acfb5c32c40e005a327
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,1134 @@
+@@ -0,0 +1,1136 @@
 +/* SPDX-License-Identifier: MIT
 + * TAS2557 firmware probe and bounded hard-muted power check. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
@@ -20092,8 +20108,9 @@ index 0000000000000000000000000000000000000000..5d616a506fc59f00525930033c5d0055
 +#define SESSION_SETTLE_US 20000u
 +#define SESSION_HEALTH_BUDGET_US 200000u
 +static void session_invalidate(void){SP(session.verified,0);}
++static bool session_resident;
 +static uint64_t session_duration_limit=230000000;
-+void mi8_tas_session_seconds(unsigned seconds){session_duration_limit=(uint64_t)seconds*1000000+110000000;}
++void mi8_tas_session_seconds(unsigned seconds){session_resident=seconds==0;session_duration_limit=(uint64_t)seconds*1000000+110000000;}
 +static bool session_cancelled(void){return SA(session.expired)!=0;}
 +void mi8_tas_session_snapshot(struct mi8_amp_snapshot *o) {
 + o->state=SA(session.state);o->request=SA(session.request);
@@ -20107,7 +20124,7 @@ index 0000000000000000000000000000000000000000..5d616a506fc59f00525930033c5d0055
 +}
 +bool mi8_tas_session_held(void) { unsigned s=SA(session.state);return s!=MI8_AMP_PREPARING && s!=MI8_AMP_LATCHED_OFF; }
 +void mi8_tas_session_wake(unsigned peak) {
-+ if (SA(session.state)!=MI8_AMP_OFF_READY || SA(session.wakes)>=200 || SA(session.expired) || SA(session.request)) return;
++ if (SA(session.state)!=MI8_AMP_OFF_READY || (!session_resident && SA(session.wakes)>=200) || SA(session.expired) || SA(session.request)) return;
 + SP(session.trigger,peak);unsigned expected=0;
 + (void)__atomic_compare_exchange_n(&session.request,&expected,1,false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);
 +}
@@ -20202,7 +20219,7 @@ index 0000000000000000000000000000000000000000..5d616a506fc59f00525930033c5d0055
 + /* The launch path resets session before creating the sole controller. */
 + SP(session.state,MI8_AMP_PREPARING);
 + if (!mi8_tas2557_parse(raw,size,&fw,NULL,NULL) || !mi8_tas2557_hold_tone(io,raw,size,deadline)) { session_end(1);return false; }
-+ session.coeff=fw.coeff;session.limit=now(&amp.t)+session_duration_limit;
++ session.coeff=fw.coeff;session.limit=session_resident?(~(uint64_t)0>>1):now(&amp.t)+session_duration_limit;
 + if(SA(session.expired)){session_end(8);return false;}
 + SP(session.verified,1); /* Successful download already verified the selected Y bytes. */
 + SP(session.state,MI8_AMP_OFF_READY);return true;
@@ -20212,7 +20229,7 @@ index 0000000000000000000000000000000000000000..5d616a506fc59f00525930033c5d0055
 + struct tas *t=&amp.t;unsigned req=SA(session.request),state=SA(session.state);uint64_t n=now(t);
 + if(req==3 || SA(session.expired) || n>=session.limit) {session_end(n>=session.limit?7:0);return false;}
 + if(state==MI8_AMP_OFF_READY && req==1) {
-+  if(SA(session.wakes)>=200){SP(session.request,0);return true;}
++  if(!session_resident && SA(session.wakes)>=200){SP(session.request,0);return true;}
 +  SP(session.state,MI8_AMP_WARMING);session.warming_at=n;
 +  if(!SA(session.verified) && !session_check()){session_end(2);return false;}
 +  if(SA(session.request)==3 || SA(session.expired)){session_end(0);return false;}
@@ -20271,7 +20288,8 @@ index 0000000000000000000000000000000000000000..5d616a506fc59f00525930033c5d0055
 + static const char *const reasons[]={"no","prepare","coefficient","startup","health","mute","stream","budget","controller-timeout"};
 + snprintf(out,size,"wakes=%u mutes=%u live_total=%llu ms max_warmup=%llu ms out_peak=%u checks=%u/%u idle_wakes=%u last_trigger=%s startup=%llu wait=%llu health=%llu unmute=%llu ms latched=%s final reset=%s controller=%s",
 + c.wakes,c.mutes,(unsigned long long)(c.live_total/1000),(unsigned long long)(c.max_warmup/1000),c.peak,c.checks_ok,c.checks,c.idle_wakes,c.write_trigger?"write":"peak",(unsigned long long)(c.startup_us/1000),(unsigned long long)(c.wait_us/1000),(unsigned long long)(c.health_us/1000),(unsigned long long)(c.unmute_us/1000),c.reason<9?reasons[c.reason]:"unknown",c.reset_low?"low":"Pending",c.done?"finished":SA(session.expired)?"retained FAILED":"running");
-+ if(c.wakes>=200){size_t used=strlen(out);if(used<size)snprintf(out+used,size-used," wake budget exhausted");}
++ if(session_resident){size_t used=strlen(out);if(used<size)snprintf(out+used,size-used," resident");}
++ if(!session_resident && c.wakes>=200){size_t used=strlen(out);if(used<size)snprintf(out+used,size-used," wake budget exhausted");}
 +}
 +#ifndef MI8_TAS_HOST_TEST
 +extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
@@ -31413,10 +31431,10 @@ index 0a7de6fc4be75dc19dc7626d406a251299d22fb0..2ec713e2ede72c86d0c135ab4ae99c4d
  	processor_state_update_from_thread(processor, thread, false);
  
 diff --git a/pexpert/arm/pe_bootargs.c b/pexpert/arm/pe_bootargs.c
-index c6b87b081d2f4338653431e4baefa712b4da710a..f5b1388b0dd9ad1a494d121cd347f86511bbd730 100644
+index c6b87b081d2f4338653431e4baefa712b4da710a..0ac5d3647ee50316b5b7e3dcb5a32fa377a3c718 100644
 --- a/pexpert/arm/pe_bootargs.c
 +++ b/pexpert/arm/pe_bootargs.c
-@@ -3,10 +3,110 @@
+@@ -3,10 +3,128 @@
   */
  #include <pexpert/pexpert.h>
  #include <pexpert/boot.h>
@@ -31455,6 +31473,13 @@ index c6b87b081d2f4338653431e4baefa712b4da710a..f5b1388b0dd9ad1a494d121cd347f865
 +	{ "wifi_quiet", "1" },
 +	{ "thermgov", "66" },
 +	{ "ffix", "1" },
++	{ "bt", "7" },
++	{ "audio", "5" },
++	{ "audio_level_db", "0" },
++	{ "audio_seconds", "0" },
++	{ "battery", "1" },
++	{ "torch", "3" },
++	{ "haptic", "3" },
 +};
 +#define DIPPER_DEFAULT_COUNT (sizeof(dipper_defaults) / sizeof(dipper_defaults[0]))
 +static char effective_args[PE_BOOT_ARGS_MAX];
@@ -31465,8 +31490,7 @@ index c6b87b081d2f4338653431e4baefa712b4da710a..f5b1388b0dd9ad1a494d121cd347f865
 -PE_boot_args(
 -	void)
 +PE_boot_args(void)
- {
--	return (char *)((boot_args *)PE_state.bootArgs)->CommandLine;
++{
 +	return dipper_args_ready ? effective_args :
 +	       (char *)((boot_args *)PE_state.bootArgs)->CommandLine;
 +}
@@ -31529,6 +31553,18 @@ index c6b87b081d2f4338653431e4baefa712b4da710a..f5b1388b0dd9ad1a494d121cd347f865
 +	strlcat(line, PE_parse_boot_argn("wifi_mac", NULL, 0) ?
 +	    " wifi_mac=set(arg)" : " wifi_mac=unset", sizeof(line));
 +	printf("%s\n", line);
++}
++
++/* Consumers with optional dependencies distinguish a platform default from
++ * an explicit diagnostic request without reparsing the loader command line. */
++boolean_t
++PE_boot_arg_is_default(const char *name)
+ {
+-	return (char *)((boot_args *)PE_state.bootArgs)->CommandLine;
++ if(!dipper_args_ready)return FALSE;
++ for(unsigned i=0;i<DIPPER_DEFAULT_COUNT;i++)
++  if(!strcmp(name,dipper_defaults[i].name))return default_used[i];
++ return FALSE;
  }
 diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
 index c622b4cc84ab074400bc955e7111df7426bb1dd2..1f555b8b8ba362cf8af13a839eb5d65f95f4de89 100644

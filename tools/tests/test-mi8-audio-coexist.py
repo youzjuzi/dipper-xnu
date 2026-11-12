@@ -96,7 +96,9 @@ int main(void){
  assert(audio_session_stream_end(100000000,300,410000000)==410000000);
  assert(!audio_session_stream_end(100000001,300,410000000));
  assert(!audio_session_stream_end(410000000,120,410000000));
- assert(!audio_session_stream_end(0,0,0)&&!audio_session_stream_end(0,901,0));
+ assert(audio_session_stream_end(0,0,0)==(~(uint64_t)0>>1)&&!audio_session_stream_end(0,901,0));
+ assert(audio_session_stream_end(1000000,0,10000000)==10000000);
+ assert(!audio_session_stream_end(9000000,0,10000000));
  assert(audio_session_stream_end(50000000,900,1070000000)==960000000);
  printf("Coexist PASS: 100 claim/DMA/end cycles; 2000 actual Wi-Fi maps + simulated unmaps, %u maps during DMA; held=%llu us wait=%llu us; ownership/failure retention; READY/FAILED/90s timeout; 300/900s loader budget\n",atomic_load(&play_maps),(unsigned long long)audio_lock_max_us,(unsigned long long)wifi_lock_wait_max_us);
 }

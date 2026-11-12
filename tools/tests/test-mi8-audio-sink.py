@@ -37,7 +37,7 @@ def main():
     callback = body(source, 'static uint32_t count_sink(')
     for forbidden in ['printf(', 'redwood_audio_volume(', 'redwood_audio_set_sink(', 'lck_', 'alloc(', 'sleep', 'delay_', 'mi8_tas', 'mi8_pcm', 'mi8_smmu']:
         assert forbidden not in callback, forbidden
-    assert not re.search(r'\{ "audio",', (x / 'pexpert/arm/pe_bootargs.c').read_text())
+    assert re.search(r'\{ "audio", "5" \}', (x / 'pexpert/arm/pe_bootargs.c').read_text())
     flags = ['-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread']
     env = dict(os.environ)
     if a.tsan:

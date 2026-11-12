@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <sched.h>
+#include <malloc.h>
 void mi8_tas2557_prepare(uint64_t);
 void mi8_tas2557_prepare_tone(uint64_t);
 #include "play-fixture.c"
@@ -20,6 +21,14 @@ extern unsigned session_model_mutes(void),session_model_starts(void);
 extern void session_model_check_done(void);
 extern unsigned long session_model_checks(void);
 static struct peer *active;
+static bool resident_mode;
+struct resident_cue { uint64_t start,end; };
+static struct resident_cue resident_cues[1003];
+static unsigned resident_index;
+static size_t resident_heap;
+static size_t resident_allocation_bytes(void);
+static uint64_t resident_next_heap=60000000;
+static bool resident_seen[1003];
 static unsigned mode,outputs,max_peak,ticks,stream_seconds=120;
 static uint64_t stream_start;
 static bool stop_requested,threaded,control_prepared;
@@ -70,6 +79,15 @@ static void ring_feed(void){
  if(before.request==2 && after.state==MI8_AMP_OFF_READY)CHECK(session_model_mutes()==mutes+1);
  }
  int16_t data[2048];uint64_t elapsed=active->now-stream_start;
+ if(resident_mode){
+  if(elapsed>=resident_next_heap){size_t heap=resident_allocation_bytes();if(!resident_heap)resident_heap=heap;CHECK(heap<=resident_heap+4096);resident_next_heap+=3600000000ull;printf("Resident progress %llu s heap=%zu\n",(unsigned long long)(elapsed/1000000),heap);fflush(stdout);}
+  struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);CHECK(!a.reason&&a.state!=MI8_AMP_LATCHED_OFF);
+  while(resident_index<1003 && elapsed>=resident_cues[resident_index].end)resident_index++;
+  if(resident_index>=1003 || elapsed<resident_cues[resident_index].start)return;
+  if(elapsed>resident_cues[resident_index].start+150000){CHECK(a.state==MI8_AMP_LIVE&&!a.request);resident_seen[resident_index]=true;}
+  for(unsigned i=0;i<2048;i++)data[i]=10000;
+  mi8_audio_ring_write_time(active->now);(void)mi8_audio_ring_put(data,960);return;
+ }
  int value=32767;
  if(mode==1 || mode==4 || mode==5 || mode==7)value=(elapsed%((mode==7)?4500000:40000000))<800000?32767:0;
  if(mode==8)value=255;
@@ -98,8 +116,10 @@ static void observe(struct peer *p,const uint8_t *q){
 static uint64_t audio_return_deadline,audio_lock_max_us,wifi_lock_wait_max_us;
 static bool audio_session_dependency(void){return true;} /* Actual dependency policy tested separately. */
 /* @session_worker */
+#include "mi8-audio-resident.inc"
 int main(int argc,char **argv){
  CHECK(argc==3);session_guard_tests();threaded=getenv("SESSION_THREADS")!=NULL;if(getenv("SESSION_LONG"))stream_seconds=300;CHECK(mi8_pcm_session_seconds(stream_seconds));mi8_tas_session_seconds(stream_seconds);session_model_load(argv[1],argv[2]);session_model_fast_checks();
+ if(getenv("SESSION_RESIDENT")){resident_run();return 0;}
  for(mode=0;mode<=(stream_seconds==300?0u:threaded?2u:18u);mode++){
   reset_ring();outputs=max_peak=ticks=0;stop_requested=false;
   struct peer p;struct play_peer m;prepare(&p,&m);active=&p;m.step=16;

@@ -78,10 +78,14 @@ python3 tools/prepare/patchtool.py scan
 
 `test-mi8-audio-coexist.py [--tree <准备树>] [--sanitize|--tsan]` 提取原生短锁桥接、Wi-Fi map、资源所有权和依赖等待路径，运行真实线程竞争；unmap 仅为测试模型，设备驱动仍为追加映射。`test-mi8-audio-session.py --long` 检查 300 秒、15000 周期，可与 sanitizer/TSan 组合。
 
-`build-payload.py --kernel <本轮 mach 内核> --wifi --bluetooth --seconds 420 --output <新目录>` 显式选择本轮构建；不指定 `--kernel` 时保持原默认路径。`--flashboot <镜像>` 可选择已验证的功放固件镜像，仍执行相同的权限与蓝牙固件检查；缺省保持原镜像路径。打包前仍须确认现有本机输入与固件摘要。会话参数 `audio=5 audio_seconds=300` 需写入最终载荷，默认表仍关闭音频；无线关闭的旧模式参数规则不变。
+`build-payload.py --kernel <本轮 mach 内核> --wifi --bluetooth --seconds 420 --output <新目录>` 显式选择本轮构建；不指定 `--kernel` 时保持原默认路径。`--flashboot <镜像>` 可选择已验证的功放固件镜像，仍执行相同的权限与蓝牙固件检查；缺省保持原镜像路径。打包前仍须确认现有本机输入与固件摘要。默认表现为audio=5、audio_seconds=0常驻、0dB；--wifi候选不必追加音频参数，--no-audio显式关闭。--bluetooth与--peripherals为兼容空操作，前者仍要求--wifi。无--wifi时显式bt=0并关闭Wi-Fi侧；--persist语义保持。
 
 会话回归支持 `test-mi8-audio-session.py --level -30|-24|-20|-12|-6|0`（无效值用于回退测试）及 `--long` 300 秒模拟，覆盖独立提交守卫和 LIVE 欠载统计；计数 sink 回归支持 `--tsan`，覆盖音频写入与 LIVE 世代发布并发、源削顶与同窗 HAL 间隔、实际 worker 滚动尾日志及 loader 最终 32 KiB。
 
 `test-mi8-audio-session-log.py [--tree <准备树>] [--sanitize]` 覆盖真实 audio=5 初始化标志和 PCM→rproc→loader 日志函数链，复现旧 20 行额度在 195 秒耗尽，并验证 300 秒/200 次 wake 后最终 32 KiB 留有 play、asm close、摘要。会话测试独立核对六档系数、所有 mono 输入、499/500（写入唤醒无声音）与1499/1500（其他静默）零周期、WARMING 与首次 LIVE 裁剪及守恒；ring 模型与 TSan 包括消费者裁剪和生产者并发。
 
 会话回归另验证OFF_READY只读Y预校验、预校验wake的I²C事务上限与零系数读取、缓存失效后补校验、200ms健康重试上界及告警立即锁存；模拟HAL零写入唤醒、idle_wakes、10/30秒静默与2400帧渐入。快速唤醒模型采用现有3µs bit-bang半周期、无额外拉伸/MMIO开销、2ms轮询，正常路径约29.6ms；不能代替设备耗时。
+
+`test-mi8-default-peripherals.py [--tree <准备树>]` 提取实际BT入口及loader外设准备函数，验证64种缺省/显式依赖组合、bt=1..6、显式关闭和非dipper隔离；ASan/UBSan。`test-boot-defaults.py --package-cmdline <文件>` 使用原生解析器核对实际候选七项(def)，不打印MAC，参考配置独立手写。
+
+`test-mi8-audio-session.py --resident` 以固定数组运行47976秒虚拟时钟、1000随机短声与3段21分钟连续声，穿过实际PCM/GLINK/APR及独立I²C模型；支持--sanitize，记录启动后原生分配字节保持27512、结束归零及固定尾日志。常驻新增独立性质拒绝测试，有界900秒/45000/201用例保持；原--tsan与--long并发检查继续适用。

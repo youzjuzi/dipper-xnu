@@ -125,13 +125,11 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-12，接手时重新核对）
 
-- 分支 `feat/audio-sink`，基线 `ffd4325`；先以 `5bb9029` 提交P25-6设备事实，本提交实现快速唤醒。work中5个源码变更已导出；53个无关注册XNU文件保持，原功放写入内容/顺序、健康掩码、panic、旧音频模式未改。
-- Y校验在OFF_READY入口执行，正常wake用pre-verified，状态写入失效后补校验。保留startup内置2ms，额外等待20ms；只有无告警的上电标志未就绪可重读，首轮健康检查起200ms内结束。HAL首次/间隔>1s写入与峰值触发并存，50ms渐入。
-- 持有人裁定：写入唤醒后始终无非零输出10秒关断并计idle_wakes；其他静默30秒。120s/6000周期、200wakes、8零块、电平与守卫保持。阶段时长与flushed由PCM wake及摘要报告。
-- `work/runs/20261112-audio-fastwake-01/RESULTS.md` 保存厂商文件:行、状态写入审查、测试、构建与栈记录。P26-6/P26-0同内核与P25输入，仅电平不同，无线全开，loader_return_after=420 audio_seconds=300。正常预校验模型约29.6ms，失效补校验/预校验未完成或调度延迟可能超过目标。
-- P26-6/P26-0 设备已通过（见 `work/runs/20261112-audio-fastwake-01/DEVICE.md`）：唤醒约 45 ms、flushed ≤1216、dropped 0、0 dB 连续 101 秒健康通过、无 panic；开头残余破音归因铃声源削顶，不再追踪。
-- 本提交：`audio_test_clip`/`audio_test_seconds` 内核注入、`audio_seconds` 与单窗上限 900 s、每 30 s 温度/健康记录（`bsd/dev/mi8_audio_sink.c`、`mi8_audio_pcm.c`、`mi8_rproc.c`、`mi8_adreno.c` 只读温度访问等 9 个文件）。P27-long 设备通过：0 dB 连续 645.8 s、健康 1238 次全过、CPU 41–43 °C、无 panic（`work/runs/20261112-audio-long-01/DEVICE.md`）。测试片段在 `local/devices/mi8/audio-test/`，不进 Git。
-- 下一步：无音频的 Wi-Fi 15 分钟长浏览对照（P27-wifi，判断数据停滞是否与音频无关）；之后讨论 audio=5 默认开启与常驻（去掉流时长上限）。
+- 分支 `feat/audio-sink`，接手 `3e6d5f7`，58个注册XNU源码与清单相符，tracked干净；本提交固化34项默认配置及常驻会话。work的5个XNU文件和loader.c已导出，电量/手电默认还需配套新loader/UEFI，不能只替换内核。
+- 新缺省bt7/audio5/level0/seconds0/battery1/torch3/haptic3。缺省BT在mss0或无MAC时跳过，显式诊断不改。mss开启时音频Wi-Fi FW_READY依赖保持；常驻只去掉时长与次数额度，保留状态/波形/地址/健康/锁存/panic和10/30秒功放空闲关断。
+- 证据 `work/runs/20261112-audio-default-01/RESULTS.md`：47976秒模型、1003wake/mute与Y校验、3段21分钟连续声、固定内存；全套与sanitizer/TSan、构建/栈、干净重放见运行日志。24小时计数与资源审查列明，ADSP/DMA启停事务不改。
+- P28：--wifi --seconds1080，不加外设/音频参数；七项由原生解析器核对(def)，使用P26-0启动卷及本轮loader/UEFI/内核。原P26/P27证据和local保持；本轮不碰手机、不push。
+- 旧设备0dB连续645.8秒、健康1238次、CPU41–43°C的结论保留。下一步由持有人完整重启验证P28默认外设组合及长短间隔声音；常驻功耗未测，音质未调校，组合设备结果Pending。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

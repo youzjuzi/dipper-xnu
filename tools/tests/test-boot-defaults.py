@@ -14,11 +14,12 @@ ROOT = Path(__file__).resolve().parents[2]
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--tree', type=Path, default=ROOT / 'work/hackios/xnu-src/xnu-8796.121.2')
 p.add_argument('--old-cmdline', type=Path)
+p.add_argument('--package-cmdline', type=Path, help='verify a private package uses all seven platform defaults; never print its MAC')
 a = p.parse_args()
 x = a.tree.resolve()
 source = (x / 'pexpert/arm/pe_bootargs.c').read_text()
 entries = re.findall(r'\{ "([^"]+)", "([^"]+)" \}', source)
-assert len(entries) == 27
+assert len(entries) == 34
 measure = 'taskload touch_lat mi8_cpuclk perfprof fprof loader_return_after'.split()
 retained = 'bootcpu=7 cpus=7 ufs=2 root_apfs=ufs_darwin epoch=1793436756 wifi_mac=00:00:00:00:00:00'
 # Independent complete reference profile: do not derive expected values from the table.
@@ -29,6 +30,7 @@ reference = (retained + ' '
     'mi8rp_mss=6 mi8rp_hold=90 mi8rp_svc=1 mi8rp_servreg=1 mi8rp_wlfw=1 '
     'mi8rp_bdf=1 mi8rp_wsmmu=3 mi8rp_lx=1 mi8rp_lxirq=1 '
     'wifi_lx=2 wifi_station=1 wifi_quiet=1 thermgov=66 ffix=1 '
+    'bt=7 audio=5 audio_level_db=0 audio_seconds=0 battery=1 torch=3 haptic=3 '
     'taskload=500 touch_lat=1 mi8_cpuclk=10 perfprof=1 fprof=1000 loader_return_after=360')
 old = a.old_cmdline.read_text().strip() if a.old_cmdline else reference
 old = re.sub(r'wifi_mac=[^\s]+', 'wifi_mac=00:00:00:00:00:00', old)
@@ -104,6 +106,7 @@ const char *raw_input(void) { return input.CommandLine; }
     lib.reset.argtypes=[ctypes.c_char_p,ctypes.c_char_p,ctypes.c_uint,ctypes.c_int]
     for name in ['PE_boot_args','log_line','raw_input']:
         getattr(lib,name).restype=ctypes.c_char_p
+    lib.PE_boot_arg_is_default.argtypes=[ctypes.c_char_p]
     lib.PE_parse_boot_argn.argtypes=[ctypes.c_char_p,ctypes.c_void_p,ctypes.c_int]
     lib.PE_parse_boot_arg_str.argtypes=[ctypes.c_char_p,ctypes.c_void_p,ctypes.c_int]
     def reset(raw, plat=b'dipper', init=1, size=None):
@@ -120,8 +123,11 @@ const char *raw_input(void) { return input.CommandLine; }
         return out
     prefix = 'debug=0x8 rd=md0 vtimer_intid=19 hv_wdt_pet=1 ufs_shared_pa=0x' + 'f'*16 + ' '
     check(len(prefix) <= 80)
-    reset(prefix+old,init=0); prefixed_before=snapshot(keys+['debug','rd','vtimer_intid','hv_wdt_pet','ufs_shared_pa'])
-    reset(prefix+bench);check(snapshot(keys+['debug','rd','vtimer_intid','hv_wdt_pet','ufs_shared_pa'])==prefixed_before)
+    added={'bt','audio','audio_level_db','audio_seconds','battery','torch','haptic'}
+    prefix_old=' '.join(t for t in old.split() if t.split('=',1)[0] not in added)
+    prefix_keys=[k for k in keys if k not in added]+['debug','rd','vtimer_intid','hv_wdt_pet','ufs_shared_pa']
+    reset(prefix+prefix_old,init=0); prefixed_before=snapshot(prefix_keys)
+    reset(prefix+bench);check(snapshot(prefix_keys)==prefixed_before)
     reset(daily)
     for key in measure: check(not lib.PE_parse_boot_argn(key.encode(),None,0))
     reset(old,init=0); before=snapshot(keys)
@@ -129,10 +135,12 @@ const char *raw_input(void) { return input.CommandLine; }
     check(lib.raw_input()==bench.encode())
     check(len(lib.PE_boot_args())<1023) # existing userland consumer buffers
     line=lib.log_line(); check(b'wifi_mac=set(arg)' in line and b'00:00:00:00:00:00' not in line)
-    for k,v in entries: check((k+'='+v+'(def)').encode() in line)
+    for k,v in entries: check((k+'='+v+'(def)').encode() in line);check(lib.PE_boot_arg_is_default(k.encode()))
     reset(old); check(snapshot(keys)==before)
     line=lib.log_line()
-    for k,v in entries: check((k+'='+v+'(arg)').encode() in line)
+    for k,v in entries:
+        check((k+'='+v+('(arg)' if k in keys else '(def)')).encode() in line)
+        check(bool(lib.PE_boot_arg_is_default(k.encode()))==(k not in keys))
     for platform in [b'redwood',b'qemu-virt',None,b'dipper-extra',b'Dipper']:
         for raw in ['',old,'fb_native=0\tfts=0  unknown=9']:
             reset(raw,platform,init=0); before=snapshot(keys+['unknown'])
@@ -146,7 +154,7 @@ const char *raw_input(void) { return input.CommandLine; }
             reset(raw,init=0);before=snapshot([k])
             reset(raw);check(snapshot([k])==before)
             check((k+'='+override+'(arg)').encode() in lib.log_line())
-    for raw in ['fb_native=1 fb_native=0','fb_native=0 fb_native=1','\tfts=0\tfts_steps=0','caenv=A=1 caenv=B=2']:
+    for raw in ['audio_level_db=-30','bt=0 audio=0 battery=0 torch=0 haptic=0','fb_native=1 fb_native=0','fb_native=0 fb_native=1','\tfts=0\tfts_steps=0','caenv=A=1 caenv=B=2']:
         reset(raw,init=0);before=snapshot([t.split('=')[0] for t in raw.split()])
         reset(raw);check(snapshot([t.split('=')[0] for t in raw.split()])==before)
     reset('x='+'a'*605);check(len(lib.PE_boot_args())<2048);check(lib.raw_input()==('x='+'a'*605).encode())
@@ -154,8 +162,11 @@ const char *raw_input(void) { return input.CommandLine; }
     spec=importlib.util.spec_from_file_location('packager', ROOT/'tools/build/build-payload.py')
     packager=importlib.util.module_from_spec(spec);spec.loader.exec_module(packager)
     for wifi in [None,'00:00:00:00:00:00']:
-        for peripherals in [False,True]:
-            raw=packager.build_cmdline(300,1793436756,wifi,peripherals)
+        for no_audio in [False,True]:
+            raw=packager.build_cmdline(300,1793436756,wifi,no_audio=no_audio)
+            check(('audio=0' in raw)==no_audio)
+            check(('bt=' in raw)==(wifi is None))
+            check('audio_seconds' not in raw and 'audio_level_db' not in raw)
             check(len(raw)+116<600)
             reset(raw)
             check(lib.PE_parse_boot_argn(b'wifi_mac',None,0)==(wifi is not None))
@@ -163,8 +174,18 @@ const char *raw_input(void) { return input.CommandLine; }
                 v=ctypes.c_uint32(99)
                 lib.PE_parse_boot_argn(key.encode(),ctypes.byref(v),4)
                 check(v.value==(expected if wifi is not None else 0))
-            for key in ['battery','torch','haptic']:
-                check(lib.PE_parse_boot_argn(key.encode(),None,0)==peripherals)
+            for key,expected in [('bt',7 if wifi else 0),('audio',0 if no_audio else 5),('audio_level_db',0),('audio_seconds',0),('battery',1),('torch',3),('haptic',3)]:
+                v=ctypes.c_int32(99);check(lib.PE_parse_boot_argn(key.encode(),ctypes.byref(v),4));check(v.value==expected)
+                if wifi and not no_audio:check((key+'='+str(expected)+'(def)').encode() in lib.log_line())
+            check(raw==packager.build_cmdline(300,1793436756,wifi,True,bluetooth=True,no_audio=no_audio))
+    if a.package_cmdline:
+        raw=a.package_cmdline.read_text().strip()
+        check(len(raw.encode())+80<600 and len(raw.encode())+116<608)
+        check(not any(t.split('=',1)[0] in {'bt','audio','audio_level_db','audio_seconds','battery','torch','haptic'} for t in raw.split()))
+        reset(raw)
+        for key,expected in [('bt',7),('audio',5),('audio_level_db',0),('audio_seconds',0),('battery',1),('torch',3),('haptic',3)]:
+            v=ctypes.c_int32(99);check(lib.PE_parse_boot_argn(key.encode(),ctypes.byref(v),4));check(v.value==expected)
+            check((key+'='+str(expected)+'(def)').encode() in lib.log_line())
     for wifi in [None,'00:00:00:00:00:00']:
         plain=packager.build_cmdline(300,1793436756,wifi,True)
         raw=packager.build_cmdline(300,1793436756,wifi,True,True)

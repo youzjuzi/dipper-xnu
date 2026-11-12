@@ -39,7 +39,7 @@ static uint8_t session_read(struct model *p,unsigned r,uint8_t v) {
 }
 static void session_log(void *ctx,const char *fmt,...) {
  char line[1024];va_list ap;va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);
- if(!strncmp(line,"audio:",6)){CHECK(++session_logs<=1000);return;}
+ if(!strncmp(line,"audio:",6)){CHECK(++session_logs<=1000 || getenv("SESSION_RESIDENT"));return;}
  log_line(ctx,"%s",line);
 }
 void session_model_load(const char *raw,const char *reference) {

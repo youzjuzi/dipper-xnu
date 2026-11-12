@@ -30,7 +30,7 @@
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.c",
-        "sha256": "19a9c51b608ee5c254d7d5c94efa6306fe85fd9f841a1189054e76b4cb6cdbee",
+        "sha256": "dcf44c42a01670d6127a2d25583f133cf28ec261518b5f9e9863950bdabcd6f9",
         "mode": "0o664"
       },
       {
@@ -70,7 +70,7 @@
       },
       {
         "path": "bsd/dev/mi8_bt.c",
-        "sha256": "e7fd384464ce0e60643a26f7cc3a1e085682f54fa0cbb290bb141ae1b022cfc0",
+        "sha256": "28b9ca54996d9ef438e075d95350b3eec36ddac784b9f59f7cf7434979e94a92",
         "mode": "0o664"
       },
       {
@@ -105,12 +105,12 @@
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "63281dc6dfeb91f208a88de244f5185725f36584b321751e7ae12bd90ecc53d5",
+        "sha256": "7510cc1878f1651178b5d7bb903281b69cc26b12e88ca562d8c7ec137d72837d",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_tas2557.c",
-        "sha256": "a7e1e7763784e19960872ce43c6ecf21ffb9129a7f74acde1f74de6201e7d5b9",
+        "sha256": "495ed7db3a8c76a620c43a4000d21172eed5be5787323891289af1bff5fd8c9d",
         "mode": "0o664"
       },
       {
@@ -280,7 +280,7 @@
       },
       {
         "path": "pexpert/arm/pe_bootargs.c",
-        "sha256": "e718b8fc18f0da7bdaf44e887fb3912a9e6ea08a4199904f3cd33f6ad9591b5f",
+        "sha256": "e34dedf5059e3dd6381e5b8b60d37a99c9ef0b6803fb0230a47c667fabcf8a7f",
         "mode": "0o664"
       },
       {
@@ -416,7 +416,7 @@
       },
       {
         "path": "xnuloader/loader.c",
-        "sha256": "f108911bcd2378e2828fac4a9bc83a99de7488de1fa9b1ec15196f130827a5c2",
+        "sha256": "2b769adfa2f14e2ba641071b039e7aee807abd91bf7bf9a1643e041b2fa76360",
         "mode": "0o664"
       }
     ]

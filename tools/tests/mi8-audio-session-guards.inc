@@ -121,5 +121,27 @@ void session_guard_tests(void){
  assert((int16_t)get32(data+479*4)==(int)(((int64_t)((25503*(int64_t)limit+16384)/32768)*479+1199)/2399));
  assert((int16_t)get32(data+959*4)==(int)(((int64_t)((25983*(int64_t)limit+16384)/32768)*959+1199)/2399));
  assert(mi8_audio_ring_close());mi8_audio_ring_counts(&counts);assert(counts.accepted==counts.consumed+counts.discarded);
+ /* Resident mode removes quantities, preserving every property check. */
+ assert(mi8_pcm_session_seconds(0));
+ guard_clock=7200000001ull;session_pcm.periods=(1ull<<40)+3;
+ guard_amp=(struct mi8_amp_snapshot){.state=MI8_AMP_LIVE,.wakes=100000,.live_start=1};
+ memset(data,0,sizeof(data));put16(data,limit);put16(data+2,limit);s.jobs[0].active=false;
+ assert(submit(&s,0,MI8_PCM_ADDRESS,false,guard_clock+1000000));
+ assert(session_sample(-32768,-32768,0,false,false)==-(int)limit); /* no late fade recurrence */
+ for(unsigned fault=0;fault<9;fault++){
+  s.jobs[0].active=false;guard_clock=7200000001ull;
+  guard_amp=(struct mi8_amp_snapshot){.state=MI8_AMP_LIVE,.wakes=100000,.live_start=1};
+  put16(data,limit);put16(data+2,limit);
+  if(fault==0){put16(data,limit+1);put16(data+2,limit+1);}
+  if(fault==1)put16(data+2,1);
+  if(fault==2)guard_amp.state=MI8_AMP_WARMING;
+  if(fault==3)guard_amp.request=2;
+  if(fault==4)guard_amp.reason=4;
+  if(fault==5)guard_clock=0;
+  unsigned stops=guard_stops;
+  assert(!submit(&s,fault==6?8:0,fault==7?MI8_PCM_ADDRESS+32768:MI8_PCM_ADDRESS,fault==8,7201000000ull));
+  assert(guard_stops==stops+1);
+ }
+ assert(mi8_pcm_session_seconds(120));
  printf("Session guards/scaling/statistics PASS level=%d limit=%u: 11 rejection classes, late LIVE/cumulative>60s, 200th wake, all 65536 mono inputs, fade, mute, exact LIVE underflow\n",db,limit);
 }

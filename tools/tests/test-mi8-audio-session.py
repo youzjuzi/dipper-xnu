@@ -22,6 +22,7 @@ def main():
     ap.add_argument('--threads', action='store_true')
     ap.add_argument('--level',type=int,default=-30)
     ap.add_argument('--long', action='store_true', help='300-second/15000-period stream')
+    ap.add_argument('--resident',action='store_true',help='fixed-memory native stream simulation: over four hours, 1000 short sounds and long continuous playback')
     a = ap.parse_args()
     assert hashlib.sha256(a.firmware.read_bytes()).hexdigest() == json.loads(a.metadata.read_text())['sha256']
     subprocess.run(['python3',str(ROOT/'tools/tests/test-mi8-audio-session-join.py'),'--tree',str(a.tree)],check=True)
@@ -49,6 +50,9 @@ def main():
     env = dict(os.environ)
     env['SESSION_LEVEL']=str(a.level)
     if a.long: env['SESSION_LONG']='1'
+    if a.resident:
+        env['SESSION_RESIDENT']='1'
+    if a.resident: flags+=['-O2','-DMI8_RESIDENT_ALLOC_TEST','-Wl,--wrap=calloc','-Wl,--wrap=free']
     if a.sanitize:
         flags += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-sanitize-recover=all', '-no-pie']
         env['ASAN_OPTIONS'] = 'detect_leaks=0:halt_on_error=1'
@@ -59,6 +63,12 @@ def main():
         env['SESSION_THREADS'] = '1'
     with tempfile.TemporaryDirectory(prefix='mi8-session-') as tmpname:
         tmp = Path(tmpname)
+        if a.resident:
+            apr=(ROOT/'tools/tests/mi8-audio-apr.c').read_text().replace('static unsigned checks;','static unsigned long checks;').replace('SELFTEST PASS %u/%u','SELFTEST PASS %lu/%lu')
+            (tmp/'mi8-audio-apr.c').write_text(apr)
+            fixture=fixture.replace('PCM SELFTEST PASS %u/%u','PCM SELFTEST PASS %lu/%lu')
+            fixture=fixture.replace('CHECK(m->count<16000);m->ops[m->count++]=op;', 'm->ops[m->count++ %16000]=op;')
+            fixture=fixture.replace('CHECK(m->log_length+n<sizeof(m->log));', 'if(m->log_length+n>=sizeof(m->log)){size_t drop=m->log_length+n-(sizeof(m->log)-1);memmove(m->log,m->log+drop,m->log_length-drop);m->log_length-=drop;}')
         (tmp/'play-fixture.c').write_text(fixture.replace('int main(void)', 'int play_legacy_main(void)'))
         ref = tmp/'expected.txt'
         ref.write_text(f'{len(selected)} {len(blocks["PROGRAM0/0"])} 92 0\n' + ''.join(' '.join(map(str, v))+'\n' for v in selected))
