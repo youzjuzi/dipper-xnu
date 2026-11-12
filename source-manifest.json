@@ -85,12 +85,12 @@
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "ba65e33723139f8ef6976a6b2d741a6f019bd03d4e3a7c0de83e5cc144070654",
+        "sha256": "a5885e868a0856c1fd16ef1924c2a2630148e9186889f7a4db46000ac6d1be8a",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_tas2557.c",
-        "sha256": "405ef0d5aab804ae51716e3604e24628bdcc351040f16c0801c3cde61cccb185",
+        "sha256": "e386c22c5c20f64de5cc94ef121ec8eaf7a7cffa6eec785508c8f3e3043ddda1",
         "mode": "0o664"
       },
       {

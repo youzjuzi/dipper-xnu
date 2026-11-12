@@ -13420,7 +13420,7 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..68d18b2d8adcb7de8d0efc9aa90150d58067661f
+index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e241dcc53
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
 @@ -0,0 +1,4345 @@
@@ -17452,7 +17452,7 @@ index 0000000000000000000000000000000000000000..68d18b2d8adcb7de8d0efc9aa90150d5
 +}
 +
 +/* Step 14 is an independent, shutdown-only amplifier probe, not step 13 plus
-+ * another operation. Partition readiness and the probe share a 10 s budget. */
++ * another operation. Partition readiness has 10 s; the probe its own 20 s (the bus is driven by hand). */
 +static void
 +audio_amp_thread(__unused void *parameter, __unused wait_result_t wr)
 +{
@@ -17460,7 +17460,7 @@ index 0000000000000000000000000000000000000000..68d18b2d8adcb7de8d0efc9aa90150d5
 +	uint8_t probe;
 +	for (unsigned i=0;i<100 && now_us()+200000<deadline;i++) {
 +		if (redwood_ufs_read_named("modem",0,&probe,1)==0) {
-+			mi8_tas2557_probe(deadline);
++			mi8_tas2557_probe(now_us()+20000000);
 +			thread_terminate(current_thread());return;
 +		}
 +		delay_for_interval(100,NSEC_PER_MSEC);
@@ -17771,10 +17771,10 @@ index 0000000000000000000000000000000000000000..68d18b2d8adcb7de8d0efc9aa90150d5
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..c422962d55291a1a2a7e91573235b777cedc675c
+index 0000000000000000000000000000000000000000..e07eda35371c060bf5703cab4f70c961a83bf4c9
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,403 @@
+@@ -0,0 +1,499 @@
 +/* SPDX-License-Identifier: MIT
 + * TAS2557 shutdown-only firmware probe. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
@@ -17905,6 +17905,7 @@ index 0000000000000000000000000000000000000000..c422962d55291a1a2a7e91573235b777
 +	const struct mi8_tas_io *io; struct mi8_tas_result *r; uint64_t end;
 +	uint32_t votes,rcg_cfg,rcg_cmd,regs[NSAVE],pins[2],depth;
 +	unsigned book,page,word; bool clocks,se,pins_set,reset,rcg_changed,active;
++	bool bb; uint32_t bb_io[2];
 +};
 +static uint32_t rd(struct tas *t,uint32_t a) { return t->io->read(t->io->ctx,a); }
 +static void wr(struct tas *t,uint32_t a,uint32_t v) { t->io->write(t->io->ctx,a,v); }
@@ -17919,11 +17920,81 @@ index 0000000000000000000000000000000000000000..c422962d55291a1a2a7e91573235b777
 +	for (unsigned i=0;i<count;i++) { if ((rd(t,a)&mask)==value) return true; if (!pause_us(t,10)) break; }
 +	return false;
 +}
++/* The boot firmware leaves SE5 with its FIFO interface off (GSI DMA only, as for the touch engine's
++ * SE14), so the bus is driven by hand on its two pins: GPIO85 = SE L0 = SDA, GPIO86 = SE L1 = SCL,
++ * the convention mi8_fts.c's bit-bang on SE14 (33 = L0 = SDA, 34 = L1 = SCL) runs on. Open drain:
++ * low = output enabled with the latch at 0, high = input, the board's pull-ups. SE5 and its clocks
++ * are not touched. */
++#define BB_SDA 85
++#define BB_SCL 86
++#define BB_HALF_US 3
++#define BB_RELEASED 0x000       /* gpio, input, no pull, 2 mA */
++#define BB_LOW 0x200            /* gpio, output (latch 0 set before) */
++static void bb_line(struct tas *t,unsigned pin,bool high) { wr(t,PIN(pin),high?BB_RELEASED:BB_LOW); }
++static bool bb_level(struct tas *t,unsigned pin) { return rd(t,PIN(pin)+4)&1; }
++static bool bb_scl_high(struct tas *t) {
++	bb_line(t,BB_SCL,true);
++	for (unsigned i=0;i<1000;i++) { if (bb_level(t,BB_SCL)) return pause_us(t,BB_HALF_US); if (!pause_us(t,1)) return false; }
++	t->r->timeouts++;return fail(t,"SCL held low");
++}
++static bool bb_start(struct tas *t) {
++	bb_line(t,BB_SDA,true);
++	if (!pause_us(t,BB_HALF_US) || !bb_scl_high(t)) return false;
++	if (!bb_level(t,BB_SDA)) { t->r->arbitration++;return fail(t,"SDA held low at start"); }
++	bb_line(t,BB_SDA,false);if (!pause_us(t,BB_HALF_US)) return false;
++	bb_line(t,BB_SCL,false);return pause_us(t,BB_HALF_US);
++}
++static bool bb_stop(struct tas *t) {
++	bb_line(t,BB_SDA,false);
++	if (!pause_us(t,BB_HALF_US) || !bb_scl_high(t)) return false;
++	bb_line(t,BB_SDA,true);t->active=false;return pause_us(t,BB_HALF_US);
++}
++static bool bb_bit(struct tas *t,bool out,bool *in) {
++	bb_line(t,BB_SDA,out);
++	if (!pause_us(t,BB_HALF_US) || !bb_scl_high(t)) return false;
++	if (in) *in=bb_level(t,BB_SDA);
++	else if (out && !bb_level(t,BB_SDA)) { t->r->arbitration++;return fail(t,"arbitration"); }
++	bb_line(t,BB_SCL,false);return true;
++}
++static bool bb_byte(struct tas *t,uint8_t out,uint8_t *in,bool ack) {
++	uint8_t v=0;bool b=false,a=true;
++	for (int i=7;i>=0;i--) { if (!bb_bit(t,in?true:((out>>i)&1),in?&b:NULL)) return false; v=(uint8_t)(v<<1|(in&&b)); }
++	if (in) { *in=v;return bb_bit(t,!ack,NULL); }
++	if (!bb_bit(t,true,&a)) return false;
++	if (a) { t->r->nacks++;return fail(t,"NACK"); }
++	return true;
++}
++static bool
++bb_transfer(struct tas *t,bool receive,uint8_t *bytes,unsigned n,bool stretch)
++{
++	bool ok;
++	t->r->transfers++;t->active=true;
++	ok=bb_start(t) && bb_byte(t,(uint8_t)(0x4c<<1|(receive?1:0)),NULL,false);
++	for (unsigned i=0;ok && i<n;i++) ok=receive?bb_byte(t,0,&bytes[i],i+1<n):bb_byte(t,bytes[i],NULL,false);
++	/* stretch: keep the bus for the repeated start of the read that follows */
++	if (!ok || !stretch) ok=bb_stop(t) && ok;
++	return ok;
++}
++static bool
++bb_prepare(struct tas *t)
++{
++	t->r->stage="pins";
++	for (unsigned i=0;i<2;i++) { t->pins[i]=rd(t,PIN(85+i));t->bb_io[i]=rd(t,PIN(85+i)+4); }
++	t->pins_set=true;t->bb=true;
++	for (unsigned i=0;i<2;i++) { wr(t,PIN(85+i)+4,t->bb_io[i]&~2u);wr(t,PIN(85+i),BB_RELEASED); }
++	if (!pause_us(t,100)) return false;
++	bool sda=bb_level(t,BB_SDA),scl=bb_level(t,BB_SCL);
++	LOG(t,"mi8rp: 14: SE5 FIFO off: I2C by hand on GPIO85 (SDA) / GPIO86 (SCL), half period %u us; idle SDA=%u SCL=%u; CFG was %03x/%03x spkid=%u\n",
++	    BB_HALF_US,sda,scl,t->pins[0],t->pins[1],rd(t,PIN(87)+4)&1);
++	if (!sda || !scl) return fail(t,"bus lines not high at idle (pull-up supply?)");
++	return true;
++}
 +static bool
 +transfer(struct tas *t,bool receive,uint8_t *bytes,unsigned n,bool stretch)
 +{
 +	unsigned done=0; uint64_t limit=now(t)+20000; uint32_t status=0;
 +	if (!n || n>129 || now(t)>=t->end) return fail(t,"deadline/length");
++	if (t->bb) return bb_transfer(t,receive,bytes,n,stretch);
 +	if (limit>t->end) limit=t->end;
 +	t->r->transfers++;
 +	wr(t,SE+0x618,0xffffffff); wr(t,SE+(receive?0x270:0x26c),n);
@@ -17977,7 +18048,7 @@ index 0000000000000000000000000000000000000000..c422962d55291a1a2a7e91573235b777
 +	    (b==0 && ((p>=50 && p<=60 && r>=8) || (p==61 && r>=8 && r<=27)));
 +}
 +static uint8_t crc_byte(uint8_t v) { for (unsigned i=0;i<8;i++) v=(uint8_t)((v<<1)^((v&128)?0x4d:0)); return v; }
-+struct download { struct tas *t; uint8_t y; };
++struct download { struct tas *t; uint8_t y; unsigned differ; };
 +static bool safe_write(unsigned b,unsigned p,unsigned r) {
 +	/* Firmware is executable input: forbid power, mute, reset and page/book controls.
 +	 * Swaps and coefficients remain allowed in their own books/pages. */
@@ -17998,24 +18069,33 @@ index 0000000000000000000000000000000000000000..c422962d55291a1a2a7e91573235b777
 +		unsigned first=0,last=n;while(first<n && !yram(book,page,reg+first)) first++;
 +		while(last>first && !yram(book,page,reg+last-1)) last--;
 +		if (first<last) {
-+			if (!read_regs(t,book,page,(uint8_t)(reg+first),got,last-first)) return false;
++			/* Y memory is read a 32-bit word at a time: start at the word's first register (as TI's
++			 * bulk read from the command's own start does), or a word entered in its middle reads 0
++			 * (B0 P0x35 R0x33 of configuration 0, seen on the phone). */
++			unsigned from=first;
++			while (from>0 && ((reg+from)&3)) from--;
++			if (!read_regs(t,book,page,(uint8_t)(reg+from),got,last-from)) return false;
++			/* As TI's checksum: a single write must read back as written; a burst only adds what
++			 * reads back to the block's Y sum, and that sum must match the file's. */
 +			for (unsigned i=first;i<last;i++) if (yram(book,page,reg+i)) {
-+				if (got[i-first]!=v[i]) return fail(t,"Y readback MISMATCH");
-+				d->y=(uint8_t)(d->y+crc_byte(got[i-first]));
++				if (n==1 && got[i-from]!=v[i]) return fail(t,"Y readback MISMATCH");
++				if (got[i-from]!=v[i] && d->differ++<4)
++					LOG(t,"mi8rp: 14: burst readback B%u P%u R%u wrote %02x read %02x (word %u)\n",book,page,reg+i,v[i],got[i-from],t->word);
++				d->y=(uint8_t)(d->y+crc_byte(got[i-from]));
 +			}
 +		}
 +	}
 +	return true;
 +}
 +static bool load(struct tas *t,const struct mi8_tas_block *b,const char *name) {
-+	struct download d={t,0};uint8_t p=0;t->r->stage=name;
++	struct download d={t,0,0};uint8_t p=0;t->r->stage=name;
 +	if (b->p_present && (!select_page(t,0,0) || !byte_write(t,33,1))) return false;
 +	if (!commands(b,execute,&d)) return false;
 +	if (b->p_present && !read_regs(t,0,0,32,&p,1)) return false;
 +	bool ok=(!b->p_present || p==b->p_crc) && (!b->y_present || d.y==b->y_crc);
-+	LOG(t,"mi8rp: 14: %s P=%s (%02x/%02x) Y=%s (%02x/%02x)\n",name,
++	LOG(t,"mi8rp: 14: %s P=%s (%02x/%02x) Y=%s (%02x/%02x) burst bytes read back other than written=%u\n",name,
 +	    b->p_present?(p==b->p_crc?"match":"MISMATCH"):"absent",p,b->p_crc,
-+	    b->y_present?(d.y==b->y_crc?"match":"MISMATCH"):"absent",d.y,b->y_crc);
++	    b->y_present?(d.y==b->y_crc?"match":"MISMATCH"):"absent",d.y,b->y_crc,d.differ);
 +	if (!ok) return fail(t,"CRC MISMATCH");
 +	t->r->blocks++;return true;
 +}
@@ -18029,7 +18109,7 @@ index 0000000000000000000000000000000000000000..c422962d55291a1a2a7e91573235b777
 +	for (unsigned i=0;i<3;i++) h[i]=rd(t,halts[i]);
 +	LOG(t,"mi8rp: 14: SE5 protocol=%u fifo_disabled=%u votes=%08x halt=%08x/%08x/%08x RCG=%08x/%08x DFS=%08x GDSC=not-exposed\n",(fw>>8)&255,fifo&1,t->votes,h[0],h[1],h[2],t->rcg_cmd,t->rcg_cfg,dfs);
 +	if (((fw>>8)&255)!=3) return fail(t,"protocol is not I2C");
-+	if (fifo&1) return fail(t,"FIFO disabled (DMA prohibited)");
++	if (fifo&1) return bb_prepare(t);
 +	t->depth=(rd(t,SE+0xe24)>>16)&63;
 +	unsigned rxdepth=(rd(t,SE+0xe28)>>16)&63;
 +	if (t->depth<4 || rxdepth<4) return fail(t,"FIFO depth");
@@ -18091,9 +18171,11 @@ index 0000000000000000000000000000000000000000..c422962d55291a1a2a7e91573235b777
 +		for (unsigned i=NSAVE;i>0;i--) wr(t,SE+saved_regs[i-1],t->regs[i-1]);
 +		for (unsigned i=0;i<NSAVE;i++) idle=idle && rd(t,SE+saved_regs[i])==t->regs[i];
 +	}
++	if (t->bb && t->active) (void)bb_stop(t);
 +	t->r->se_restored=idle;
 +	t->r->pins_restored=true;
 +	if (t->pins_set) for (unsigned i=0;i<2;i++) { wr(t,PIN(85+i),t->pins[i]);t->r->pins_restored&=rd(t,PIN(85+i))==t->pins[i]; }
++	if (t->bb) for (unsigned i=0;i<2;i++) { wr(t,PIN(85+i)+4,t->bb_io[i]);t->r->pins_restored&=(rd(t,PIN(85+i)+4)&2)==(t->bb_io[i]&2); }
 +	t->r->clocks_restored=true;
 +	if (t->clocks) {
 +		if (t->rcg_changed) {
@@ -18133,6 +18215,20 @@ index 0000000000000000000000000000000000000000..c422962d55291a1a2a7e91573235b777
 +	if (regs[3]!=0xa0) { fail(&t,"ID is not PG2.1");goto out; }
 +	/* Power/mute reset values must be known before any script is executed. */
 +	if (!match) { fail(&t,"reset registers MISMATCH");goto out; }
++	/* What TI's driver writes between the software reset and the program (tas2557_load_default:
++	 * default data, IRQ configuration, ASI1 16-bit, DOUT tri-state), so the chip is in Android's
++	 * state before the download. None of it powers anything up. */
++	{
++		static const uint8_t p0[][2]={{21,0x05},{45,0x21},{46,0x21},{37,0x5a}};
++		static const uint8_t p1[][2]={{106,0x71},{108,0x11},{109,0x11},{110,0x11},{111,0x01},{64,0x07},{114,0x80}};
++		uint8_t fmt=0;r->stage="defaults";
++		if (!select_page(&t,0,0)) goto out;
++		for (unsigned i=0;i<4;i++) if (!byte_write(&t,p0[i][0],p0[i][1])) goto out;
++		if (!select_page(&t,0,1)) goto out;
++		for (unsigned i=0;i<7;i++) if (!byte_write(&t,p1[i][0],p1[i][1])) goto out;
++		if (!read_regs(&t,0,1,1,&fmt,1) || !byte_write(&t,1,(uint8_t)((fmt&~0x18u)|1))) goto out;
++		LOG(&t,"mi8rp: 14: defaults as TI's load_default; ASI1 format %02x -> %02x\n",fmt,(fmt&~0x18u)|1);
++	}
 +	if (!load(&t,&fw.program,"prog0") || !load(&t,&fw.pll,"pll0") || !load(&t,&fw.pre,"cfg0 pre") || !load(&t,&fw.coeff,"cfg0 coeff")) goto out;
 +	r->stage="flags";
 +	if (!read_regs(&t,0,0,0x68,&flags[0],1) || !read_regs(&t,0,0,0x6c,&flags[1],1) || !read_regs(&t,0,0,0x64,&flags[2],1)) goto out;
