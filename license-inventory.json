@@ -744,7 +744,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "35b642ed248557691cb480a22d954c71a5be67fd97e35e57559dee28ff2c568e"
+      "sha256": "1ed87ed7ea5fde9beb161dc597b8f41103208d681f52aa4c8fd9962a649dce4c"
     },
     {
       "component": "xnu-mi8",
@@ -760,7 +760,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 TI tas2557 驱动的固件格式，未复制代码",
-      "sha256": "7afc69458b694f5f5dca34444bca563c3307b9050a634ba9f45ea4898a0f74b5"
+      "sha256": "68db582b31f3cad2242cf099983436786e6c7efcd53c21ca61b55fd54aafc5e9"
     },
     {
       "component": "xnu-mi8",

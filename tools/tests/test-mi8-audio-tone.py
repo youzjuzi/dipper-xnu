@@ -70,7 +70,8 @@ unsigned mi8_tas_guard_tests(void) {
 ''')
         pcm = tmp / 'pcm-check.c'
         pcm.write_text((dev / 'mi8_audio_pcm.c').read_text() + (ROOT / 'tools/tests/mi8-audio-tone-guards.inc').read_text())
-        subprocess.run(['cc', *flags, '-I' + str(tmp), str(ROOT / 'tools/tests/mi8-audio-tone.c'), str(ROOT / 'tools/tests/mi8-audio-tone-model.c'), str(guard), str(pcm), *(str(dev / s) for s in ['mi8_glink.c', 'mi8_audio.c']), '-o', str(exe)], check=True)
+        compile_command = ['cc', *flags, '-I' + str(tmp), str(ROOT / 'tools/tests/mi8-audio-tone.c'), str(ROOT / 'tools/tests/mi8-audio-tone-model.c'), str(guard), str(pcm), *(str(dev / s) for s in ['mi8_glink.c', 'mi8_audio.c']), '-o', str(exe)]
+        subprocess.run(compile_command, check=True)
         subprocess.run([str(exe), str(a.firmware), str(ref), str(tmp / 'wave.raw')], check=True, env=env)
         frames = list(struct.iter_unpack('<hh', (tmp / 'wave.raw').read_bytes()))
         assert len(frames) == 144000
@@ -85,6 +86,24 @@ unsigned mi8_tas_guard_tests(void) {
             assert left == right == want, (n, left, right, want)
         assert max(abs(left) for left, _ in frames) == 1036
         print('Independent tone waveform SELFTEST PASS 144000/144000')
+        # Counterfactuals use temporary translation units, never the work tree.
+        for label, original, before, after, failure in [
+            ('old-soft-readback', guard, 'h!=3 || s!=1', 'h!=3 || s!=7', 'software_shutdown'),
+            ('old-zero-deadline', pcm, 'tone && n>=50 && n<100 && io->now', 'tone && io->now', 'ok&&m.normal==150'),
+        ]:
+            source = original.read_text()
+            assert source.count(before) == 1
+            variant = tmp / (label + '.c')
+            variant.write_text(source.replace(before, after))
+            negative = tmp / label
+            command = [str(variant) if v == str(original) else str(negative) if v == str(exe) else v for v in compile_command]
+            subprocess.run(command, check=True)
+            result = subprocess.run([str(negative), str(a.firmware), str(ref), str(tmp / 'negative.raw')], env=env, capture_output=True, text=True)
+            assert result.returncode == 1 and 'FAIL line ' in result.stderr and failure in result.stderr, (label, result.returncode, result.stderr)
+            if label == 'old-soft-readback':
+                assert 'mute read back R07=03/01' in result.stdout
+            print('Counterfactual', label, 'rejected as expected; current source passes')
+
 
 if __name__ == '__main__':
     main()

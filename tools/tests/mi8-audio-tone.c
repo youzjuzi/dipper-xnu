@@ -21,6 +21,7 @@ void mi8_tas2557_prepare(uint64_t until){(void)until;CHECK(false);}
 static void observe(struct peer *p,const uint8_t *q){
  struct play_peer *m=p->extension;uint32_t op=rd(q+16);amp_model_event(op);
  if(scenario==6 && op==0x10dab && m->normal==60)m->fatal=true;
+ if(scenario==17 && op==0x10dab && m->normal==60)p->now+=60000; /* Late during the tone must still stop. */
  if(op==0x10dab) {
   CHECK(rd(q+24)==1);unsigned at=rd(q+20)-0x10000000;CHECK(at+3840<=32768);
   bool nonzero=false;for(unsigned i=0;i<960;i++) {
@@ -39,7 +40,7 @@ static void corrupt_cache(struct peer *p,size_t at){
 }
 int main(int argc,char **argv){
  CHECK(argc==4);CHECK(mi8_tas_guard_tests()==2048);tone_pcm_tests();amp_model_load(argv[1],argv[2]);
- for(unsigned bus=0;bus<2;bus++)for(scenario=0;scenario<=15;scenario++){
+ for(unsigned bus=0;bus<2;bus++)for(scenario=0;scenario<=17;scenario++){
   if(scenario==12 && !bus)continue;
   tone_nonzero=tone_peak=0;wavefile=bus==1&&scenario==0?fopen(argv[3],"wb"):NULL;
   struct peer p;struct play_peer m;prepare(&p,&m);m.step=16;
@@ -55,9 +56,10 @@ int main(int argc,char **argv){
   mi8_tas2557_stop();m.reset=true;(void)mi8_audio_finish_play(true);
   mi8_tas2557_report(mi8_audio_play_cleanup());amp_model_check(scenario);
   CHECK(!mi8_audio_play_proven() && m.writes==m.normal && !m.clear);
-  if(scenario==0){CHECK(ok&&m.normal==150&&tone_peak==1036&&tone_nonzero==50);}
+  if(scenario==0||scenario==16){CHECK(ok&&m.normal==150&&tone_peak==1036&&tone_nonzero==50);CHECK(!strcmp(mi8_audio_play_cleanup(),"complete"));CHECK(!strstr(m.log,"play failed")&&!strstr(m.log,"AFE FAILED")&&!strstr(m.log,"tone schedule late"));}
+  if(scenario==17)CHECK(m.normal==61&&strstr(m.log,"tone schedule late"));
   if(wavefile){fclose(wavefile);wavefile=NULL;}
-  if(scenario==0)CHECK(ok);
+  if(scenario==0||scenario==16)CHECK(ok);
   else CHECK(!ok);
   CHECK(!mi8_tas2557_held());mi8_audio_set_amp(NULL);
  }

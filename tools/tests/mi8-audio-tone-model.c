@@ -7,7 +7,7 @@ static uint8_t *firmware;
 static size_t firmware_size;
 static uint64_t *play_time, run_time, powered_at, stopped_at, write_at;
 static unsigned scenario, startup_writes, shutdown_writes, gain_writes, health_reads, unmute_writes, mute_writes;
-static uint64_t unmute_at,mute_at;
+static uint64_t unmute_at,mute_at,mute_begin;
 static bool muting;
 static unsigned tone_lines;
 static bool running, afe, power, nack_sent, shutting, software_shutdown;
@@ -26,7 +26,7 @@ static void power_write_model(struct model *p,unsigned r,uint8_t v) {
   unmute_writes++;ram[p->book][p->page][r]=v;return;
  }
  if(unmute_writes && !shutting) {
-  if(!mute_writes){CHECK(p->book==100&&!p->page&&r==7&&v==1);muting=true;}
+  if(!mute_writes){CHECK(p->book==100&&!p->page&&r==7&&v==1);muting=true;mute_begin=p->time;}
   else CHECK(mute_writes==1&&!p->book&&!p->page&&r==7&&v==3&&p->time-write_at>=10000);
   mute_writes++;write_at=p->time;ram[p->book][p->page][r]=v;
   if(mute_writes==2){mute_at=p->time;shutting=true;}return;
@@ -50,7 +50,8 @@ static void power_write_model(struct model *p,unsigned r,uint8_t v) {
 static uint8_t power_read_model(struct model *p,unsigned r,uint8_t v) {
  if(power&&!p->page) {
   if(p->book==100 && r==7) {
-   if(!unmute_writes || muting)return scenario==14&&!muting?0:7;
+   if(!unmute_writes)return scenario==14?0:7;
+   if(muting)return v; /* After soft mute, read the written 01, not power-on 07. */
    if(scenario==3)return 7;
    return v;
   }
@@ -79,7 +80,11 @@ static void power_write32(void *ctx,uint32_t a,uint32_t v) {
  if(scenario==12 && unmute_writes==2)m.scl_ready=UINT64_MAX;
 }
 static uint64_t power_now(void *ctx){(void)ctx;return *play_time;}
-static void power_delay(void *ctx,unsigned n){m.time=*play_time;delay_us(ctx,n);*play_time=m.time;}
+static void power_delay(void *ctx,unsigned n){
+ m.time=*play_time;
+ if(scenario==16 && muting && n==10000)n+=30000; /* Slow normal shutdown, not a timeout. */
+ delay_us(ctx,n);*play_time=m.time;
+}
 static void power_log(void *ctx,const char *fmt,...) {
  char line[1024];va_list ap;va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);
  if(strstr(line,"mi8rp: 16:")||strstr(line,"mi8rp: step 16:"))tone_lines++;
@@ -93,7 +98,7 @@ void amp_model_load(const char *raw,const char *reference) {
 }
 bool amp_model_begin(uint64_t *clock,unsigned mode,bool gpio) {
  play_time=clock;scenario=mode;tone_lines=0;startup_writes=shutdown_writes=health_reads=0;
- running=afe=power=nack_sent=shutting=software_shutdown=muting=false;unmute_writes=mute_writes=0;unmute_at=mute_at=0;run_time=powered_at=stopped_at=write_at=0;
+ running=afe=power=nack_sent=shutting=software_shutdown=muting=false;unmute_writes=mute_writes=0;unmute_at=mute_at=mute_begin=0;run_time=powered_at=stopped_at=write_at=0;
  init();if(gpio)bitbang();m.time=*clock;m.which=99;m.extra_write=power_write_model;m.extra_read=power_read_model;m.extra_nack=power_nack;
  m.corrupt_p=mode==11;
  struct mi8_tas_io io={&m,power_read32,power_write32,power_now,power_delay,power_log};
@@ -112,7 +117,9 @@ void amp_model_check(unsigned mode) {
  fprintf(stderr,"tone scenario %u: startup=%u unmute=%u mute=%u stop_at=%llu run_at=%llu\n",mode,startup_writes,unmute_writes,mute_writes,(unsigned long long)stopped_at,(unsigned long long)run_time);
  CHECK(!power && !m.pin[76] && m.cfg[85]==m.saved_cfg[85] && m.cfg[86]==m.saved_cfg[86]);
  CHECK(m.lines<=28 && tone_lines<=11); /* plus the one PCM description line */
- if(mode==0){CHECK(startup_writes==7&&shutdown_writes==9&&health_reads>=6&&software_shutdown);CHECK(mute_at>=run_time+2050000&&stopped_at<=run_time+2500000);CHECK(unmute_writes==2&&mute_writes==2);}
+ if(mode==0||mode==16){CHECK(startup_writes==7&&shutdown_writes==9&&health_reads>=6&&software_shutdown);CHECK(mute_at>=run_time+2050000&&stopped_at<=run_time+2500000);CHECK(unmute_writes==2&&mute_writes==2);}
+ if(mode==16)CHECK(stopped_at-mute_begin>=40000);
+ if(mode==17)CHECK(unmute_writes==2 && mute_writes==2 && software_shutdown);
  if(mode==1){CHECK(!unmute_writes&&health_reads==1);CHECK(stopped_at<run_time+600000);}
  if(mode==2){CHECK(health_reads==2&&mute_writes==2&&stopped_at<run_time+1000000);}
  if(mode==3||mode==4){CHECK(mute_writes==2&&stopped_at<run_time+800000);}

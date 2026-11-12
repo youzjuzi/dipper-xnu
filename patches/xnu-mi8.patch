@@ -6435,10 +6435,10 @@ index 0000000000000000000000000000000000000000..90cfa7c34112e849086aa641b73ab88a
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1d0164fb493af862a618e9b42b05c29093c2baed
+index 0000000000000000000000000000000000000000..e0ba2b636d403b935001a1222bc9948e5b6ed22e
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,380 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6748,7 +6748,9 @@ index 0000000000000000000000000000000000000000..1d0164fb493af862a618e9b42b05c290
 +		if (f.gfsr || (f.fsr&~IDLE)) {
 +			pcm_log(s,"play: unexpected GFSR=%#x FSR=%#x FAR=%#llx",f.gfsr,f.fsr,(unsigned long long)f.far); goto cleanup;
 +		}
-+		if (tone && io->now(io->ctx)>wait+20000) { pcm_log(s,"tone schedule late; stopping");goto cleanup; }
++		/* Only the nonzero window has an acoustic deadline. Bounded amp
++		 * shutdown may take longer than a zero period; keep draining silence. */
++		if (tone && n>=50 && n<100 && io->now(io->ctx)>wait+20000) { pcm_log(s,"tone schedule late; stopping");goto cleanup; }
 +		s->period=n;
 +		fill_period(s,slot);
 +		if (!submit(s,slot,MI8_PCM_ADDRESS+(uint64_t)slot*MI8_PCM_PERIOD,false,s->deadline)) goto cleanup;
@@ -17908,10 +17910,10 @@ index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacf
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..b78c80dd505363876ea77a4480beba5f3ce21f7a
+index 0000000000000000000000000000000000000000..00b9a656c80720cb254653396cdd04b241374d83
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,759 @@
+@@ -0,0 +1,762 @@
 +/* SPDX-License-Identifier: MIT
 + * TAS2557 firmware probe and bounded hard-muted power check. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
@@ -18454,7 +18456,10 @@ index 0000000000000000000000000000000000000000..b78c80dd505363876ea77a4480beba5f
 +static bool tone_mute(void) {
 +	struct tas *t=&amp.t;uint8_t h=0,s=0;
 +	if (!power_write(100,0,7,1) || !pause_us(t,10000) || !power_write(0,0,7,3)) return false;
-+	if (!read_regs(t,0,0,7,&h,1) || !read_regs(t,100,0,7,&s,1) || h!=3 || s!=7) return false;
++	/* Soft mute reads back what was written (01), not its power-on 07 (seen on the phone). */
++	if (!read_regs(t,0,0,7,&h,1) || !read_regs(t,100,0,7,&s,1) || h!=3 || s!=1) {
++		LOG(t,"mi8rp: 16: mute read back R07=%02x/%02x, expected 03/01\n",h,s);return false;
++	}
 +	amp.remuted=true;amp.unmuted=false;amp.mute_at=now(t);
 +	LOG(t,"mi8rp: 16: muted at +%u ms; read back R07=%02x/%02x\n",(unsigned)((amp.mute_at-amp.run_start)/1000),h,s);
 +	return true;
