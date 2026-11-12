@@ -37,7 +37,7 @@ static uint8_t session_read(struct model *p,unsigned r,uint8_t v) {
 }
 static void session_log(void *ctx,const char *fmt,...) {
  char line[1024];va_list ap;va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);
- if(!strncmp(line,"audio:",6)){CHECK(++session_logs<=500);return;}
+ if(!strncmp(line,"audio:",6)){CHECK(++session_logs<=1000);return;}
  log_line(ctx,"%s",line);
 }
 void session_model_load(const char *raw,const char *reference) {
@@ -58,3 +58,5 @@ unsigned session_model_mutes(void){return mutings;}
 unsigned session_model_starts(void){return starts;}
 void session_model_check_done(void){CHECK(!m.pin[76] && m.cfg[85]==m.saved_cfg[85] && m.cfg[86]==m.saved_cfg[86]);}
 unsigned long session_model_checks(void){return checks;}
+
+void session_model_prior_wakes(unsigned n){starts=n;ram[100][0][7]=1;}

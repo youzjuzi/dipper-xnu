@@ -83,6 +83,7 @@ static void ring_feed(void){
  int16_t data[2048];for(unsigned i=0;i<1024;i++){data[2*i]=(i&1)?32767:-32768;data[2*i+1]=(i&1)?-32768:32767;}
  (void)mi8_audio_ring_put(data,1024);
 }
+/* @tail_helper */
 static void tail_capture(const char *text){
  char line[400];CHECK(strlen(text)<sizeof(line));strcpy(line,text);
  /* @tail_capture */

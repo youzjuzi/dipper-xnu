@@ -6461,10 +6461,10 @@ index 0000000000000000000000000000000000000000..3b401e70c9180a9bbb1eaecb706aa87a
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..cc8b9c568de4f35791a53566dedcfe5115f5d52f
+index 0000000000000000000000000000000000000000..37cb8e99d249741babb14ab63cad045fa22fcdb2
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,803 @@
+@@ -0,0 +1,821 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6529,6 +6529,18 @@ index 0000000000000000000000000000000000000000..cc8b9c568de4f35791a53566dedcfe51
 +	unsigned n=0; for (unsigned i=0;i<10;i++) n+=s->jobs[i].active; return n;
 +}
 +
++/* Selected once before workers start. Both DSP scaling and admission read
++ * this same const entry; subsequent configuration attempts cannot change it. */
++static const struct { int db,limit; } session_levels[]={{-30,1036},{-24,2068},{-20,3277}};
++static unsigned session_level_index;
++static bool session_level_locked;
++bool mi8_pcm_session_level(int db) {
++ if(session_level_locked)return false;
++ session_level_locked=true;
++ for(unsigned i=0;i<3;i++)if(session_levels[i].db==db){session_level_index=i;return true;}
++ return false;
++}
++unsigned mi8_pcm_session_limit(void){return (unsigned)session_levels[session_level_index].limit;}
 +static unsigned session_periods=6000;
 +static struct mi8_pcm_session_stats session_stats;
 +static uint64_t session_last_done;
@@ -6715,15 +6727,24 @@ index 0000000000000000000000000000000000000000..cc8b9c568de4f35791a53566dedcfe51
 + *peak=0;*nz=false;
 + for(unsigned i=0;i<960;i++) {
 +  int l=(int16_t)(data[4*i]|data[4*i+1]<<8),r=(int16_t)(data[4*i+2]|data[4*i+3]<<8);
-+  unsigned a=l<0?-l:l;if(l!=r || a>1036)return false;
++  unsigned a=l<0?-l:l;if(l!=r || a>mi8_pcm_session_limit())return false;
 +  if(a>*peak)*peak=a;
 +  *nz|=a!=0;
 + }
 + if(!*nz)return true;
 + struct mi8_amp_snapshot a;s->session->snapshot(&a);uint64_t n=s->io->now(s->io->ctx);
-+ return a.state==MI8_AMP_LIVE && !a.request && !a.reason && a.wakes<=20 &&
-+     n>=a.live_start && n-a.live_start<20000000 && a.live_total<60000000 &&
-+     n-a.live_start<60000000-a.live_total && session_pcm.periods<1000;
++ return a.state==MI8_AMP_LIVE && !a.request && !a.reason && a.wakes<=200 &&
++     n>=a.live_start && n-a.live_start<120000000 && session_pcm.periods<6000;
++}
++static int session_sample(int16_t left,int16_t right,unsigned frame,bool last,bool muted) {
++ if(muted)return 0;
++ int limit=(int)mi8_pcm_session_limit();
++ int value=clip_round(((int32_t)left+right)/2*limit,32768);
++ if(!session_pcm.periods && frame<480)value=clip_round(value*(int)frame,479);
++ if(last && frame>=480)value=clip_round(value*(int)(959-frame),479);
++ if(value>limit){value=limit;session_stats.saturated_samples+=2;}
++ if(value<-limit){value=-limit;session_stats.saturated_samples+=2;}
++ return value;
 +}
 +static void session_fill(struct mi8_pcm_state *s,unsigned slot) {
 + static int16_t scratch[960*2]; /* Sole session feeder, never shared with old modes. */
@@ -6731,27 +6752,24 @@ index 0000000000000000000000000000000000000000..cc8b9c568de4f35791a53566dedcfe51
 + struct mi8_amp_snapshot a;s->session->snapshot(&a);uint64_t n=s->io->now(s->io->ctx);
 + if(s->session->panic_tick)s->session->panic_tick(n);
 + if(a.state==MI8_AMP_WARMING)return;
-+ memset(scratch,0,sizeof(scratch));(void)mi8_audio_ring_take(scratch,960);
++ memset(scratch,0,sizeof(scratch));unsigned taken=mi8_audio_ring_take(scratch,960);
++ if(a.state==MI8_AMP_LIVE && taken<960){session_stats.underflow_periods++;session_stats.zero_frames+=960-taken;}
 + if(a.request || a.reason)return;
 + if(a.state==MI8_AMP_OFF_READY) {
 +  unsigned peak=0;
 +  for(unsigned i=0;i<960;i++){int v=((int32_t)scratch[2*i]+scratch[2*i+1])/2;unsigned p=v<0?-v:v;if(p>peak)peak=p;}
-+  if(peak>=256 && a.wakes<20 && a.live_total<60000000)s->session->wake(peak);
++  if(peak>=256 && a.wakes<200)s->session->wake(peak);
 +  return;
 + }
 + if(a.state!=MI8_AMP_LIVE)return;
 + if(a.wakes!=session_pcm.wake){memset(&session_pcm,0,sizeof(session_pcm));session_pcm.wake=a.wakes;session_pcm.start=a.live_start;}
-+ uint64_t remaining=a.live_total<60000000?60000000-a.live_total:0;
-+ if(remaining>20000000)remaining=20000000;
++ const uint64_t remaining=120000000;
 + if(n<a.live_start)return;
-+ if(n-a.live_start>=remaining || session_pcm.periods>=1000){s->session->mute(s->io->now(s->io->ctx));return;}
-+ bool last=n-a.live_start+20000>=remaining || session_pcm.periods==999;
++ if(n-a.live_start>=remaining || session_pcm.periods>=6000){s->session->mute(s->io->now(s->io->ctx));return;}
++ bool last=n-a.live_start+20000>=remaining || session_pcm.periods==5999;
 + bool muted=s->session->muted(),nz=false;
 + for(unsigned i=0;i<960;i++) {
-+  int value=clip_sample(scratch[2*i],scratch[2*i+1],session_pcm.periods?480: i,muted);
-+  /* clip_sample's final fade starts at frame 143520; the supplied frame is
-+   * only 0..959 or 480. Session fade-out is applied explicitly here. */
-+  if(last && i>=480)value=clip_round(value*(int)(959-i),479);
++  int value=session_sample(scratch[2*i],scratch[2*i+1],i,last,muted);
 +  uint16_t bits=(uint16_t)(int16_t)value;data[4*i]=data[4*i+2]=(uint8_t)bits;data[4*i+1]=data[4*i+3]=(uint8_t)(bits>>8);nz|=value!=0;
 + }
 + session_pcm.zero_periods=nz?0:session_pcm.zero_periods+1;
@@ -7270,10 +7288,10 @@ index 0000000000000000000000000000000000000000..cc8b9c568de4f35791a53566dedcfe51
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..308b45b48003d1f1be86be52d2cf532a3cd6a4f5
+index 0000000000000000000000000000000000000000..5a913ceba61169d2fe955eefd653446aa829efdc
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,118 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
@@ -7340,9 +7358,11 @@ index 0000000000000000000000000000000000000000..308b45b48003d1f1be86be52d2cf532a
 +const struct mi8_pcm_clip_result *mi8_pcm_clip_result(void);
 +void mi8_pcm_clip_reset(void);
 +bool mi8_pcm_run_clip(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,const struct mi8_pcm_clip_ops *);
-+struct mi8_pcm_session_stats { uint64_t done_gap_us,late_us;unsigned late_period; };
++struct mi8_pcm_session_stats { uint64_t done_gap_us,late_us,underflow_periods,zero_frames,saturated_samples;unsigned late_period; };
 +bool mi8_pcm_session_seconds(unsigned seconds);
 +const struct mi8_pcm_session_stats *mi8_pcm_session_stats(void);
++bool mi8_pcm_session_level(int);
++unsigned mi8_pcm_session_limit(void);
 +struct mi8_pcm_session_ops {
 + void (*snapshot)(struct mi8_amp_snapshot *);
 + void (*wake)(unsigned);
@@ -7392,10 +7412,10 @@ index 0000000000000000000000000000000000000000..308b45b48003d1f1be86be52d2cf532a
 +#endif
 diff --git a/bsd/dev/mi8_audio_ring.c b/bsd/dev/mi8_audio_ring.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..0cc906c8a90387023b7f786fb2e7907f5ad2453a
+index 0000000000000000000000000000000000000000..0d3c8c59e23f23fe3bdf133d88882ba678a151c1
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_ring.c
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,93 @@
 +/* SPDX-License-Identifier: MIT */
 +#include "mi8_audio_ring.h"
 +/* SPSC: cdev holds audio_mutex across each sink call (including multiple
@@ -7474,12 +7494,27 @@ index 0000000000000000000000000000000000000000..0cc906c8a90387023b7f786fb2e7907f
 +	 * the closed, producer-drained snapshot is exact for conservation. */
 +	out->queued=RLOAD(&ring_head)-RLOAD(&ring_tail);
 +}
++
++/* Even generations are inactive. The controller is the sole publisher;
++ * last_write fields belong exclusively to the serialized HAL producer. */
++static uint64_t live_generation,write_generation,last_write_us,live_gap_us;
++void mi8_audio_ring_live(bool active) {
++ uint64_t g=RLOAD(&live_generation);
++ if((bool)(g&1)!=active)RSTORE(&live_generation,g+1);
++}
++void mi8_audio_ring_write_time(uint64_t now) {
++ uint64_t g=RLOAD(&live_generation);
++ if((g&1) && g==write_generation && now>=last_write_us && now-last_write_us>RLOAD(&live_gap_us))
++  RSTORE(&live_gap_us,now-last_write_us);
++ write_generation=g;last_write_us=now;
++}
++uint64_t mi8_audio_ring_live_gap(void){return RLOAD(&live_gap_us);}
 diff --git a/bsd/dev/mi8_audio_ring.h b/bsd/dev/mi8_audio_ring.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5702ac034fa51420fe910174ef32106a594ccae6
+index 0000000000000000000000000000000000000000..7ca2ce5f40e22f24fa38accc6accf8758dc9e67d
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_ring.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,26 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef MI8_AUDIO_RING_H
 +#define MI8_AUDIO_RING_H
@@ -7500,13 +7535,18 @@ index 0000000000000000000000000000000000000000..5702ac034fa51420fe910174ef32106a
 + * publishing. The worker retries with its bounded sleep/deadline, no mutex. */
 +bool mi8_audio_ring_close(void);
 +void mi8_audio_ring_counts(struct mi8_audio_ring_counts *);
++/* Controller publishes LIVE edges; producer timestamps valid HAL writes.
++ * Gaps crossing a non-LIVE interval never contribute. */
++void mi8_audio_ring_live(bool);
++void mi8_audio_ring_write_time(uint64_t);
++uint64_t mi8_audio_ring_live_gap(void);
 +#endif
 diff --git a/bsd/dev/mi8_audio_sink.c b/bsd/dev/mi8_audio_sink.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..74de8456809c3cffd93fdb4bb36ed35602c028c3
+index 0000000000000000000000000000000000000000..c28635dcd643242dfd7a7906428ae08a72fe40cb
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_sink.c
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,228 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Count-only observer of iOS PCM. No playback buffers or hardware operations. */
 +#ifdef MI8_AUDIO_SINK_HOST_TEST
@@ -7527,7 +7567,7 @@ index 0000000000000000000000000000000000000000..74de8456809c3cffd93fdb4bb36ed356
 + * Every shared scalar is atomic, including the sequence: a bounded reader
 + * remains safe if a writer is parked halfway through publishing at panic. */
 +#define PCM_FIELDS(F) F(calls) F(frames) F(min_frames) F(max_frames) F(zero) F(nonzero) \
-+    F(peak_l) F(peak_r) F(first_us) F(last_us) F(max_gap_us) F(invalid)
++    F(peak_l) F(peak_r) F(first_us) F(last_us) F(max_gap_us) F(invalid) F(clipped_samples)
 +#define VOL_FIELDS(F) F(generation) F(below) F(muted) F(changes) F(sample_us) F(seen)
 +#define FIELD(n) uint64_t n;
 +struct pcm_counts { PCM_FIELDS(FIELD) };
@@ -7537,6 +7577,7 @@ index 0000000000000000000000000000000000000000..74de8456809c3cffd93fdb4bb36ed356
 +static struct volume_counts volume;
 +static uint64_t pcm_sequence, volume_sequence;
 +static unsigned installed, stopping;
++static bool session_profile; /* Set before publishing the sink. */
 +#define LOAD(p) __atomic_load_n((p), __ATOMIC_SEQ_CST)
 +#define STORE(p,v) __atomic_store_n((p), (v), __ATOMIC_SEQ_CST)
 +_Static_assert(__atomic_always_lock_free(8, 0), "count snapshots require lock-free 64-bit loads");
@@ -7558,13 +7599,14 @@ index 0000000000000000000000000000000000000000..74de8456809c3cffd93fdb4bb36ed356
 +		STORE(&pcm_sequence, sequence + 2);
 +		return 0;
 +	}
-+	uint64_t zero = 0, left = 0, right = 0, now = sink_now();
++	uint64_t zero = 0, left = 0, right = 0, clipped = 0, now = sink_now();
 +	for (uint32_t i = 0; i < count; i++) {
 +		int32_t l = frames[2*i], r = frames[2*i+1];
 +		uint32_t a = (uint32_t)(l < 0 ? -l : l), b = (uint32_t)(r < 0 ? -r : r);
 +		if (a > left) left = a;
 +		if (b > right) right = b;
 +		zero += !a && !b;
++		clipped += (a>=32767) + (b>=32767);
 +	}
 +	uint64_t calls = LOAD(&pcm.calls), last = LOAD(&pcm.last_us);
 +	if (!calls) { STORE(&pcm.first_us, now); STORE(&pcm.min_frames, count); }
@@ -7573,6 +7615,7 @@ index 0000000000000000000000000000000000000000..74de8456809c3cffd93fdb4bb36ed356
 +	if (count > LOAD(&pcm.max_frames)) STORE(&pcm.max_frames, count);
 +	if (left > LOAD(&pcm.peak_l)) STORE(&pcm.peak_l, left);
 +	if (right > LOAD(&pcm.peak_r)) STORE(&pcm.peak_r, right);
++	if(session_profile){STORE(&pcm.clipped_samples, LOAD(&pcm.clipped_samples)+clipped);mi8_audio_ring_write_time(now);}
 +	STORE(&pcm.calls, calls + 1);
 +	STORE(&pcm.frames, LOAD(&pcm.frames) + count);
 +	STORE(&pcm.zero, LOAD(&pcm.zero) + zero);
@@ -7631,7 +7674,13 @@ index 0000000000000000000000000000000000000000..74de8456809c3cffd93fdb4bb36ed356
 +	    U(p->zero), U(p->nonzero), U(p->peak_l), U(p->peak_r), U(p->first_us), U(p->last_us), U(p->max_gap_us),
 +	    U(p->invalid), U(v->generation), U(v->below), U(v->muted), U(v->changes), U(v->seen), U(v->sample_us));
 +#undef U
-+	return n < 0 ? 0 : (unsigned)n < capacity ? (unsigned)n : capacity - 1;
++	unsigned used=n < 0 ? 0 : (unsigned)n < capacity ? (unsigned)n : capacity - 1;
++ if(session_profile && used<capacity-1){
++  n=snprintf(out+used,capacity-used,"audio: LIVE HAL_max_gap_us=%llu source_clipped_samples=%llu\n",
++   (unsigned long long)mi8_audio_ring_live_gap(),(unsigned long long)p->clipped_samples);
++  if(n>0)used+=(unsigned)n<capacity-used?(unsigned)n:capacity-used-1;
++ }
++ return used;
 +}
 +
 +static bool report_changed(struct pcm_counts *previous, struct volume_counts *last_volume, unsigned *lines)
@@ -7713,6 +7762,7 @@ index 0000000000000000000000000000000000000000..74de8456809c3cffd93fdb4bb36ed356
 +		if (owner) { printf("audio: refused another sink selector\n"); return; }
 +	}
 +	if (LOAD(&installed)) return;
++	session_profile=enabled==5;
 +	if (!redwood_audio_claim_sink((enabled==3 || enabled==4 || enabled==5)?ring_sink:count_sink)) { printf("audio: refused existing sink owner\n"); return; }
 +	thread_t thread;
 +	if (kernel_thread_start(count_thread, NULL, &thread) != KERN_SUCCESS) {
@@ -14383,10 +14433,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..5386e1d0dd5d3e0abded1b79916061af97783184
+index 0000000000000000000000000000000000000000..ce8393252b9ae33058912957a00225d316594cd2
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4711 @@
+@@ -0,0 +1,4717 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -14485,8 +14535,20 @@ index 0000000000000000000000000000000000000000..5386e1d0dd5d3e0abded1b79916061af
 + * longer than the 32 KiB the loader keeps). One writer (the worker); read after it has finished
 + * or, at the return, with the other processors parked. */
 +static bool audio_tail_on;
-+static char audio_tail[8192];
++static char audio_tail[16384];
 +static unsigned audio_tail_len;
++static void audio_tail_append(const char *line,unsigned n) {
++ unsigned capacity=audio_session_stream?sizeof(audio_tail):8192;
++ if(audio_ring_stream || audio_session_stream){
++  if(n>=capacity){line+=n-(capacity-1);n=capacity-1;}
++  if(n>=capacity-audio_tail_len){
++   unsigned discard=n-(capacity-audio_tail_len)+1;
++   memmove(audio_tail,audio_tail+discard,audio_tail_len-discard);audio_tail_len-=discard;
++  }
++ }
++ if(n<capacity-audio_tail_len){memcpy(audio_tail+audio_tail_len,line,n);audio_tail_len+=n;audio_tail[audio_tail_len]=0;}
++}
++
 +const char *mi8_rproc_audio_tail(unsigned *length);
 +const char *
 +mi8_rproc_audio_tail(unsigned *length)
@@ -14538,17 +14600,7 @@ index 0000000000000000000000000000000000000000..5386e1d0dd5d3e0abded1b79916061af
 +	for (const char *c = line; *c != 0; c++) {
 +		loader_log_putc(*c);
 +	}
-+	if (audio_tail_on && audio_play_worker()) {
-+		unsigned n = (unsigned)strnlen(line, sizeof(line));
-+		if (audio_ring_stream && n >= sizeof(audio_tail)-audio_tail_len) {
-+			unsigned discard=n-(sizeof(audio_tail)-audio_tail_len)+1;
-+			memmove(audio_tail,audio_tail+discard,audio_tail_len-discard);audio_tail_len-=discard;
-+		}
-+		if (n < sizeof(audio_tail) - audio_tail_len) {
-+			memcpy(audio_tail + audio_tail_len, line, n);
-+			audio_tail_len += n;
-+		}
-+	}
++	if (audio_tail_on && audio_play_worker()) audio_tail_append(line,(unsigned)strnlen(line,sizeof(line)));
 +	printf("%s", line);
 +	return length;
 +}
@@ -18749,6 +18801,7 @@ index 0000000000000000000000000000000000000000..5386e1d0dd5d3e0abded1b79916061af
 +};
 +static void audio_session_report(bool complete,const char *cleanup) {
 + const struct mi8_pcm_session_stats *t=mi8_pcm_session_stats();
++ say("mi8rp: audio=5: LIVE underflow_periods=%llu zero_frames=%llu output_saturated_samples=%llu limit=%u\n",t->underflow_periods,t->zero_frames,t->saturated_samples,mi8_pcm_session_limit());
 + say("mi8rp: audio=5: coexist DONE_max_gap=%llu us latest_period=%u late=%llu us smmu_audio_hold_max=%llu us wifi_map_wait_max=%llu us\n",t->done_gap_us,t->late_period,t->late_us,audio_lock_max_us,__atomic_load_n(&wifi_lock_wait_max_us,__ATOMIC_ACQUIRE));
 + bool closed=mi8_audio_ring_close();struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
 + struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);static char line[896];char status[320];
@@ -18979,6 +19032,9 @@ index 0000000000000000000000000000000000000000..5386e1d0dd5d3e0abded1b79916061af
 + if(audio_session_stream){
 +  adsp_shared_serial=true;audio_smmu_serial=true;
 +  __atomic_store_n(&audio_route_owner,1,__ATOMIC_RELEASE);
++  int level=-30;
++  PE_parse_boot_argn("audio_level_db",&level,sizeof(level));
++  if(!mi8_pcm_session_level(level))say("mi8rp: audio=5: invalid audio_level_db; using -30 dB\n");
 +  unsigned duration=120,return_seconds=0,radio=0;
 +  PE_parse_boot_argn("audio_seconds",&duration,sizeof(duration));
 +  PE_parse_boot_argn("loader_return_after",&return_seconds,sizeof(return_seconds));
@@ -19100,16 +19156,17 @@ index 0000000000000000000000000000000000000000..5386e1d0dd5d3e0abded1b79916061af
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..300af5e55213639aed3e3b164a05d7c29fe44f6d
+index 0000000000000000000000000000000000000000..e6214a3236e73079b387684637e5054f1acf3a65
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,1108 @@
+@@ -0,0 +1,1106 @@
 +/* SPDX-License-Identifier: MIT
 + * TAS2557 firmware probe and bounded hard-muted power check. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
 + * Unmute is restricted to the bounded tone or clip check; no calibration or routing here.
 + */
 +#include "mi8_tas2557.h"
++#include "mi8_audio_ring.h"
 +#ifdef MI8_TAS_HOST_TEST
 +#include <string.h>
 +#include <stdio.h>
@@ -19885,7 +19942,7 @@ index 0000000000000000000000000000000000000000..300af5e55213639aed3e3b164a05d7c2
 +}
 +bool mi8_tas_session_held(void) { unsigned s=SA(session.state);return s!=MI8_AMP_PREPARING && s!=MI8_AMP_LATCHED_OFF; }
 +void mi8_tas_session_wake(unsigned peak) {
-+ if (SA(session.state)!=MI8_AMP_OFF_READY || SA(session.wakes)>=20 || SA(session.live_total)>59000000 || SA(session.expired)) return;
++ if (SA(session.state)!=MI8_AMP_OFF_READY || SA(session.wakes)>=200 || SA(session.expired)) return;
 + SP(session.trigger,peak);unsigned expected=0;
 + (void)__atomic_compare_exchange_n(&session.request,&expected,1,false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);
 +}
@@ -19914,11 +19971,9 @@ index 0000000000000000000000000000000000000000..300af5e55213639aed3e3b164a05d7c2
 + if(live){
 +  uint64_t end=SA(session.request)==2?SA(session.mute_at):now(&amp.t);
 +  if(end>=SA(session.live_start))duration=end-SA(session.live_start);
-+  if(duration>20000000)duration=20000000;
-+  if(duration>60000000-SA(session.live_total))duration=60000000-SA(session.live_total);
 +  SP(session.live_total,SA(session.live_total)+duration);
 + }
-+ SP(session.state,MI8_AMP_LATCHED_OFF);
++ mi8_audio_ring_live(false);SP(session.state,MI8_AMP_LATCHED_OFF);
 + mi8_tas2557_stop();
 + if(live && amp.remuted && amp.shutdown)__atomic_fetch_add(&session.mutes,1,__ATOMIC_RELAXED);
 + SP(session.reset_low,amp.result.reset_low);
@@ -19988,7 +20043,7 @@ index 0000000000000000000000000000000000000000..300af5e55213639aed3e3b164a05d7c2
 + struct tas *t=&amp.t;unsigned req=SA(session.request),state=SA(session.state);uint64_t n=now(t);
 + if(req==3 || SA(session.expired) || n>=session.limit) {session_end(n>=session.limit?7:0);return false;}
 + if(state==MI8_AMP_OFF_READY && req==1) {
-+  if(SA(session.wakes)>=20 || SA(session.live_total)>59000000){SP(session.request,0);return true;}
++  if(SA(session.wakes)>=200){SP(session.request,0);return true;}
 +  SP(session.state,MI8_AMP_WARMING);session.warming_at=n;
 +  if(SA(session.wakes) && !session_check()){session_end(2);return false;}
 +  if(SA(session.request)==3 || SA(session.expired)){session_end(0);return false;}
@@ -20008,19 +20063,18 @@ index 0000000000000000000000000000000000000000..300af5e55213639aed3e3b164a05d7c2
 +  if(SA(session.expired)||SA(session.request)==3){session_end(0);return false;}
 +  amp.unmuted=true;uint64_t live=now(t),warm=live-session.warming_at;
 +  SP(session.live_start,live);if(warm>SA(session.max_warmup))SP(session.max_warmup,warm);
-+  session.next_health=live+500000;SP(session.window_blocks,0);SP(session.window_peak,0);SP(session.state,MI8_AMP_LIVE);
++  session.next_health=live+500000;SP(session.window_blocks,0);SP(session.window_peak,0);SP(session.state,MI8_AMP_LIVE);mi8_audio_ring_live(true);
 +  if(t->io->log)t->io->log(t->io->ctx,"audio: wake #%u at %llu us trigger_peak=%u check=%s(%llu ms) warmup=%llu ms health INT1=%02x INT2=%02x PUF=%02x unmute=00/00\n",SA(session.wakes),(unsigned long long)session.warming_at,SA(session.trigger),SA(session.wakes)>1?"Y5d":"skipped",(unsigned long long)(session.check_us/1000),(unsigned long long)(warm/1000),session.int1,session.int2,session.puf);
 + } else if(state==MI8_AMP_LIVE || state==MI8_AMP_MUTING) {
 +  if(state==MI8_AMP_LIVE && n>=session.next_health){t->end=n+50000;if(!session_health(true)){session_end(4);return false;}session.next_health=now(t)+500000;}
 +  if(req==2){
-+   SP(session.state,MI8_AMP_MUTING);
++   mi8_audio_ring_live(false);SP(session.state,MI8_AMP_MUTING);
 +   if(SA(session.zeros)<8)return true;
 +   /* Eight successfully submitted zero blocks, not elapsed wall time. */
-+   uint64_t duration=SA(session.mute_at)-SA(session.live_start);
++   uint64_t end=SA(session.mute_at),start=SA(session.live_start);
++   uint64_t duration=end>=start?end-start:0;
 +   /* The feeder rejects data at the absolute admission deadline. A delayed
 +    * request observation/zero-tail is not additional admitted LIVE time. */
-+   if(duration>20000000)duration=20000000;
-+   if(duration>60000000-SA(session.live_total))duration=60000000-SA(session.live_total);
 +   SP(session.live_total,SA(session.live_total)+duration);
 +   if(!session_idle()){session_end(5);return false;}
 +   if(SA(session.request)==3 || SA(session.expired)){session_end(0);return false;}
@@ -20035,7 +20089,7 @@ index 0000000000000000000000000000000000000000..300af5e55213639aed3e3b164a05d7c2
 + static const char *const reasons[]={"no","prepare","coefficient","startup","health","mute","stream","budget","controller-timeout"};
 + snprintf(out,size,"wakes=%u mutes=%u live_total=%llu ms max_warmup=%llu ms out_peak=%u checks=%u/%u latched=%s final reset=%s controller=%s",
 + c.wakes,c.mutes,(unsigned long long)(c.live_total/1000),(unsigned long long)(c.max_warmup/1000),c.peak,c.checks_ok,c.checks,c.reason<9?reasons[c.reason]:"unknown",c.reset_low?"low":"Pending",c.done?"finished":SA(session.expired)?"retained FAILED":"running");
-+ if(c.live_total>59000000){size_t used=strlen(out);if(used<size)snprintf(out+used,size-used," budget exhausted");}
++ if(c.wakes>=200){size_t used=strlen(out);if(used<size)snprintf(out+used,size-used," wake budget exhausted");}
 +}
 +#ifndef MI8_TAS_HOST_TEST
 +extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);

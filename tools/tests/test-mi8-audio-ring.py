@@ -42,7 +42,7 @@ def main():
         for name, define, sources in [('mi8-audio-ring', 'MI8_GLINK_HOST_TEST', ['mi8_glink.c', 'mi8_audio.c', 'mi8_audio_pcm.c'])]:
             exe = Path(tmp) / name
             fixture = Path(tmp) / (name + '.c')
-            fixture.write_text((ROOT / 'tools/tests' / (name + '.c')).read_text().replace('/* @tail_capture */', body(source, 'if (audio_tail_on && audio_play_worker())')))
+            fixture.write_text((ROOT / 'tools/tests' / (name + '.c')).read_text().replace('/* @tail_capture */', next(line for line in source.splitlines() if 'if (audio_tail_on && audio_play_worker())' in line)).replace('/* @tail_helper */', 'static bool audio_session_stream;\n'+body(source,'static void audio_tail_append(')))
             if True:
                 text = (ROOT / 'tools/tests/mi8-audio-play.c').read_text()
                 for fn in ['audio_ring_report', 'dsp_shutdown', 'steps_from_five']:

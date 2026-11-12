@@ -77,6 +77,7 @@ static const char *mi8_rproc_audio_tail(unsigned *length){*length=test_tail_len;
 static void reset(void){
  CHECK(!held);audio_sink=NULL;memset(&pcm,0,sizeof(pcm));memset(&volume,0,sizeof(volume));
  pcm_sequence=volume_sequence=installed=stopping=0;volume_below=volume_generation=0;volume_muted=false;
+ session_profile=false;
  platform="dipper";platform_size=7;dt_fail=0;audio_arg=-1;step_arg=owner_arg=0;owner_name="sound";
  spawn_fail=false;spawned=deallocated=terminated=ticks=0;logs[0]=0;log_used=0;worker=NULL;
  atomic_store(&clock_ns,0);
@@ -90,11 +91,12 @@ static void *writer(void *opaque){
 }
 static atomic_bool read_stop;
 static void *reader(void *ignored){
- (void)ignored;
- do {struct pcm_counts p;struct volume_counts v;if(snapshot(&p,&v)){
+ (void)ignored;bool live=false;
+ do {if(session_profile){live=!live;mi8_audio_ring_live(live);}
+ struct pcm_counts p;struct volume_counts v;if(snapshot(&p,&v)){
  CHECK(p.frames==p.zero+p.nonzero);CHECK(!p.calls||(p.min_frames>=1&&p.max_frames<=1024&&p.first_us<=p.last_us));
  CHECK(p.peak_l<=32768&&p.peak_r<=32768);
- }}while(!atomic_load(&read_stop));return NULL;
+ }}while(!atomic_load(&read_stop));if(session_profile)mi8_audio_ring_live(false);return NULL;
 }
 static pthread_mutex_t barrier_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t barrier_cond=PTHREAD_COND_INITIALIZER;
@@ -104,6 +106,8 @@ static uint32_t blocking_sink(const int16_t *p,uint32_t n){(void)p;CHECK(held);p
 static void *one_write(void *unused){(void)unused;int16_t frame[2]={0};audio_play(frame,1);return NULL;}
 static void *detach(void *unused){(void)unused;atomic_store(&detach_started,true);redwood_audio_set_sink("nothing",NULL);atomic_store(&detached,true);return NULL;}
 static bool audio_ring_stream,selected_ring,audio_clip_stream,audio_session_stream;
+static char audio_tail[16384];static unsigned audio_tail_len;
+/* @tail_append */
 static void mi8_audio_set_ring(bool enabled){selected_ring=enabled;}
 static unsigned dispatch_gate(unsigned audio,unsigned shared_step){
 #define say capture
@@ -117,6 +121,7 @@ int main(void){
  audio_arg=0;mi8_audio_sink_init();CHECK(!spawned&&!log_used);
  audio_arg=1;platform="redwood";platform_size=8;mi8_audio_sink_init();CHECK(!spawned&&!log_used);
  platform="dipper-extra";platform_size=13;mi8_audio_sink_init();CHECK(!spawned);
+ session_profile=false;
  platform="dipper";platform_size=6;mi8_audio_sink_init();CHECK(!spawned);
  platform_size=7;dt_fail=1;mi8_audio_sink_init();CHECK(!spawned);dt_fail=0;
  for(unsigned s=9;s<=17;s++){step_arg=s;mi8_audio_sink_init();CHECK(!spawned&&!audio_sink&&strstr(logs,"conflict"));}
@@ -139,11 +144,13 @@ int main(void){
  step_arg=1;CHECK(!dispatch_gate(5,1));step_arg=0;owner_name="mi8rp_mss";owner_arg=1;CHECK(dispatch_gate(5,0)==17);owner_arg=0;audio_session_stream=false;
  reset();audio_arg=5;mi8_audio_sink_init();CHECK(installed&&audio_sink==ring_sink);reset();
  audio_arg=3;
- platform="redwood";platform_size=8;CHECK(!dispatch_gate(3,0));platform="dipper";platform_size=7;
+ platform="redwood";platform_size=8;CHECK(!dispatch_gate(3,0));session_profile=false;
+ platform="dipper";platform_size=7;
 
  for(unsigned n=1;n<=18;n++){step_arg=n;CHECK(!mi8_audio_ring_requested());mi8_audio_sink_init();CHECK(!installed&&!audio_sink);}
  step_arg=0;owner_name="mi8rp_mss";owner_arg=1;CHECK(!mi8_audio_ring_requested());mi8_audio_sink_init();CHECK(!installed);
  owner_arg=0;platform="redwood";platform_size=8;CHECK(!mi8_audio_ring_requested());mi8_audio_sink_init();CHECK(!installed);
+ session_profile=false;
  platform="dipper";platform_size=7;mi8_audio_sink_init();CHECK(installed&&audio_sink==ring_sink);CHECK(mi8_audio_ring_open());
  int16_t full[2048];for(unsigned i=0;i<2048;i++)full[i]=-32768;
  for(unsigned i=0;i<16;i++)audio_play(full,1024);
@@ -165,13 +172,26 @@ int main(void){
  CHECK(report_changed(&prev,&volprev,&lines));sample_volume();CHECK(!report_changed(&prev,&volprev,&lines));
  STORE(&pcm_sequence,LOAD(&pcm_sequence)+1);char out[768];CHECK(mi8_audio_sink_summary(out,sizeof(out))>0&&strstr(out,"partial"));
  CHECK(mi8_audio_sink_summary(out,0)==0);STORE(&pcm_sequence,LOAD(&pcm_sequence)+1);STORE(&stopping,0);
- reset();audio_arg=1;mi8_audio_sink_init();pthread_t writers[4],observer;
+ reset();audio_arg=5;mi8_audio_sink_init();
+ mi8_audio_ring_live(false);atomic_store(&clock_ns,1000000);audio_play(frames,4);
+ CHECK(snapshot(&p,&v)&&p.clipped_samples==4&&!mi8_audio_ring_live_gap());
+ mi8_audio_ring_live(true);atomic_store(&clock_ns,1000000000);audio_play(frames,4);
+ atomic_store(&clock_ns,1050000000);audio_play(frames,4);
+ CHECK(mi8_audio_ring_live_gap()==50000);
+ mi8_audio_ring_live(false);atomic_store(&clock_ns,9000000000ull);audio_play(frames,4);
+ mi8_audio_ring_live(true);atomic_store(&clock_ns,20000000000ull);audio_play(frames,4);
+ atomic_store(&clock_ns,20010000000ull);audio_play(frames,4);
+ CHECK(snapshot(&p,&v)&&p.clipped_samples==24&&mi8_audio_ring_live_gap()==50000);
+ mi8_audio_ring_live(false);
+ for(unsigned profile=1;profile<=5;profile+=4){
+ reset();audio_arg=profile;mi8_audio_sink_init();pthread_t writers[4],observer;
  atomic_store(&read_stop,false);CHECK(!pthread_create(&observer,NULL,reader,NULL));
  uint64_t expected=0;for(unsigned w=0;w<4;w++){for(unsigned i=0;i<2000;i++)expected+=1+(i+w)%1024;CHECK(!pthread_create(&writers[w],NULL,writer,(void*)(uintptr_t)w));}
  for(unsigned w=0;w<4;w++){CHECK(!pthread_join(writers[w],NULL));}
  atomic_store(&read_stop,true);CHECK(!pthread_join(observer,NULL));
  CHECK(snapshot(&p,&v)&&p.calls==8000&&p.frames==expected&&p.zero+p.nonzero==expected&&p.peak_l==32768&&p.peak_r==32767);
  redwood_audio_set_sink("nothing",NULL);audio_play(frames,4);CHECK(snapshot(&p,&v)&&p.calls==8000);
+ }
  reset();audio_sink=blocking_sink;pthread_t first,last;CHECK(!pthread_create(&first,NULL,one_write,NULL));
  pthread_mutex_lock(&barrier_lock);while(!entered)pthread_cond_wait(&barrier_cond,&barrier_lock);pthread_mutex_unlock(&barrier_lock);
  CHECK(!pthread_create(&last,NULL,detach,NULL));while(!atomic_load(&detach_started))sched_yield();
@@ -198,6 +218,15 @@ int main(void){
  memcpy(tail,loader_log+loader_log_len-32768,32768);tail[32768]=0;
  {char *z=strstr(tail,"mi8rp: audio=2: zero stream completed"),*f=strstr(tail,"audio: final count-only snapshot=");CHECK(z&&f&&z<f);}
  test_tail_len=0;reset();loader_log_len=42;loader_audio_summary();CHECK(loader_log_len==42);
- printf("Count sink SELFTEST PASS: 8000 concurrent writes; exact totals, detach barrier, atomic snapshots, 58 periodic lines, full-log final tail; %u assertions\n",atomic_load(&checks));
+ /* Run actual worker tail append and loader final append with 300 s at 50 Hz. */
+ reset();audio_arg=5;mi8_audio_sink_init();audio_session_stream=true;audio_ring_stream=false;audio_tail_len=0;
+ for(unsigned i=0;i<15000;i++){char line[128];int n=snprintf(line,sizeof(line),"mi8rp: stream period=%u time=%u ms done=ok progress\n",i,i*20);audio_tail_append(line,(unsigned)n);}
+ const char *ending="mi8rp: play completed\nmi8rp: asm close ok\nmi8rp: audio=5: cleanup=complete\n";
+ audio_tail_append(ending,(unsigned)strlen(ending));test_tail=audio_tail;test_tail_len=audio_tail_len;
+ loader_log_len=LOADER_LOG_SIZE;memset(loader_log,'x',sizeof(loader_log));loader_audio_summary();
+ memcpy(tail,loader_log+loader_log_len-32768,32768);tail[32768]=0;
+ CHECK(strstr(tail,"period=14999")&&strstr(tail,"play completed")&&strstr(tail,"asm close ok")&&strstr(tail,"cleanup=complete")&&strstr(tail,"audio: final count-only")&&strstr(tail,"LIVE HAL_max_gap_us="));
+ CHECK(!strstr(tail,"period=0 time="));
+ printf("Count sink SELFTEST PASS: 8000 concurrent writes per profile (count/session); exact totals, detach barrier, atomic snapshots, 58 periodic lines, full-log final tail; %u assertions\n",atomic_load(&checks));
  return 0;
 }

@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tree', type=Path, default=ROOT / 'work')
     parser.add_argument('--sanitize', action='store_true')
+    parser.add_argument('--tsan', action='store_true')
     a = parser.parse_args()
     x = a.tree.resolve() / 'hackios/xnu-src/xnu-8796.121.2'
     body = runpy.run_path(str(ROOT / 'tools/tests/test-mi8-audio-smmu.py'))['body']
@@ -39,6 +40,9 @@ def main():
     assert not re.search(r'\{ "audio",', (x / 'pexpert/arm/pe_bootargs.c').read_text())
     flags = ['-std=c11', '-Wall', '-Wextra', '-Werror', '-pthread']
     env = dict(os.environ)
+    if a.tsan:
+        flags += ['-fsanitize=thread','-g','-fno-omit-frame-pointer','-no-pie']
+        env['TSAN_OPTIONS']='halt_on_error=1'
     if a.sanitize:
         flags += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-fno-sanitize-recover=all', '-no-pie']
         # LeakSanitizer cannot run under the host execution sandbox's ptrace.
@@ -49,7 +53,7 @@ def main():
         code = (ROOT / 'tools/tests/mi8-audio-sink.c').read_text()
         rproc = (x / 'bsd/dev/mi8_rproc.c').read_text()
         gate = body(rproc, 'if(audio==5)') + '\n' + body(rproc, 'if (audio==4)') + '\n' + body(rproc, 'if (audio==3)') + '\n' + body(rproc, 'if (audio == 2 && shared_step == 0)')
-        code = code.replace('/* @ring_gate */', gate)
+        code = code.replace('/* @ring_gate */', gate).replace('/* @tail_append */',body(rproc,'static void audio_tail_append('))
         code = code.replace('/* @cdev */', pieces).replace('/* @sink */', source).replace('/* @loader */', final)
         (d / 'count.c').write_text(code)
         exe = d / 'count'

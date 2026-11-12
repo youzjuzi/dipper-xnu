@@ -58,7 +58,7 @@ def main():
         env['ASAN_OPTIONS'] = env.get('ASAN_OPTIONS', '') + ':detect_leaks=0'
     with tempfile.TemporaryDirectory(prefix='mi8-tas-test-') as tmp:
         exe, ref = Path(tmp) / 'test', Path(tmp) / 'expected.txt'
-        subprocess.run(['cc', *flags, str(ROOT / 'tools/tests/mi8-tas2557.c'), str(dev / 'mi8_tas2557.c'), '-o', str(exe)], check=True)
+        subprocess.run(['cc', *flags, str(ROOT / 'tools/tests/mi8-tas2557.c'), str(dev / 'mi8_tas2557.c'), str(dev / 'mi8_audio_ring.c'), '-o', str(exe)], check=True)
         dump = subprocess.check_output([str(exe), str(args.firmware), '--dump'], text=True, env=env)
         assert dump.splitlines() == normalized, 'C parser differs from independent ordered script decode'
         print(f'Independent firmware decode SELFTEST PASS {len(normalized)}/{len(normalized)}', flush=True)
@@ -72,7 +72,7 @@ def main():
         assert original.count(line) == 1
         mutant = Path(tmp) / 'unaligned.c'
         mutant.write_text(original.replace(line, '/* previous unaligned read start */'))
-        subprocess.run(['cc', *flags, str(ROOT / 'tools/tests/mi8-tas2557.c'), str(mutant), '-o', str(exe)], check=True)
+        subprocess.run(['cc', *flags, str(ROOT / 'tools/tests/mi8-tas2557.c'), str(mutant), str(dev / 'mi8_audio_ring.c'), '-o', str(exe)], check=True)
         subprocess.run([str(exe), str(args.firmware), str(ref), '--unaligned'], check=True, env=env)
 
     # Execute the real isolated worker and init gate with synthetic partition readiness.

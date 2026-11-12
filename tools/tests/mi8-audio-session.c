@@ -8,7 +8,8 @@ void mi8_tas2557_prepare_tone(uint64_t);
 #include "play-fixture.c"
 #include "mi8_audio_ring.c"
 extern void session_guard_tests(void);
-extern void session_test_total(uint64_t);
+extern void session_test_wakes(unsigned);
+extern void session_model_prior_wakes(unsigned);
 extern void session_model_submit(bool);
 extern void session_model_load(const char *,const char *);
 extern bool session_model_prepare(unsigned);
@@ -69,7 +70,7 @@ static void ring_feed(void){
  }
  int16_t data[2048];uint64_t elapsed=active->now-stream_start;
  int value=32767;
- if(mode==1 || mode==4 || mode==7)value=(elapsed%((mode==7)?4500000:10000000))<800000?32767:0;
+ if(mode==1 || mode==4 || mode==5 || mode==7)value=(elapsed%((mode==7)?4500000:10000000))<800000?32767:0;
  if(mode==8)value=255;
  if(mode==9)value=256;
  if(mode==3 && elapsed>1000000)return;
@@ -83,7 +84,7 @@ static void observe(struct peer *p,const uint8_t *q){
  unsigned at=rd(q+20)-0x10000000;bool nz=false;CHECK(at+3840<=8*3840);
  for(unsigned i=0;i<960;i++){
   int l=(int16_t)(m->buffer[at+4*i]|m->buffer[at+4*i+1]<<8),r=(int16_t)(m->buffer[at+4*i+2]|m->buffer[at+4*i+3]<<8);
-  unsigned a=l<0?-l:l;CHECK(l==r && a<=1036);if(a>max_peak)max_peak=a;nz|=a!=0;
+  unsigned a=l<0?-l:l;CHECK(l==r && a<=mi8_pcm_session_limit());if(a>max_peak)max_peak=a;nz|=a!=0;
  }
  session_model_submit(nz);
  if(nz){struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);CHECK(a.state==MI8_AMP_LIVE&&!a.request&&!a.reason&&!muted());outputs++;}
@@ -100,7 +101,7 @@ int main(int argc,char **argv){
   reset_ring();outputs=max_peak=ticks=0;stop_requested=false;
   struct peer p;struct play_peer m;prepare(&p,&m);active=&p;m.step=16;
   control_prepared=true;CHECK(session_model_prepare(mode==5?1:mode==6?2:mode==12?3:mode==14?4:0)==(mode!=14));p.now=session_model_now();stream_start=p.now;
-  if(mode==15 || mode==16)session_test_total(mode==15?59000001:59000000);
+  if(mode==15 || mode==16){session_test_wakes(mode==15?200:199);session_model_prior_wakes(mode==15?200:199);}
   if(threaded){controller_delay=mode==0?0:mode==1?50000:500000;controller_clock=p.now;controller_quit=0;CHECK(!pthread_create(&controller_thread,NULL,controller_main,NULL));}
   p.extension=&m;p.extra_response=play_reply;p.reply=p.header8=p.afe_mode=true;amp_observe=observe;amp_cache_observe=NULL;
   mi8_audio_set_ring(true);mi8_audio_set_session(&session_ops);
@@ -109,19 +110,20 @@ int main(int argc,char **argv){
   bool ok=mi8_audio_run_play(&c,play_alive,&p,&pins,&memory,p.now+(uint64_t)(stream_seconds+10)*1000000,17,play_fatal);
   (void)join_control();m.reset=true;(void)mi8_audio_finish_play(true);
   struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
-  CHECK(a.done && stop_requested && r.accepted==r.consumed+r.discarded&&!r.queued && max_peak<=1036);
+  CHECK(a.done && stop_requested && r.accepted==r.consumed+r.discarded&&!r.queued && max_peak<=mi8_pcm_session_limit());
   fprintf(stderr,"debug mode=%u wakes=%u mutes=%u reason=%u clean=%u live=%llu\n",mode,a.wakes,a.mutes,a.reason,a.clean,(unsigned long long)a.live_total);
   if(threaded || (mode!=5 && mode!=6 && mode!=10 && mode!=11 && mode!=12 && mode!=13 && mode!=14)){if(!ok)fprintf(stderr,"mode %u %s\n",mode,m.log);CHECK(ok&&m.normal==stream_seconds*50);}
   if(!threaded){
-  if(mode==0 || mode==9)CHECK(a.wakes>=3&&a.wakes<=4&&a.live_total<=60000000);
+  if(mode==0 || mode==9)CHECK(a.wakes==(stream_seconds==300?3u:1u)&&a.live_total>(uint64_t)(stream_seconds-10)*1000000);
   if(mode==1 || mode==4)CHECK(a.wakes>=3 && a.checks==a.wakes-1 && a.checks_ok==a.checks);
-  if(mode==2)CHECK(!outputs&&a.wakes==20);
+  if(mode==2)CHECK(!outputs&&a.wakes>20&&a.wakes<200);
   if(mode==3)CHECK(a.wakes==1&&a.mutes==1);
   if(mode==5)CHECK(a.reason==2&&a.checks>a.checks_ok);
   if(mode==6)CHECK(a.reason==4&&!outputs);
-  if(mode==7)CHECK(a.wakes<=20&&a.live_total>59000000 && a.live_total<=60000000);
-  if(mode==8 || mode==15)CHECK(!a.wakes&&!outputs);
-  if(mode==16)CHECK(a.wakes==1&&a.live_total<=60000000);
+  if(mode==7)CHECK(a.wakes>20&&a.wakes<200&&a.live_total>60000000);
+  if(mode==8)CHECK(!a.wakes&&!outputs);
+  if(mode==15)CHECK(a.wakes==200&&!outputs);
+  if(mode==16)CHECK(a.wakes==200&&outputs>0);
   if(mode==10 || mode==11)CHECK(!ok&&outputs>0&&m.normal<6000);
   if(mode==12)CHECK(!ok&&a.reason==4&&outputs>0);
   if(mode==13)CHECK(!ok&&!outputs&&a.done);
