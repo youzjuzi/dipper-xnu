@@ -63,3 +63,7 @@ python3 tools/prepare/patchtool.py scan
 ## 音频工作线程栈预算
 
 `python3 tools/tests/check-mi8-audio-stack.py <OBJROOT>/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT --json <报告路径>` 反汇编实际链接的 `mi8_*.o`，合计保存寄存器和局部栈分配，以直接调用、尾调用及工具内注明的原生 ops 回调保守并集建图。单帧超过 1 KiB 报警，工作线程最深路径超过 8 KiB 失败；动态 SP、调用环或未审查的间接调用拒绝。SMEM 查找需保留独立快照，列为有理由的单帧例外，其空间仍计入路径。JSON 列出对象摘要、最深路径、人工补边和外部 XNU 入口；余下 8 KiB 留给内核服务、抢占和中断，工具结果不等于整个内核的形式化栈界证明。必须确认对象来自当前源码和交付内核。
+
+## 有界可听片段主机测试
+
+`python3 tools/tests/test-mi8-audio-clip.py --firmware <固件> --reference <离线参考文本> --metadata <摘要JSON>` 链接实际 PCM、GLINK/APR 和 TAS 驱动，验证处理链、触发、150 周期窗口、错误守卫、预热/关断延迟、ring 守恒和完整 worker 出口；`--sanitize` 启用 ASan/UBSan，`--tree` 指定干净准备树。ring 并发继续由 `test-mi8-audio-ring.py --tsan` 验证。栈检查默认覆盖原 worker 与 clip worker；数据对象没有函数，其他线程的超 1 KiB 帧也列为警告，不混算进音频线程路径。

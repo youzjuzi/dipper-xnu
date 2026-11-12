@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 import subprocess
 import tempfile
+import runpy
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -72,7 +73,8 @@ int main(void){
     # Exercise the real lookup and step dispatcher too: nested lookups must not
     # share scratch state, and every new step9 exit must release its AOP vote.
     lookup = source[source.index('static uint32_t\nitem_find('):source.index("/* Linux's qcom_smem_alloc_private()", source.index('static uint32_t\nitem_find('))]
-    dispatcher = source[source.index('static void\nsteps_from_five('):source.index('/* ---- boot-arg mi8rp_wlan', source.index('static void\nsteps_from_five('))]
+    body = runpy.run_path(str(ROOT / 'tools/tests/test-mi8-audio-smmu.py'))['body']
+    dispatcher = body(source, 'static void\nsteps_from_five(')
     code = code.replace("item_find(", "helper_item_find(")
     code += r'''
 #define MAX_ITEMS 192

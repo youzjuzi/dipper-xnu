@@ -28,10 +28,13 @@ def names(obj, text):
 # are NULL in the APR raw-channel configuration; pump's receive is included.
 TRANSPORT = names('mi8_rproc', 'audio_item svc_read svc_write32 audio_ring svc_sleep_us svc_now_us svc_log')
 AMP = names('mi8_tas2557', 'mi8_tas2557_held mi8_tas2557_tick mi8_tas2557_stop mi8_tas2557_audible mi8_tas2557_tone_count')
+# The separate clip table adds warmup/health and the mutex-protected cdev mute
+# accessor. The latter is an external XNU boundary, listed explicitly below.
+CLIP = names('mi8_tas2557', 'mi8_tas2557_clip_warmup mi8_tas2557_clip_audible mi8_tas2557_clip_clean')
 CALLBACKS = {
     'mi8_glink': TRANSPORT + names('mi8_audio', 'receive'),
-    'mi8_audio': names('mi8_rproc', 'audio_alive audio_fatal svc_now_us svc_sleep_us svc_log') + names('mi8_audio', 'native_pin_read native_pin_write') + AMP,
-    'mi8_audio_pcm': names('mi8_audio', 'pcm_now pcm_sleep pcm_exchange pcm_send pcm_poll pcm_tell pcm_begin pcm_cache pcm_fault pcm_clear pcm_end') + AMP,
+    'mi8_audio': names('mi8_rproc', 'audio_alive audio_fatal svc_now_us svc_sleep_us svc_log') + names('mi8_audio', 'native_pin_read native_pin_write') + AMP + CLIP,
+    'mi8_audio_pcm': names('mi8_audio', 'pcm_now pcm_sleep pcm_exchange pcm_send pcm_poll pcm_tell pcm_begin pcm_cache pcm_fault pcm_clear pcm_end') + AMP + CLIP,
     'mi8_audio_smmu': names('mi8_audio_smmu', 'native_read native_write native_wait native_play_log native_allocate native_release native_cache native_table_read'),
     'mi8_tas2557': names('mi8_tas2557', 'native_read native_write native_now native_delay native_log'),
 }
@@ -79,7 +82,7 @@ def main():
         hashes[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
         text = subprocess.check_output(['llvm-objdump', '--macho', '--disassemble', '--no-show-raw-insn', str(p)], text=True)
         data.update(parse(text, p.stem))
-    roots = args.root or ['mi8_rproc:steps_from_five']
+    roots = args.root or ['mi8_rproc:steps_from_five', 'mi8_rproc:steps_audio_clip']
     graph, external = {}, {}
     for key, row in data.items():
         obj = key.split(':')[0]
@@ -95,6 +98,8 @@ def main():
                 external[key].add(target)
         if row['indirect']:
             graph[key].update(CALLBACKS.get(obj, []) + EXTRA.get(key, []))
+            if obj == 'mi8_audio_pcm':
+                external[key].add('redwood_audio_muted (clip ops)')
     seen, paths, memo = set(), {}, {}
 
     def visit(key, chain=()):
@@ -113,7 +118,7 @@ def main():
 
     for root in roots:
         paths[root] = visit(root)
-    warnings = {k: dict(bytes=data[k]['frame'], reason=ALLOW.get(k, 'not allowlisted')) for k in sorted(seen) if data[k]['frame'] > 1024}
+    warnings = {k: dict(bytes=data[k]['frame'], reason=ALLOW.get(k, 'not allowlisted')) for k in sorted(data) if data[k]['frame'] > 1024}
     for key, row in warnings.items():
         print('FRAME WARNING', key, row)
     for root, (size, path) in paths.items():

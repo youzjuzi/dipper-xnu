@@ -125,10 +125,11 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-12，接手时重新核对）
 
-- 分支 `feat/audio-sink`，基线 `4bb08c9`，未 push。接手并保留已在设备验证的 static PCM scratch 修复，补充音频线程栈压缩与主机预算工具。
-- 本轮源码改动只涉及 `mi8_rproc.c`、`mi8_audio.c`、`mi8_audio_pcm.c`；SMEM 快照保留私有存储，没有改变锁持有方式或音频事务。新压缩设备回归 Pending。
-- 证据在 `work/runs/20261112-audio-clip-01/`；既有设备证据在 `work/runs/20261112-audio-ring-01/device-19/` 和 `work/runs/20261112-audio-ring-02/`，保持不变。
-- 构建继续复用 fbscale 对象目录，显式传 `SOURCE_DIR`；交付前核对对象依赖、源码摘要与实际链接内核。下一步实现一次有界 iOS 可听片段并做主机验证；不操作设备。
+- 分支 `feat/audio-sink`，基线 `4bb08c9`；栈修复提交 `0d5ee49`，本提交增加 `audio=4`，未 push。已接手并保留 P20 验证的 static PCM scratch；设备实际结论以原始运行记录为准。
+- 源码已导出；新增 clip worker 与 PCM 路径保持原诊断/零流 worker，沿用下载后软件关断、健康验证、解除静音和收尾事务。单次窗口最多 150 周期/3 秒、峰值 1036；muted/欠载输出零。SMEM 快照保留私有存储，`wsmmu_lock` 持有方式不变。
+- 主机构建、干净重放、全量回归、ASan/UBSan/TSan 和原生对象栈预算通过；工具的 mi8 子图预算不等于完整 XNU 服务/中断栈证明。证据、输入摘要和最终 P21 见 `work/runs/20261112-audio-clip-01/RESULTS.md`。
+- 构建复用 `work/runs/20261109-fbscale-01/kernel`，显式传 `SOURCE_DIR` 并核对对象依赖和链接后的栈帧。P21 其余输入硬链接 P20，固件已从 APFS 读出核对；初始候选单独保留，不交付。
+- `audio=4` 设备 Pending；下一步由持有人验证触发声音、窗口/限幅、静音关断、6000 周期、守恒与无 panic。本轮不操作设备；无线并存、长期/热安全及 idle/wake 仍未验收。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

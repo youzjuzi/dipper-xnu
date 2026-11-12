@@ -23,7 +23,8 @@ def main():
     # Preserve the actual entry points, not a model of the cdev's locking.
     pieces = '\n'.join(body(audio, signature) for signature in [
         'static void\naudio_play(', 'void\nredwood_audio_set_sink(',
-        'bool\nredwood_audio_claim_sink(', 'bool\nredwood_audio_volume('])
+        'bool\nredwood_audio_claim_sink(', 'bool\nredwood_audio_volume(', 'bool\nredwood_audio_muted('])
+    assert 'volume_below' not in body(audio, 'bool\nredwood_audio_muted(')
     final = body(loader, 'static void\nloader_audio_append(') + '\n' + body(loader, 'static void\nloader_audio_summary(')
     exit_path = body(loader, 'void\nloader_return(')
     assert exit_path.index('psci_smp_stop_others') < exit_path.index('loader_log_linearize')
@@ -47,7 +48,7 @@ def main():
         (d / 'sink-host.h').write_text('/* Host declarations are provided by the harness. */\n')
         code = (ROOT / 'tools/tests/mi8-audio-sink.c').read_text()
         rproc = (x / 'bsd/dev/mi8_rproc.c').read_text()
-        gate = body(rproc, 'if (audio==3)') + '\n' + body(rproc, 'if (audio == 2 && shared_step == 0)')
+        gate = body(rproc, 'if (audio==4)') + '\n' + body(rproc, 'if (audio==3)') + '\n' + body(rproc, 'if (audio == 2 && shared_step == 0)')
         code = code.replace('/* @ring_gate */', gate)
         code = code.replace('/* @cdev */', pieces).replace('/* @sink */', source).replace('/* @loader */', final)
         (d / 'count.c').write_text(code)

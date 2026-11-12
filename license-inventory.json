@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "a90a85ac880b80d2c6d8282d576af31276e4003ad04092b094553b02a7d00ab2"
+      "sha256": "5ba1ead6dada4cc593783c1999266ae750cd141735569c6982ffcb46b1362346"
     },
     {
       "component": "xnu-mi8",
@@ -712,7 +712,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 Linux/Android apr/q6core/q6afe 协议与 SDM845 设备树寄存器字段，未复制驱动实现",
-      "sha256": "30de8caf6fa606f2721b8d0c8d39272bd5184159b9ef9cc151ca20feab32f4b8"
+      "sha256": "3f81eec94890d8ff2c22bb2fc3b162b60af15595186baac57c925dc9dfc2a04d"
     },
     {
       "component": "xnu-mi8",
@@ -720,7 +720,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 Linux/Android apr/q6core/q6afe 协议与 SDM845 设备树寄存器字段，未复制驱动实现",
-      "sha256": "d851bfe2362fb5f880b88a0eb02104570edd479ba3b4e848d08936a9a46fdcfa"
+      "sha256": "1304ed4222783d157bc0ea63a3201e4e810a35114782268255df47e1449fe50c"
     },
     {
       "component": "xnu-mi8",
@@ -744,7 +744,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "3edb2e3e4f8897ff68f780fec23383a091322ecac09b6a17067f84d0d5b0cc78"
+      "sha256": "19c1145e0a01acdd9a34673c173a00a92ed207b86b1590749e72aeca0c9063cd"
     },
     {
       "component": "xnu-mi8",
@@ -752,7 +752,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "618c3f16b170d2ce1df0f613681507b65298d36a840aa0487cdc621fe6f1dc18"
+      "sha256": "5a7fa3a1266c7cfb48828a52f7e3ada86b914111e285db79522cb54aa8e59431"
     },
     {
       "component": "xnu-mi8",
@@ -760,7 +760,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 TI tas2557 驱动的固件格式，未复制代码",
-      "sha256": "68db582b31f3cad2242cf099983436786e6c7efcd53c21ca61b55fd54aafc5e9"
+      "sha256": "9d5495b335dbfcd9f60f8dd54d0571275f8f84d6581a33ff7c261688afc0e068"
     },
     {
       "component": "xnu-mi8",
@@ -768,7 +768,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 TI tas2557 驱动的固件格式，未复制代码",
-      "sha256": "d25a527b5fd3eb5a4f6e401384029f6bd82865fa110928590b32ee4fd2ac829f"
+      "sha256": "508ba7473cdc771281ada00964264535e859f761cefcbd043371a0c3ad24cf71"
     },
     {
       "component": "xnu-mi8",
@@ -776,7 +776,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Original count-only observer; no reference driver implementation copied",
-      "sha256": "a7c558a6f7e1ea38e0a40d85d8f36e753f9b10a51bdf9eb39432d0baba5207be"
+      "sha256": "f9bf1c6a97d4952e9fcc81ae6dc9267f801d846444e786fd1a4b61a218a5bada"
     },
     {
       "component": "xnu-mi8",
@@ -792,7 +792,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices and HackiOS root LICENSE continue to apply",
-      "sha256": "1ffa93309122674ff54c497d1ad547b5b28d51bd16e36725f2287ea307712501"
+      "sha256": "60442147f4f3225c31799ae29bba7b6fade957565c84e7e6c6d2b177c984f9b2"
     },
     {
       "component": "xnu-mi8",
@@ -800,7 +800,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices and HackiOS root LICENSE continue to apply",
-      "sha256": "5bffd1aad09bbe25ce56062fdf4a0c118deaa7d419939b59236da02a41d3a5a3"
+      "sha256": "921a42db4274d0948b485ad31c983bdef9ad77c759a9b87eb7cbbadc4d7cd65a"
     },
     {
       "component": "xnu-mi8",
