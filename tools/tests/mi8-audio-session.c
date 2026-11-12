@@ -8,6 +8,7 @@ void mi8_tas2557_prepare_tone(uint64_t);
 #include "play-fixture.c"
 #include "mi8_audio_ring.c"
 extern void session_guard_tests(void);
+extern void session_model_fast_checks(void);
 extern void session_test_wakes(unsigned);
 extern void session_model_prior_wakes(unsigned);
 extern void session_model_submit(bool);
@@ -52,7 +53,7 @@ void mi8_tas2557_prepare(uint64_t n){(void)n;CHECK(false);}
 void mi8_tas2557_prepare_tone(uint64_t n){(void)n;CHECK(false);}
 void mi8_tas_session_start(uint64_t end){CHECK(end>active->now);control_prepared=true;CHECK(session_model_prepare(0));active->now=session_model_now();stream_start=active->now;}
 bool mi8_tas_session_join(void){return join_control();}
-static void reset_ring(void){memset(ring_samples,0,sizeof(ring_samples));memset(&ring_counts,0,sizeof(ring_counts));ring_head=ring_tail=ring_ready=ring_gate=ring_started=0;mi8_audio_ring_ready();}
+static void reset_ring(void){memset(ring_samples,0,sizeof(ring_samples));memset(&ring_counts,0,sizeof(ring_counts));ring_head=ring_tail=ring_ready=ring_gate=ring_started=0;mi8_audio_ring_ready();write_resumes=0;write_seen=false;last_write_us=write_generation=live_generation=live_gap_us=0;}
 static void ring_feed(void){
  /* Deterministic scheduler: run one control turn at the simulated time. The
   * thread test separately exercises actual concurrent atomic publications. */
@@ -70,12 +71,14 @@ static void ring_feed(void){
  }
  int16_t data[2048];uint64_t elapsed=active->now-stream_start;
  int value=32767;
- if(mode==1 || mode==4 || mode==5 || mode==7)value=(elapsed%((mode==7)?4500000:15000000))<800000?32767:0;
+ if(mode==1 || mode==4 || mode==5 || mode==7)value=(elapsed%((mode==7)?4500000:40000000))<800000?32767:0;
  if(mode==8)value=255;
  if(mode==9)value=256;
+ if(mode==17 || mode==18)value=0;
+ if(mode==18 && elapsed%40000000>500000)return;
  if(mode==3 && elapsed>1000000)return;
  for(unsigned i=0;i<2048;i++)data[i]=(int16_t)value;
- (void)mi8_audio_ring_put(data,1024);
+ mi8_audio_ring_write_time(active->now);(void)mi8_audio_ring_put(data,1024);
 }
 static void observe(struct peer *p,const uint8_t *q){
  struct play_peer *m=p->extension;uint32_t op=rd(q+16);
@@ -90,14 +93,14 @@ static void observe(struct peer *p,const uint8_t *q){
  if(nz){struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);CHECK(a.state==MI8_AMP_LIVE&&!a.request&&!a.reason&&!muted());outputs++;}
  if(mode==10 && outputs==20)m->fatal=true;
  if(mode==11 && outputs==20)m->ordinary_fault=true;
- if(mode==13 && m->writes==5)m->fatal=true;
+ if(mode==13 && m->writes==2)m->fatal=true;
 }
 static uint64_t audio_return_deadline,audio_lock_max_us,wifi_lock_wait_max_us;
 static bool audio_session_dependency(void){return true;} /* Actual dependency policy tested separately. */
 /* @session_worker */
 int main(int argc,char **argv){
- CHECK(argc==3);session_guard_tests();threaded=getenv("SESSION_THREADS")!=NULL;if(getenv("SESSION_LONG"))stream_seconds=300;CHECK(mi8_pcm_session_seconds(stream_seconds));mi8_tas_session_seconds(stream_seconds);session_model_load(argv[1],argv[2]);
- for(mode=0;mode<=(stream_seconds==300?0u:threaded?2u:16u);mode++){
+ CHECK(argc==3);session_guard_tests();threaded=getenv("SESSION_THREADS")!=NULL;if(getenv("SESSION_LONG"))stream_seconds=300;CHECK(mi8_pcm_session_seconds(stream_seconds));mi8_tas_session_seconds(stream_seconds);session_model_load(argv[1],argv[2]);session_model_fast_checks();
+ for(mode=0;mode<=(stream_seconds==300?0u:threaded?2u:18u);mode++){
   reset_ring();outputs=max_peak=ticks=0;stop_requested=false;
   struct peer p;struct play_peer m;prepare(&p,&m);active=&p;m.step=16;
   control_prepared=true;CHECK(session_model_prepare(mode==5?1:mode==6?2:mode==12?3:mode==14?4:0)==(mode!=14));p.now=session_model_now();stream_start=p.now;
@@ -116,13 +119,15 @@ int main(int argc,char **argv){
   if(!threaded){
   if(mode==0)CHECK(strstr(m.log,"play:")&&strstr(m.log,"asm stream close errno=0"));
   if(mode==0 || mode==9)CHECK(a.wakes==(stream_seconds==300?3u:1u)&&a.live_total>(uint64_t)(stream_seconds-10)*1000000);
-  if(mode==1 || mode==4)CHECK(a.wakes>=3 && a.checks==a.wakes-1 && a.checks_ok==a.checks);
-  if(mode==2)CHECK(!outputs&&a.wakes>=10&&a.wakes<20);
+  if(mode==1 || mode==4)CHECK(a.wakes>=3 && a.checks==a.mutes && a.checks_ok==a.checks);
+  if(mode==2)CHECK(!outputs&&a.wakes==5);
   if(mode==3)CHECK(a.wakes==1&&a.mutes==1);
   if(mode==5)CHECK(a.reason==2&&a.checks>a.checks_ok);
   if(mode==6)CHECK(a.reason==4&&!outputs);
   if(mode==7)CHECK(a.wakes==1&&a.live_total>110000000);
-  if(mode==8)CHECK(!a.wakes&&!outputs);
+  if(mode==8)CHECK(a.wakes==1&&outputs);
+  if(mode==17)CHECK(a.wakes==1&&a.idle_wakes==1&&!outputs);
+  if(mode==18)CHECK(a.wakes==3&&a.idle_wakes==3&&!outputs);
   if(mode==15)CHECK(a.wakes==200&&!outputs);
   if(mode==16)CHECK(a.wakes==200&&outputs>0);
   if(mode==10 || mode==11)CHECK(!ok&&outputs>0&&m.normal<6000);

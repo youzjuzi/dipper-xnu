@@ -67,7 +67,7 @@ def main():
         actual=actual.replace('now_us(', 'worker_now_us(').replace('say(', 'worker_say(').replace('audio_session_ops','session_ops')
         (tmp/'test.c').write_text((ROOT/'tools/tests/mi8-audio-session.c').read_text().replace('/* @session_worker */',actual))
         (tmp/'pcm.c').write_text((dev/'mi8_audio_pcm.c').read_text()+(ROOT/'tools/tests/mi8-audio-session-guards.inc').read_text())
-        (tmp/'tas.c').write_text((dev/'mi8_tas2557.c').read_text()+'\nvoid session_test_reset(void){memset(&session,0,sizeof(session));}\nvoid session_test_wakes(unsigned wakes){SP(session.wakes,wakes);}\n')
+        (tmp/'tas.c').write_text((dev/'mi8_tas2557.c').read_text()+'\nvoid session_test_reset(void){memset(&session,0,sizeof(session));}\nvoid session_test_invalidate(void){session_invalidate();}\nvoid session_test_wakes(unsigned wakes){SP(session.wakes,wakes);}\n')
         exe = tmp/'clip'
         subprocess.run(['cc', *flags, '-I'+str(tmp), str(tmp/'test.c'), str(tmp/'model.c'), str(tmp/'pcm.c'), str(tmp/'tas.c'), str(dev/'mi8_glink.c'), str(dev/'mi8_audio.c'), '-o', str(exe)], check=True)
         subprocess.run([str(exe), str(a.firmware), str(ref)], check=True, env=env)

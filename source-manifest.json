@@ -30,7 +30,7 @@
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.c",
-        "sha256": "fdb3be248cc757f59f888afddf9a2aabdf674a78b51999664416797167fccf0a",
+        "sha256": "451020d3815ec50912cf978718d49d4ef849ea04154f2a4d3557ea9948c2fe69",
         "mode": "0o664"
       },
       {
@@ -40,12 +40,12 @@
       },
       {
         "path": "bsd/dev/mi8_audio_ring.c",
-        "sha256": "553c07ff047f7e87eafa7797338580d32d5c7a5b320e62c5cb9736f18d29e5c4",
+        "sha256": "d1afe8de159f6c7c51da0b22079423744752d537daaea35da8783e573a058e66",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_ring.h",
-        "sha256": "c01a5269ff98364ee1a3e9fa5161a2a2ba1695b370c4fd6afec6a998c9515b5a",
+        "sha256": "02e1e89cc2e0f1ca6f9f681eec24cb323dd8f4a040bca1855a9e06b849e1a440",
         "mode": "0o664"
       },
       {
@@ -110,12 +110,12 @@
       },
       {
         "path": "bsd/dev/mi8_tas2557.c",
-        "sha256": "d79a7a4d26c97cc18c7fc2cdd18e20ed255eb07f907e78337fc31e25c35057e0",
+        "sha256": "289a608d3e672c44096468b43fa29c23386cda0dc04aa4d180f8aeaf12f12567",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_tas2557.h",
-        "sha256": "5908f26f78d50c9330429945c04c648ef53faaeefad03daa4572faacadaa3cfe",
+        "sha256": "70f6270b100046d98f5283af6664f2a4101a51dd4daaed8c5ea46ea6d160bc2d",
         "mode": "0o664"
       },
       {

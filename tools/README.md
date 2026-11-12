@@ -82,4 +82,6 @@ python3 tools/prepare/patchtool.py scan
 
 会话回归支持 `test-mi8-audio-session.py --level -30|-24|-20|-12|-6|0`（无效值用于回退测试）及 `--long` 300 秒模拟，覆盖独立提交守卫和 LIVE 欠载统计；计数 sink 回归支持 `--tsan`，覆盖音频写入与 LIVE 世代发布并发、源削顶与同窗 HAL 间隔、实际 worker 滚动尾日志及 loader 最终 32 KiB。
 
-`test-mi8-audio-session-log.py [--tree <准备树>] [--sanitize]` 覆盖真实 audio=5 初始化标志和 PCM→rproc→loader 日志函数链，复现旧 20 行额度在 195 秒耗尽，并验证 300 秒/200 次 wake 后最终 32 KiB 留有 play、asm close、摘要。会话测试独立核对六档系数、所有 mono 输入、499/500 零周期、WARMING 与首次 LIVE 裁剪及守恒；ring 模型与 TSan 包括消费者裁剪和生产者并发。
+`test-mi8-audio-session-log.py [--tree <准备树>] [--sanitize]` 覆盖真实 audio=5 初始化标志和 PCM→rproc→loader 日志函数链，复现旧 20 行额度在 195 秒耗尽，并验证 300 秒/200 次 wake 后最终 32 KiB 留有 play、asm close、摘要。会话测试独立核对六档系数、所有 mono 输入、499/500（写入唤醒无声音）与1499/1500（其他静默）零周期、WARMING 与首次 LIVE 裁剪及守恒；ring 模型与 TSan 包括消费者裁剪和生产者并发。
+
+会话回归另验证OFF_READY只读Y预校验、预校验wake的I²C事务上限与零系数读取、缓存失效后补校验、200ms健康重试上界及告警立即锁存；模拟HAL零写入唤醒、idle_wakes、10/30秒静默与2400帧渐入。快速唤醒模型采用现有3µs bit-bang半周期、无额外拉伸/MMIO开销、2ms轮询，正常路径约29.6ms；不能代替设备耗时。
