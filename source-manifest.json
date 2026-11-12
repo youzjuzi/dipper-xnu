@@ -5,7 +5,7 @@
     "files": [
       {
         "path": "bsd/conf/files",
-        "sha256": "2e8f0cf484b4cef81d0e54a26648828c473093a96ed6a919ecd0dc828b74a98b",
+        "sha256": "8f8680c9b16a65e438fc21c7f1299b65b9522330932a8a549a4ad9bcc4fbef0f",
         "mode": "0o664"
       },
       {
@@ -36,6 +36,16 @@
       {
         "path": "bsd/dev/mi8_audio_pcm.h",
         "sha256": "3bc0205afe8836b91474e823cddba1f3a19841010971c3e04eb284a5b7fb73a8",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_audio_sink.c",
+        "sha256": "54716f43808c4f0840f93d611bb302fe27d4a9f0227eb093079a0b85e9dc0b65",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/dev/mi8_audio_sink.h",
+        "sha256": "2a9ff3db9fd41af9dd1d9e6b511ff4f1cb795f6702deb9a256bd077c6c75b232",
         "mode": "0o664"
       },
       {
@@ -134,6 +144,11 @@
         "mode": "0o664"
       },
       {
+        "path": "bsd/dev/redwood_audio.c",
+        "sha256": "1ffa93309122674ff54c497d1ad547b5b28d51bd16e36725f2287ea307712501",
+        "mode": "0o664"
+      },
+      {
         "path": "bsd/dev/redwood_battery.c",
         "sha256": "1afe42ea3773546dd691c3cde939a86a2681b8d6c8db7352d73dd0cb4a404ccb",
         "mode": "0o664"
@@ -189,6 +204,11 @@
         "mode": "0o664"
       },
       {
+        "path": "bsd/sys/redwood_audio.h",
+        "sha256": "5bffd1aad09bbe25ce56062fdf4a0c118deaa7d419939b59236da02a41d3a5a3",
+        "mode": "0o664"
+      },
+      {
         "path": "bsd/sys/redwood_input.h",
         "sha256": "49f16603f0b1ee9cd256c901d464d097395ac0c9a9733aa15edddc8b7cfaf5ee",
         "mode": "0o664"
@@ -240,7 +260,7 @@
       },
       {
         "path": "osfmk/arm64/loader_return.c",
-        "sha256": "0c4afb6079abba3df73ef8cb38f85a28d33a75447fcc06ba6e362a92d103370c",
+        "sha256": "d5d42fbdbb6602420d5e49a336b969ce5fd5b327ec9594b634494b8d5e6700c7",
         "mode": "0o664"
       },
       {

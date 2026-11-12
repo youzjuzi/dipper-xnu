@@ -1,8 +1,8 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..109bf18734bd5a10f98f8bbdf11ecfe37d617b93 100644
+index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..bdfd00fe370137dd654ec2104a0a1b0903047f1e 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -113,6 +113,18 @@ bsd/dev/redwood_input.c		standard
+@@ -113,6 +113,19 @@ bsd/dev/redwood_input.c		standard
  bsd/dev/redwood_virtio_input.c	standard
  bsd/dev/redwood_goodix.c	standard
  bsd/dev/redwood_buttons.c	standard
@@ -12,6 +12,7 @@ index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..109bf18734bd5a10f98f8bbdf11ecfe3
 +bsd/dev/mi8_rproc.c	standard
 +bsd/dev/mi8_glink.c	standard
 +bsd/dev/mi8_audio.c	standard
++bsd/dev/mi8_audio_sink.c	standard
 +bsd/dev/mi8_audio_pcm.c	standard
 +bsd/dev/mi8_tas2557.c	standard
 +bsd/dev/mi8_audio_smmu.c	standard
@@ -6897,6 +6898,214 @@ index 0000000000000000000000000000000000000000..d36e5aa6a1505a0c4dffdab36e40e3b9
 +/* Called after AFE stop/clock off/pin restore; pass true only after PAS reset.
 + * Without confirmed close+unmap or PAS success, leaves the mapping untouched. */
 +bool mi8_pcm_finish(struct mi8_pcm_state *, bool pas_shutdown);
++#endif
+diff --git a/bsd/dev/mi8_audio_sink.c b/bsd/dev/mi8_audio_sink.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..e2c6d3a04760c808e2fe37079ce4c87b37ac529c
+--- /dev/null
++++ b/bsd/dev/mi8_audio_sink.c
+@@ -0,0 +1,189 @@
++/* SPDX-License-Identifier: MIT */
++/* Count-only observer of iOS PCM. No playback buffers or hardware operations. */
++#ifdef MI8_AUDIO_SINK_HOST_TEST
++#include "sink-host.h"
++#else
++#include <sys/redwood_audio.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++extern kern_return_t thread_terminate(thread_t thread);
++#endif
++#include "mi8_audio_sink.h"
++
++/* cdev writes are serialized by audio_lock and offer at most 1024 frames.
++ * Every shared scalar is atomic, including the sequence: a bounded reader
++ * remains safe if a writer is parked halfway through publishing at panic. */
++#define PCM_FIELDS(F) F(calls) F(frames) F(min_frames) F(max_frames) F(zero) F(nonzero) \
++    F(peak_l) F(peak_r) F(first_us) F(last_us) F(max_gap_us) F(invalid)
++#define VOL_FIELDS(F) F(generation) F(below) F(muted) F(changes) F(sample_us) F(seen)
++#define FIELD(n) uint64_t n;
++struct pcm_counts { PCM_FIELDS(FIELD) };
++struct volume_counts { VOL_FIELDS(FIELD) };
++#undef FIELD
++static struct pcm_counts pcm;
++static struct volume_counts volume;
++static uint64_t pcm_sequence, volume_sequence;
++static unsigned installed, stopping;
++#define LOAD(p) __atomic_load_n((p), __ATOMIC_SEQ_CST)
++#define STORE(p,v) __atomic_store_n((p), (v), __ATOMIC_SEQ_CST)
++_Static_assert(__atomic_always_lock_free(8, 0), "count snapshots require lock-free 64-bit loads");
++
++static uint64_t sink_now(void)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000;
++}
++
++static uint32_t count_sink(const int16_t *frames, uint32_t count)
++{
++	if (LOAD(&stopping)) return count;
++	uint64_t sequence = LOAD(&pcm_sequence);
++	STORE(&pcm_sequence, sequence + 1);
++	if (!frames || !count || count > 1024) {
++		STORE(&pcm.invalid, LOAD(&pcm.invalid) + 1);
++		STORE(&pcm_sequence, sequence + 2);
++		return 0;
++	}
++	uint64_t zero = 0, left = 0, right = 0, now = sink_now();
++	for (uint32_t i = 0; i < count; i++) {
++		int32_t l = frames[2*i], r = frames[2*i+1];
++		uint32_t a = (uint32_t)(l < 0 ? -l : l), b = (uint32_t)(r < 0 ? -r : r);
++		if (a > left) left = a;
++		if (b > right) right = b;
++		zero += !a && !b;
++	}
++	uint64_t calls = LOAD(&pcm.calls), last = LOAD(&pcm.last_us);
++	if (!calls) { STORE(&pcm.first_us, now); STORE(&pcm.min_frames, count); }
++	else if (now >= last && now - last > LOAD(&pcm.max_gap_us)) STORE(&pcm.max_gap_us, now - last);
++	if (count < LOAD(&pcm.min_frames)) STORE(&pcm.min_frames, count);
++	if (count > LOAD(&pcm.max_frames)) STORE(&pcm.max_frames, count);
++	if (left > LOAD(&pcm.peak_l)) STORE(&pcm.peak_l, left);
++	if (right > LOAD(&pcm.peak_r)) STORE(&pcm.peak_r, right);
++	STORE(&pcm.calls, calls + 1);
++	STORE(&pcm.frames, LOAD(&pcm.frames) + count);
++	STORE(&pcm.zero, LOAD(&pcm.zero) + zero);
++	STORE(&pcm.nonzero, LOAD(&pcm.nonzero) + count - zero);
++	STORE(&pcm.last_us, now);
++	STORE(&pcm_sequence, sequence + 2);
++	return count;
++}
++
++/* Only the statistics worker reads the volume API (which takes audio_lock).
++ * changes counts generation increments, including settings between samples;
++ * below/muted are the latest sampled values, not a history of those settings. */
++static void sample_volume(void)
++{
++	uint32_t below, generation; bool muted;
++	bool seen = redwood_audio_volume(&below, &muted, &generation);
++	uint64_t sequence = LOAD(&volume_sequence);
++	STORE(&volume_sequence, sequence + 1);
++	STORE(&volume.changes, LOAD(&volume.changes) + (uint32_t)(generation - (uint32_t)LOAD(&volume.generation)));
++	STORE(&volume.generation, generation);
++	STORE(&volume.below, below);
++	STORE(&volume.muted, muted);
++	STORE(&volume.seen, seen);
++	STORE(&volume.sample_us, sink_now());
++	STORE(&volume_sequence, sequence + 2);
++}
++
++static bool snapshot(struct pcm_counts *p, struct volume_counts *v)
++{
++	bool pcm_ok = false, volume_ok = false;
++	for (unsigned i = 0; i < 3; i++) {
++		uint64_t before = LOAD(&pcm_sequence);
++#define COPY(n) p->n = LOAD(&pcm.n);
++		PCM_FIELDS(COPY)
++#undef COPY
++		if (!(before & 1) && before == LOAD(&pcm_sequence)) { pcm_ok = true; break; }
++	}
++	for (unsigned i = 0; i < 3; i++) {
++		uint64_t before = LOAD(&volume_sequence);
++#define COPY(n) v->n = LOAD(&volume.n);
++		VOL_FIELDS(COPY)
++#undef COPY
++		if (!(before & 1) && before == LOAD(&volume_sequence)) { volume_ok = true; break; }
++	}
++	return pcm_ok && volume_ok;
++}
++
++static unsigned format_counts(char *out, unsigned capacity, const char *kind,
++    const struct pcm_counts *p, const struct volume_counts *v, bool stable)
++{
++	if (!capacity) return 0;
++#define U(n) ((unsigned long long)(n))
++	int n = snprintf(out, capacity,
++	    "audio: %s snapshot=%s calls=%llu frames=%llu chunk=%llu..%llu zero=%llu nonzero=%llu peak_l=%llu peak_r=%llu first_us=%llu last_us=%llu max_gap_us=%llu invalid=%llu volume_gen=%llu below=%llu muted=%llu volume_changes=%llu volume_seen=%llu volume_sample_us=%llu\n",
++	    kind, stable ? "stable" : "partial", U(p->calls), U(p->frames), U(p->min_frames), U(p->max_frames),
++	    U(p->zero), U(p->nonzero), U(p->peak_l), U(p->peak_r), U(p->first_us), U(p->last_us), U(p->max_gap_us),
++	    U(p->invalid), U(v->generation), U(v->below), U(v->muted), U(v->changes), U(v->seen), U(v->sample_us));
++#undef U
++	return n < 0 ? 0 : (unsigned)n < capacity ? (unsigned)n : capacity - 1;
++}
++
++static bool report_changed(struct pcm_counts *previous, struct volume_counts *last_volume, unsigned *lines)
++{
++	struct pcm_counts p; struct volume_counts v;
++	if (*lines >= 58 || !snapshot(&p, &v)) return false;
++	if (p.calls == previous->calls && p.invalid == previous->invalid && v.changes == last_volume->changes) return false;
++	char line[768];
++	format_counts(line, sizeof(line), "count", &p, &v, true);
++	printf("%s", line);
++	*previous = p; *last_volume = v; (*lines)++;
++	return true;
++}
++
++static void count_thread(__unused void *parameter, __unused wait_result_t result)
++{
++	struct pcm_counts previous = {0}; struct volume_counts last_volume = {0}; unsigned lines = 0;
++	while (!LOAD(&stopping)) {
++		sample_volume();
++		delay_for_interval(5, NSEC_PER_SEC);
++		if (LOAD(&stopping)) break;
++		sample_volume();
++		(void)report_changed(&previous, &last_volume, &lines);
++	}
++	thread_terminate(current_thread());
++}
++
++unsigned mi8_audio_sink_summary(char *out, unsigned capacity)
++{
++	if (!LOAD(&installed)) return 0;
++	STORE(&stopping, 1);
++	struct pcm_counts p; struct volume_counts v;
++	bool stable = snapshot(&p, &v);
++	return format_counts(out, capacity, "final count-only", &p, &v, stable);
++}
++
++void mi8_audio_sink_init(void)
++{
++	uint32_t enabled = 0, step = 0, owner = 0;
++	DTEntry entry; const void *type; unsigned size;
++	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
++	    SecureDTGetProperty(entry, "device_type", &type, &size) != kSuccess ||
++	    size != sizeof("dipper") || memcmp(type, "dipper", sizeof("dipper"))) return;
++	if (!PE_parse_boot_argn("audio", &enabled, sizeof(enabled)) || !enabled) return;
++	if (enabled != 1) { printf("audio: refused unsupported audio value\n"); return; }
++	PE_parse_boot_argn("mi8rp_step", &step, sizeof(step));
++	if (step >= 9) { printf("audio: refused conflict with mi8rp_step>=9; diagnostic unchanged\n"); return; }
++	/* These upstream backends may install a sink asynchronously. Refuse their
++	 * explicit selectors as well as checking the actual owner under audio_lock. */
++	static const char *const owners[] = {"adsp", "adsp_step", "sound", "virtio_sound"};
++	for (unsigned i = 0; i < sizeof(owners)/sizeof(*owners); i++) {
++		owner = 0; PE_parse_boot_argn(owners[i], &owner, sizeof(owner));
++		if (owner) { printf("audio: refused another sink selector\n"); return; }
++	}
++	if (LOAD(&installed)) return;
++	if (!redwood_audio_claim_sink(count_sink)) { printf("audio: refused existing sink owner\n"); return; }
++	thread_t thread;
++	if (kernel_thread_start(count_thread, NULL, &thread) != KERN_SUCCESS) {
++		redwood_audio_set_sink("nothing (count worker unavailable)", NULL);
++		printf("audio: refused count worker unavailable\n"); return;
++	}
++	thread_deallocate(thread);
++	STORE(&installed, 1);
++	printf("audio: count-only sink installed (no DSP, no amp)\n");
++}
+diff --git a/bsd/dev/mi8_audio_sink.h b/bsd/dev/mi8_audio_sink.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d12b3e35c8638a670930020db01bd3c3fc3916e4
+--- /dev/null
++++ b/bsd/dev/mi8_audio_sink.h
+@@ -0,0 +1,7 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef MI8_AUDIO_SINK_H
++#define MI8_AUDIO_SINK_H
++void mi8_audio_sink_init(void);
++/* Bounded atomic snapshot; no locks, allocation, console or device access. */
++unsigned mi8_audio_sink_summary(char *out, unsigned capacity);
 +#endif
 diff --git a/bsd/dev/mi8_audio_smmu.c b/bsd/dev/mi8_audio_smmu.c
 new file mode 100644
@@ -22749,6 +22958,45 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..aeb538db4138a58b1a3010c90fb1da0d
  		break;
  	}
  	}
+diff --git a/bsd/dev/redwood_audio.c b/bsd/dev/redwood_audio.c
+index 70b6e7173042006be4730ca0131d8b9735e51cd5..3dfaa15ec727752d696ff36c9006efd8a7a1c86f 100644
+--- a/bsd/dev/redwood_audio.c
++++ b/bsd/dev/redwood_audio.c
+@@ -43,6 +43,8 @@
+ 
+ extern uint64_t kvtophys(vm_offset_t va);       /* pmap_paddr_t */
+ 
++#include "mi8_audio_sink.h"
++
+ #define CHUNK_FRAMES    1024            /* what one pass of write() moves */
+ #define QUIET_MS        500             /* no write for this long: the writer has stopped */
+ #define SILENCE         8               /* samples no larger than this are silence */
+@@ -218,6 +220,19 @@ redwood_audio_set_sink(const char *name, redwood_audio_sink_t sink)
+ 	printf("redwood-audio: sound goes to %s\n", name);
+ }
+ 
++bool
++redwood_audio_claim_sink(redwood_audio_sink_t sink)
++{
++	bool installed = false;
++	lck_mtx_lock(&audio_lock);
++	if (sink != NULL && audio_sink == NULL) {
++		audio_sink = sink;
++		installed = true;
++	}
++	lck_mtx_unlock(&audio_lock);
++	return installed;
++}
++
+ static int
+ audio_open(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
+ {
+@@ -351,4 +366,5 @@ redwood_audio_init(void)
+ 	redwood_haptic_init();
+ 	redwood_torch_init();
+ 	redwood_camera_init();
++	mi8_audio_sink_init();
+ }
 diff --git a/bsd/dev/redwood_battery.c b/bsd/dev/redwood_battery.c
 index 6e80b4d7cf5ad037b081f7127c0627a4d6c3edc3..4125c230c84fae50c29bfe89809abfd00fdce6bc 100644
 --- a/bsd/dev/redwood_battery.c
@@ -26014,6 +26262,19 @@ index 0000000000000000000000000000000000000000..ab5f8a1131075ce2afd6013fc2518c71
 +bool mi8_wsmmu_map(uint64_t physical, uint64_t size);                    /* identity entry for the radio (mi8rp_wsmmu=3) */
 +bool mi8_lx_irq_lines(uint32_t *first);                                 /* the GIC number of CE0's SPI, when interrupts are wanted */
 +#endif
+diff --git a/bsd/sys/redwood_audio.h b/bsd/sys/redwood_audio.h
+index eb549c3f27629257b5ff88e3954c64a868687413..0214e20f8fb1221ec1f01f813123f0e1075fba54 100644
+--- a/bsd/sys/redwood_audio.h
++++ b/bsd/sys/redwood_audio.h
+@@ -47,6 +47,8 @@ struct redwood_audio_volume {
+ typedef uint32_t (*redwood_audio_sink_t)(const int16_t *frames, uint32_t count);
+ 
+ void redwood_audio_set_sink(const char *name, redwood_audio_sink_t sink);
++/* Install only if no sink owns the device; serialized with writes and set_sink. */
++bool redwood_audio_claim_sink(redwood_audio_sink_t sink);
+ /* The volume iOS has set last (REDWOOD_AUDIO_SET_VOLUME): false if it has set none; *generation counts the settings. */
+ bool redwood_audio_volume(uint32_t *below, bool *muted, uint32_t *generation);
+ void redwood_audio_init(void);
 diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
 index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..85cb2115023d02023ad2bbb077a06a93198fa05d 100644
 --- a/bsd/sys/redwood_input.h
@@ -29370,10 +29631,10 @@ index 63ffd4b9906f83f92e3f1ae765f5681f2654dc38..3fa60bb45cee869d7853c6dad857427b
  	if (gicd_base == 0) {
  		DTEntry entry;
 diff --git a/osfmk/arm64/loader_return.c b/osfmk/arm64/loader_return.c
-index a058bb5263934bb489894fc933ba340690f590db..abdc19e459fe3fbd32bd5cd717905834c254e299 100644
+index a058bb5263934bb489894fc933ba340690f590db..82a5823e04f6e1945f999ce4e27e9ac15a5fc913 100644
 --- a/osfmk/arm64/loader_return.c
 +++ b/osfmk/arm64/loader_return.c
-@@ -45,7 +45,10 @@ extern void gic_v3_irq_cpu_shutdown(void);
+@@ -45,7 +45,11 @@ extern void gic_v3_irq_cpu_shutdown(void);
  void loader_log_putc(char c);
  void loader_return(void);
  extern void redwood_adreno_quiesce(void);
@@ -29381,10 +29642,33 @@ index a058bb5263934bb489894fc933ba340690f590db..abdc19e459fe3fbd32bd5cd717905834
 +extern void MiniIOFlipQuiesce(void);      /* iokit/Kernel/MiniIOMobileFramebuffer.cpp: the display reads the boot framebuffer again */
  extern void redwood_adreno_stop(void);
 +extern void mi8_thermgov_stop(void);
++extern unsigned mi8_audio_sink_summary(char *out, unsigned capacity);
  extern void redwood_adreno_minute(void);
  extern void redwood_wifi_stop(void);
  extern void redwood_wifi_quiesce(void);
-@@ -361,6 +364,9 @@ loader_log_append_msgbuf(void)
+@@ -358,9 +362,31 @@ loader_log_append_msgbuf(void)
+ 	}
+ }
+ 
++/* After the other CPUs are parked and all other logs are collected. This
++ * append must not take the console/loader lock: its owner may be parked. */
++static void
++loader_audio_summary(void)
++{
++	char line[768];
++	unsigned n = mi8_audio_sink_summary(line, sizeof(line));
++	if (!n) return;
++	if (n >= sizeof(line)) n = sizeof(line) - 1;
++	/* Preserve the newest diagnostics even if the earlier append filled RAM. */
++	if (loader_log_len > LOADER_LOG_SIZE - n) {
++		unsigned discard = loader_log_len - (LOADER_LOG_SIZE - n);
++		__builtin_memmove(loader_log, loader_log + discard, loader_log_len - discard);
++		loader_log_len -= discard;
++	}
++	__builtin_memcpy(loader_log + loader_log_len, line, n);
++	loader_log_len += n;
++}
++
  void
  loader_return(void)
  {
@@ -29394,7 +29678,7 @@ index a058bb5263934bb489894fc933ba340690f590db..abdc19e459fe3fbd32bd5cd717905834
  #if defined(GENERIC_PSCI_SMP)
  	/*
  	 * With more than one processor: the others switch themselves off first, and the rest of
-@@ -371,6 +377,11 @@ loader_return(void)
+@@ -371,6 +397,11 @@ loader_return(void)
  #endif
  	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
  	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
@@ -29406,7 +29690,7 @@ index a058bb5263934bb489894fc933ba340690f590db..abdc19e459fe3fbd32bd5cd717905834
  	redwood_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
  	redwood_adsp_quiesce();         /* nor the audio DSP */
  	redwood_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
-@@ -378,6 +389,7 @@ loader_return(void)
+@@ -378,6 +409,7 @@ loader_return(void)
  	redwood_torch_quiesce();        /* the flashlight off, if it was lit */
  	redwood_camera_quiesce();       /* the camera powered down, if it was powered up */
  	redwood_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
@@ -29414,6 +29698,22 @@ index a058bb5263934bb489894fc933ba340690f590db..abdc19e459fe3fbd32bd5cd717905834
  	/*
  	 * A panic's text is first collected in the panic buffer and only later
  	 * flushed to the console; if the console itself is what failed, that
+@@ -394,7 +426,14 @@ loader_return(void)
+ 			loader_log_putc(*c);
+ 		}
+ 	}
+-	loader_jump(0, 0);
++	/* Last bytes before loader_jump flushes the log to RAM. No printf or locks. */
++	{
++		uint64_t daif = __builtin_arm_rsr64("DAIF");
++		__builtin_arm_wsr("DAIFSet", DAIFSC_IRQF | DAIFSC_FIQF);
++		loader_audio_summary();
++		loader_jump(0, 0);
++		__builtin_arm_wsr64("DAIF", daif); /* Only if no loader accepted the return. */
++	}
+ }
+ 
+ /* Bring-up aid: stop here if the loader asked for checkpoint n. */
 diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
 index 0a7de6fc4be75dc19dc7626d406a251299d22fb0..2ec713e2ede72c86d0c135ab4ae99c4d5da7b0e7 100644
 --- a/osfmk/kern/sched_prim.c
