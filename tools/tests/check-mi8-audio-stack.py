@@ -86,7 +86,7 @@ def main():
         hashes[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
         text = subprocess.check_output(['llvm-objdump', '--macho', '--disassemble', '--no-show-raw-insn', str(p)], text=True)
         data.update(parse(text, p.stem))
-    roots = args.root or ['mi8_rproc:steps_from_five', 'mi8_rproc:steps_audio_clip', 'mi8_rproc:steps_audio_session', 'mi8_tas2557:session_control_thread', 'mi8_tas2557:amp_panic_callout']
+    roots = args.root or ['mi8_rproc:steps_from_five', 'mi8_rproc:steps_audio_clip', 'mi8_rproc:steps_audio_session', 'mi8_tas2557:session_control_thread', 'mi8_tas2557:amp_panic_callout', 'mi8_audio_sink:clip_thread', 'mi8_audio_sink:count_thread']
     graph, external = {}, {}
     for key, row in data.items():
         obj = key.split(':')[0]

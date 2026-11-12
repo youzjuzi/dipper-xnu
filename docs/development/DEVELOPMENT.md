@@ -129,7 +129,9 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 - Y校验在OFF_READY入口执行，正常wake用pre-verified，状态写入失效后补校验。保留startup内置2ms，额外等待20ms；只有无告警的上电标志未就绪可重读，首轮健康检查起200ms内结束。HAL首次/间隔>1s写入与峰值触发并存，50ms渐入。
 - 持有人裁定：写入唤醒后始终无非零输出10秒关断并计idle_wakes；其他静默30秒。120s/6000周期、200wakes、8零块、电平与守卫保持。阶段时长与flushed由PCM wake及摘要报告。
 - `work/runs/20261112-audio-fastwake-01/RESULTS.md` 保存厂商文件:行、状态写入审查、测试、构建与栈记录。P26-6/P26-0同内核与P25输入，仅电平不同，无线全开，loader_return_after=420 audio_seconds=300。正常预校验模型约29.6ms，失效补校验/预校验未完成或调度延迟可能超过目标。
-- P26-6/P26-0 设备已通过（见 `work/runs/20261112-audio-fastwake-01/DEVICE.md`）：唤醒约 45 ms、flushed ≤1216、dropped 0、0 dB 连续 101 秒健康通过、无 panic；开头残余破音归因铃声源削顶，不再追踪。下一步：10 分钟 0 dB 长时播放与温度记录；Wi-Fi 长浏览数据停滞需无音频对照。
+- P26-6/P26-0 设备已通过（见 `work/runs/20261112-audio-fastwake-01/DEVICE.md`）：唤醒约 45 ms、flushed ≤1216、dropped 0、0 dB 连续 101 秒健康通过、无 panic；开头残余破音归因铃声源削顶，不再追踪。
+- 本提交：`audio_test_clip`/`audio_test_seconds` 内核注入、`audio_seconds` 与单窗上限 900 s、每 30 s 温度/健康记录（`bsd/dev/mi8_audio_sink.c`、`mi8_audio_pcm.c`、`mi8_rproc.c`、`mi8_adreno.c` 只读温度访问等 9 个文件）。P27-long 设备通过：0 dB 连续 645.8 s、健康 1238 次全过、CPU 41–43 °C、无 panic（`work/runs/20261112-audio-long-01/DEVICE.md`）。测试片段在 `local/devices/mi8/audio-test/`，不进 Git。
+- 下一步：无音频的 Wi-Fi 15 分钟长浏览对照（P27-wifi，判断数据停滞是否与音频无关）；之后讨论 audio=5 默认开启与常驻（去掉流时长上限）。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

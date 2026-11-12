@@ -24,7 +24,7 @@
       "upstream_file_exists": false,
       "license": "UNRESOLVED",
       "basis": "Direct #include and execution of GPL-derived table established; no MIT relicense or combination compatibility claim",
-      "sha256": "e38cad7ac3ad71d97cd686414044862e13a3023bf9f24d26b25fad0d727b6d02"
+      "sha256": "cda3420e1e486e0162e94fe804d8a0abd8518c9355b86dd4b7f17f14aae0cff7"
     },
     {
       "component": "xnu-mi8",
@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "ef01d5ce269730fca86570ddb057c1349a840332928da2b3f48b9f30d40c7cb0"
+      "sha256": "63281dc6dfeb91f208a88de244f5185725f36584b321751e7ae12bd90ecc53d5"
     },
     {
       "component": "xnu-mi8",
@@ -744,7 +744,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "451020d3815ec50912cf978718d49d4ef849ea04154f2a4d3557ea9948c2fe69"
+      "sha256": "19a9c51b608ee5c254d7d5c94efa6306fe85fd9f841a1189054e76b4cb6cdbee"
     },
     {
       "component": "xnu-mi8",
@@ -752,7 +752,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "8ac88f55b5b75818d2dbeff072aab64e21b86f51489644e818f257e10b1f5d67"
+      "sha256": "64a3981a74832a16705580bbe469febe872e80929e50d7f1cc45840cb40979d0"
     },
     {
       "component": "xnu-mi8",
@@ -760,7 +760,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 TI tas2557 驱动的固件格式，未复制代码",
-      "sha256": "289a608d3e672c44096468b43fa29c23386cda0dc04aa4d180f8aeaf12f12567"
+      "sha256": "a7e1e7763784e19960872ce43c6ecf21ffb9129a7f74acde1f74de6201e7d5b9"
     },
     {
       "component": "xnu-mi8",
@@ -768,7 +768,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 TI tas2557 驱动的固件格式，未复制代码",
-      "sha256": "70f6270b100046d98f5283af6664f2a4101a51dd4daaed8c5ea46ea6d160bc2d"
+      "sha256": "095aa2958e259dfe1335b11bbb93dee8ab39ae73ed093068531b696687a1028f"
     },
     {
       "component": "xnu-mi8",
@@ -776,7 +776,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Original count-only observer; no reference driver implementation copied",
-      "sha256": "268a2e965e146b5545e0a669552705fe52d4123b210827a038857719461c2b2a"
+      "sha256": "66332fb87fc4aed7c64889807e461e32a40959f62257b5f8f586f0cb64fa606f"
     },
     {
       "component": "xnu-mi8",
@@ -808,7 +808,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Original bounded PCM ring implementation; no reference driver implementation copied",
-      "sha256": "d1afe8de159f6c7c51da0b22079423744752d537daaea35da8783e573a058e66"
+      "sha256": "36a3b77f5283f7f4ec17452d693804a7cc9b2898b770c7d7dfd2d51e798c5e30"
     },
     {
       "component": "xnu-mi8",
@@ -816,7 +816,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Original bounded PCM ring implementation; no reference driver implementation copied",
-      "sha256": "02e1e89cc2e0f1ca6f9f681eec24cb323dd8f4a040bca1855a9e06b849e1a440"
+      "sha256": "ad7ad74b99f5600c09a8ce1c0f262d4ee7261c9e58299c266b91addc26e40209"
     }
   ]
 }

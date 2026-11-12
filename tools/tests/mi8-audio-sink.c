@@ -60,6 +60,7 @@ static thread_t current_thread(void){return 1;}
 static void thread_terminate(thread_t t){(void)t;terminated++;}
 static void delay_for_interval(unsigned,unsigned);
 #define MI8_AUDIO_SINK_HOST_TEST
+#define CLIP_WAIT() sched_yield()
 /* @sink */
 static void delay_for_interval(unsigned n,unsigned unit){
  CHECK(!held&&n==5&&unit==NSEC_PER_SEC);ticks++;atomic_fetch_add(&clock_ns,5000000000ull);
@@ -115,6 +116,13 @@ static unsigned dispatch_gate(unsigned audio,unsigned shared_step){
 #undef say
  return audio==2?(audio_session_stream?17:shared_step):0;
 }
+static atomic_bool clip_stop;static atomic_ullong clip_hal_frames;static atomic_uint clip_rounds;
+static void *clip_hal(void *unused){(void)unused;int16_t frames[512]={0};
+ for(unsigned i=0;!atomic_load(&clip_stop)||i<1000;i++){frames[0]=frames[1]=(int16_t)(i&0x3fff);audio_play(frames,256);atomic_fetch_add(&clip_hal_frames,256);if(i>=200000)break;}
+ return NULL;}
+static void *clip_injector(void *unused){(void)unused;int16_t chunk[256]={0};
+ for(unsigned r=0;r<200;r++){while(!clip_acquire())sched_yield();for(unsigned k=0;k<5;k++)clip_put(chunk,128,(uint64_t)(r*5+k)*2667);clip_release();atomic_fetch_add(&clip_rounds,1);sched_yield();}
+ return NULL;}
 int main(void){
  volume_muted=true;CHECK(redwood_audio_muted());volume_muted=false;CHECK(!redwood_audio_muted());
  reset();mi8_audio_sink_init();CHECK(!spawned&&!audio_sink&&!installed&&!log_used);
@@ -227,6 +235,20 @@ int main(void){
  memcpy(tail,loader_log+loader_log_len-32768,32768);tail[32768]=0;
  CHECK(strstr(tail,"period=14999")&&strstr(tail,"play completed")&&strstr(tail,"asm close ok")&&strstr(tail,"cleanup=complete")&&strstr(tail,"audio: final count-only")&&strstr(tail,"LIVE HAL_max_gap_us="));
  CHECK(!strstr(tail,"period=0 time="));
+/* Long-play clip handoff: HAL writers and the clip injector race. ring_put
+  * and the producer-owned write_time state must never run concurrently
+  * (TSan), and every HAL frame is either counted or explicitly ignored. */
+ reset();audio_arg=5;mi8_audio_sink_init();CHECK(session_profile&&audio_sink==ring_sink);
+ STORE(&clip_ignored,0);STORE(&clip_owner,0);STORE(&hal_busy,0);
+ uint64_t hal_before=LOAD(&pcm.frames);atomic_store(&clip_stop,false);
+ pthread_t hal_thread,clip_thread_id;CHECK(!pthread_create(&hal_thread,NULL,clip_hal,NULL));CHECK(!pthread_create(&clip_thread_id,NULL,clip_injector,NULL));
+ CHECK(!pthread_join(clip_thread_id,NULL));atomic_store(&clip_stop,true);CHECK(!pthread_join(hal_thread,NULL));
+ CHECK(!LOAD(&clip_owner)&&!LOAD(&hal_busy));
+ CHECK(LOAD(&pcm.frames)-hal_before+LOAD(&clip_ignored)==atomic_load(&clip_hal_frames));
+ CHECK(atomic_load(&clip_rounds)==200);
+ /* A HAL write while owned is ignored without touching statistics or the ring. */
+ CHECK(clip_acquire());{uint64_t f=LOAD(&pcm.frames),ig=LOAD(&clip_ignored);int16_t one[2]={7,7};audio_play(one,1);
+ CHECK(LOAD(&pcm.frames)==f&&LOAD(&clip_ignored)==ig+1);}clip_release();
  printf("Count sink SELFTEST PASS: 8000 concurrent writes per profile (count/session); exact totals, detach barrier, atomic snapshots, 58 periodic lines, full-log final tail; %u assertions\n",atomic_load(&checks));
  return 0;
 }

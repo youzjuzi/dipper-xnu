@@ -494,10 +494,10 @@ index 0000000000000000000000000000000000000000..f571c1cc1ddd8f9708d4c7da3fc8841e
 +}
 diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5e5597ac6
+index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789d65398c4
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,5071 @@
+@@ -0,0 +1,5080 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -3736,6 +3736,15 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +	bool valid;
 +} thermgov;
 +extern bool redwood_cpu_temperature(int *maximum_mc);
++/* Read-only view of the governor's latest sample for the audio long-play log.
++ * The governor thread is the sole writer; aligned int/bool loads only. */
++bool
++mi8_thermgov_last(int *mc)
++{
++	if (!os_atomic_load(&thermgov.armed, relaxed)) { return false; }
++	*mc = *(volatile int *)&thermgov.temperature;
++	return *(volatile bool *)&thermgov.valid;
++}
 +
 +#define CPUFREQ_BIG_DEFAULT_ROW 22
 +
@@ -6461,10 +6470,10 @@ index 0000000000000000000000000000000000000000..3b401e70c9180a9bbb1eaecb706aa87a
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..3951eeda4a25d2949900dc5d50a1e6af5a2f31a8
+index 0000000000000000000000000000000000000000..6238f2ac10384b8d1f47d658a4688b07417afc13
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,835 @@
+@@ -0,0 +1,850 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6545,10 +6554,13 @@ index 0000000000000000000000000000000000000000..3951eeda4a25d2949900dc5d50a1e6af
 +}
 +unsigned mi8_pcm_session_limit(void){return (unsigned)session_levels[session_level_index].limit;}
 +static unsigned session_periods=6000;
++/* One LIVE window: the guard and the feeder share these bounds. */
++#define SESSION_WINDOW_US 900000000ull
++#define SESSION_WINDOW_PERIODS 45000u
 +static struct mi8_pcm_session_stats session_stats;
 +static uint64_t session_last_done,session_pending_flush,session_resume_seen;
 +bool mi8_pcm_session_seconds(unsigned seconds) {
-+ if(!seconds || seconds>300)return false;
++ if(!seconds || seconds>900)return false;
 + session_periods=seconds*50;return true;
 +}
 +const struct mi8_pcm_session_stats *mi8_pcm_session_stats(void){return &session_stats;}
@@ -6737,7 +6749,7 @@ index 0000000000000000000000000000000000000000..3951eeda4a25d2949900dc5d50a1e6af
 + if(!*nz)return true;
 + struct mi8_amp_snapshot a;s->session->snapshot(&a);uint64_t n=s->io->now(s->io->ctx);
 + return a.state==MI8_AMP_LIVE && !a.request && !a.reason && a.wakes<=200 &&
-+     n>=a.live_start && n-a.live_start<120000000 && session_pcm.periods<6000;
++     n>=a.live_start && n-a.live_start<SESSION_WINDOW_US && session_pcm.periods<SESSION_WINDOW_PERIODS;
 +}
 +static int session_sample(int16_t left,int16_t right,unsigned frame,bool last,bool muted) {
 + if(muted)return 0;
@@ -6776,10 +6788,10 @@ index 0000000000000000000000000000000000000000..3951eeda4a25d2949900dc5d50a1e6af
 +  return;
 + }
 + if(a.state!=MI8_AMP_LIVE)return;
-+ const uint64_t remaining=120000000;
++ const uint64_t remaining=SESSION_WINDOW_US;
 + if(n<a.live_start)return;
-+ if(n-a.live_start>=remaining || session_pcm.periods>=6000){s->session->mute(s->io->now(s->io->ctx));return;}
-+ bool last=n-a.live_start+20000>=remaining || session_pcm.periods==5999;
++ if(n-a.live_start>=remaining || session_pcm.periods>=SESSION_WINDOW_PERIODS){s->session->mute(s->io->now(s->io->ctx));return;}
++ bool last=n-a.live_start+20000>=remaining || session_pcm.periods==SESSION_WINDOW_PERIODS-1;
 + bool muted=s->session->muted(),nz=false;
 + for(unsigned i=0;i<960;i++) {
 +  int value=session_sample(scratch[2*i],scratch[2*i+1],i,last,muted);
@@ -7177,6 +7189,16 @@ index 0000000000000000000000000000000000000000..3951eeda4a25d2949900dc5d50a1e6af
 +	return s->result.completed;
 +}
 +
++static void session_therm(struct mi8_pcm_state *s,unsigned seconds) {
++ struct mi8_amp_snapshot a;s->session->snapshot(&a);int mc=0;char cpu[16];
++ bool valid=s->session->cpu_temp && s->session->cpu_temp(&mc);
++ if(valid && (!session_stats.cpu_seen || mc>session_stats.cpu_max_mc)){session_stats.cpu_seen=true;session_stats.cpu_max_mc=mc;session_stats.cpu_max_s=seconds;}
++ if(valid)snprintf(cpu,sizeof(cpu),"%d.%dC",mc/1000,(mc<0?-mc:mc)%1000/100);else snprintf(cpu,sizeof(cpu),"NA");
++ session_stats.therm_lines++;
++ pcm_log(s,"therm: %u s cpu=%s amp state=%u INT1=%02x INT2=%02x PUF=%02x live_underflow=%llu saturated=%llu done_gap=%llu us",
++     seconds,cpu,a.state,a.int1,a.int2,a.puf,(unsigned long long)session_stats.underflow_periods,
++     (unsigned long long)session_stats.saturated_samples,(unsigned long long)session_stats.done_gap_us);
++}
 +bool
 +mi8_pcm_run_session(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end,const struct mi8_pcm_session_ops *amp)
 +{
@@ -7211,6 +7233,8 @@ index 0000000000000000000000000000000000000000..3951eeda4a25d2949900dc5d50a1e6af
 +			    (unsigned long long)r.queued,(unsigned long long)r.dropped,(unsigned long long)r.underflow_frames,
 +			    (unsigned long long)r.peak_l,(unsigned long long)r.peak_r);
 +		}
++		/* Long-play record every 30 s: last amp health and CPU temperature. */
++		if (n && n%1500==0) session_therm(s,n/50);
 +		s->period=n;
 +		session_fill(s,slot);
 +		io->cache(io->ctx,slot*MI8_PCM_PERIOD,MI8_PCM_PERIOD);
@@ -7302,10 +7326,10 @@ index 0000000000000000000000000000000000000000..3951eeda4a25d2949900dc5d50a1e6af
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..8ec12bcd9b8e00ed9024a8733d66ae6e61453a06
+index 0000000000000000000000000000000000000000..00bc0c17fc249a819b515a8eccf85a52b0cd5e04
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,120 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
@@ -7372,7 +7396,8 @@ index 0000000000000000000000000000000000000000..8ec12bcd9b8e00ed9024a8733d66ae6e
 +const struct mi8_pcm_clip_result *mi8_pcm_clip_result(void);
 +void mi8_pcm_clip_reset(void);
 +bool mi8_pcm_run_clip(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,const struct mi8_pcm_clip_ops *);
-+struct mi8_pcm_session_stats { uint64_t done_gap_us,late_us,underflow_periods,zero_frames,saturated_samples,wake_flush_frames;unsigned late_period; };
++struct mi8_pcm_session_stats { uint64_t done_gap_us,late_us,underflow_periods,zero_frames,saturated_samples,wake_flush_frames;unsigned late_period;
++ int cpu_max_mc;unsigned cpu_max_s,therm_lines;bool cpu_seen; };
 +bool mi8_pcm_session_seconds(unsigned seconds);
 +const struct mi8_pcm_session_stats *mi8_pcm_session_stats(void);
 +bool mi8_pcm_session_level(int);
@@ -7389,6 +7414,7 @@ index 0000000000000000000000000000000000000000..8ec12bcd9b8e00ed9024a8733d66ae6e
 + bool (*held)(void);
 + void (*fault)(void);
 + void (*panic_tick)(uint64_t);
++ bool (*cpu_temp)(int *); /* Optional, read-only: latest CPU temperature in millicelsius. */
 +};
 +bool mi8_pcm_run_session(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,const struct mi8_pcm_session_ops *);
 +struct mi8_pcm_state {
@@ -7426,10 +7452,10 @@ index 0000000000000000000000000000000000000000..8ec12bcd9b8e00ed9024a8733d66ae6e
 +#endif
 diff --git a/bsd/dev/mi8_audio_ring.c b/bsd/dev/mi8_audio_ring.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..60696125730f99235f009352270fb924d3c3e12d
+index 0000000000000000000000000000000000000000..41b7575c6f9abf1b845e9a07fef50a96ab3a1ef1
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_ring.c
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,109 @@
 +/* SPDX-License-Identifier: MIT */
 +#include "mi8_audio_ring.h"
 +/* SPSC: cdev holds audio_mutex across each sink call (including multiple
@@ -7538,12 +7564,13 @@ index 0000000000000000000000000000000000000000..60696125730f99235f009352270fb924
 +
 +/* HAL is the sole producer; the feeder consumes each resume generation once. */
 +uint64_t mi8_audio_ring_write_resumes(void){return RLOAD(&write_resumes);}
++bool mi8_audio_ring_admitting(void){return (RLOAD(&ring_gate)&1)!=0;}
 diff --git a/bsd/dev/mi8_audio_ring.h b/bsd/dev/mi8_audio_ring.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ee2d1647c87376e1dbc46f01b4a7e1d30a2538c1
+index 0000000000000000000000000000000000000000..b66fdb25d6286987e4da8b3f90fb9abe178b3eaf
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_ring.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,32 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef MI8_AUDIO_RING_H
 +#define MI8_AUDIO_RING_H
@@ -7573,13 +7600,15 @@ index 0000000000000000000000000000000000000000..ee2d1647c87376e1dbc46f01b4a7e1d3
 +void mi8_audio_ring_write_time(uint64_t);
 +uint64_t mi8_audio_ring_live_gap(void);
 +uint64_t mi8_audio_ring_write_resumes(void);
++/* True while the consumer admits producer writes (between open and close). */
++bool mi8_audio_ring_admitting(void);
 +#endif
 diff --git a/bsd/dev/mi8_audio_sink.c b/bsd/dev/mi8_audio_sink.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..c28635dcd643242dfd7a7906428ae08a72fe40cb
+index 0000000000000000000000000000000000000000..1b5280aa2b3dcda3d3dfde88d65c0b182282288a
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_sink.c
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,314 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Count-only observer of iOS PCM. No playback buffers or hardware operations. */
 +#ifdef MI8_AUDIO_SINK_HOST_TEST
@@ -7611,6 +7640,12 @@ index 0000000000000000000000000000000000000000..c28635dcd643242dfd7a7906428ae08a
 +static uint64_t pcm_sequence, volume_sequence;
 +static unsigned installed, stopping;
 +static bool session_profile; /* Set before publishing the sink. */
++/* Long-play test clip handoff and counters; see ring_sink. */
++static unsigned hal_busy, clip_owner, clip_state; /* 0 off, 1 waiting, 2 playing, 3 done, 4 refused */
++static uint64_t clip_ignored, clip_sent, clip_loops;
++#ifndef MI8_AUDIO_SINK_HOST_TEST
++static uint64_t clip_seconds;
++#endif
 +#define LOAD(p) __atomic_load_n((p), __ATOMIC_SEQ_CST)
 +#define STORE(p,v) __atomic_store_n((p), (v), __ATOMIC_SEQ_CST)
 +_Static_assert(__atomic_always_lock_free(8, 0), "count snapshots require lock-free 64-bit loads");
@@ -7713,6 +7748,13 @@ index 0000000000000000000000000000000000000000..c28635dcd643242dfd7a7906428ae08a
 +   (unsigned long long)mi8_audio_ring_live_gap(),(unsigned long long)p->clipped_samples);
 +  if(n>0)used+=(unsigned)n<capacity-used?(unsigned)n:capacity-used-1;
 + }
++ unsigned state=LOAD(&clip_state);
++ if(state && used<capacity-1){
++  static const char *const names[]={"off","waiting","playing","played","refused"};
++  n=snprintf(out+used,capacity-used,"audio: test_clip=%s sent_s=%llu loops=%llu hal_ignored_frames=%llu\n",state<5?names[state]:"?",
++   (unsigned long long)(LOAD(&clip_sent)/48000),(unsigned long long)LOAD(&clip_loops),(unsigned long long)LOAD(&clip_ignored));
++  if(n>0)used+=(unsigned)n<capacity-used?(unsigned)n:capacity-used-1;
++ }
 + return used;
 +}
 +
@@ -7769,11 +7811,73 @@ index 0000000000000000000000000000000000000000..c28635dcd643242dfd7a7906428ae08a
 +	}
 +	return true;
 +}
++/* Long-play test (audio=5 audio_test_clip=1): a kernel clip temporarily
++ * replaces the HAL as the ring's single producer, including its write-time
++ * bookkeeping. Handoff is a Dekker pair with sequentially consistent
++ * accesses: the HAL path raises hal_busy and then reads clip_owner; the
++ * injector raises clip_owner and then waits for hal_busy to drop. Both cannot
++ * miss each other, so ring_put/write_time never run concurrently. HAL writes
++ * seen while the clip owns the ring are counted and accepted as discarded. */
 +static uint32_t ring_sink(const int16_t *frames,uint32_t count)
 +{
++	STORE(&hal_busy,1);
++	if (LOAD(&clip_owner)) { STORE(&clip_ignored,LOAD(&clip_ignored)+count);STORE(&hal_busy,0);return count; }
 +	uint32_t valid=count_sink(frames,count);
-+	return valid ? mi8_audio_ring_put(frames,valid) : 0;
++	uint32_t taken=valid ? mi8_audio_ring_put(frames,valid) : 0;
++	STORE(&hal_busy,0);
++	return taken;
 +}
++#ifndef CLIP_WAIT
++#define CLIP_WAIT() delay_for_interval(1, NSEC_PER_MSEC)
++#endif
++/* Injector side of the handoff; bounded to about 100 ms for a parked HAL write. */
++static bool clip_acquire(void)
++{
++	STORE(&clip_owner,1);
++	for (unsigned i=0;LOAD(&hal_busy);i++) {
++		if (i>=100) { STORE(&clip_owner,0);return false; }
++		CLIP_WAIT();
++	}
++	return true;
++}
++static void clip_release(void) { STORE(&clip_owner,0); }
++static void clip_put(const int16_t *frames,uint32_t count,uint64_t now)
++{
++	mi8_audio_ring_write_time(now);
++	(void)mi8_audio_ring_put(frames,count);
++}
++#ifndef MI8_AUDIO_SINK_HOST_TEST
++extern const uint8_t *redwood_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
++static void clip_thread(__unused void *parameter, __unused wait_result_t result)
++{
++	static int16_t chunk[1024*2];
++	uint64_t size=0,start=sink_now(),frames,target,pos=0,sent=0,t0;
++	const uint8_t *clip;
++	while (!mi8_audio_ring_admitting()) {
++		if (sink_now()-start>400000000) { STORE(&clip_state,4);printf("audio: test clip refused: stream never opened\n");goto out; }
++		delay_for_interval(100, NSEC_PER_MSEC);
++	}
++	clip=redwood_image_file("audio","test-clip.raw",&size,NULL);
++	if (!clip || !size || size%4 || size>32ull*1024*1024) { STORE(&clip_state,4);printf("audio: test clip refused: Boot:/audio/test-clip.raw missing or size %llu invalid\n",(unsigned long long)size);goto out; }
++	if (!clip_acquire()) { STORE(&clip_state,4);printf("audio: test clip refused: HAL producer did not yield\n");goto out; }
++	frames=size/4;target=LOAD(&clip_seconds)*48000;STORE(&clip_state,2);
++	printf("audio: test clip playing: %llu frames looped for %llu s\n",(unsigned long long)frames,(unsigned long long)LOAD(&clip_seconds));
++	t0=sink_now();
++	while (sent<target && mi8_audio_ring_admitting()) {
++		uint64_t n=target-sent;if (n>1024) n=1024;if (n>frames-pos) n=frames-pos;
++		memcpy(chunk,clip+pos*4,(size_t)n*4);
++		clip_put(chunk,(uint32_t)n,sink_now());
++		sent+=n;pos+=n;if (pos==frames) { pos=0;STORE(&clip_loops,LOAD(&clip_loops)+1); }
++		STORE(&clip_sent,sent);
++		uint64_t due=t0+sent*1000000/48000,now=sink_now(); /* absolute schedule, no drift */
++		if (due>now) delay_for_interval((uint32_t)(due-now), NSEC_PER_USEC);
++	}
++	clip_release();STORE(&clip_state,3);
++	printf("audio: test clip done: %llu frames (%llu s) loops=%llu\n",(unsigned long long)sent,(unsigned long long)(sent/48000),(unsigned long long)LOAD(&clip_loops));
++out:
++	thread_terminate(current_thread());
++}
++#endif
 +
 +void mi8_audio_sink_init(void)
 +{
@@ -7804,6 +7908,17 @@ index 0000000000000000000000000000000000000000..c28635dcd643242dfd7a7906428ae08a
 +	}
 +	thread_deallocate(thread);
 +	STORE(&installed, 1);
++#ifndef MI8_AUDIO_SINK_HOST_TEST
++	uint32_t test_clip=0,test_seconds=600;
++	PE_parse_boot_argn("audio_test_clip",&test_clip,sizeof(test_clip));
++	PE_parse_boot_argn("audio_test_seconds",&test_seconds,sizeof(test_seconds));
++	if (enabled==5 && test_clip==1) {
++		thread_t clip;
++		if (!test_seconds || test_seconds>900) { STORE(&clip_state,4);printf("audio: test clip refused: audio_test_seconds must be 1..900\n"); }
++		else if (kernel_thread_start(clip_thread,NULL,&clip)==KERN_SUCCESS) { STORE(&clip_seconds,test_seconds);STORE(&clip_state,1);thread_deallocate(clip); }
++		else { STORE(&clip_state,4);printf("audio: test clip refused: thread unavailable\n"); }
++	}
++#endif
 +	if ((enabled==3 || enabled==4 || enabled==5)) { mi8_audio_ring_ready();printf(enabled==5?"audio: ring sink installed (bounded session)\n":enabled==4?"audio: ring sink installed (one bounded clip)\n":"audio: ring sink installed (DSP output forced zero, amp untouched)\n");return; }
 +	printf(enabled == 2 ? "audio: count sink installed (iOS PCM counted only; the DSP gets zeros, amp untouched)\n" :
 +	    "audio: count-only sink installed (no DSP, no amp)\n");
@@ -14466,10 +14581,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..4bd60ddf33f6b9e304cce5c08d16f09c27598508
+index 0000000000000000000000000000000000000000..f85905e686df2b478c768b30383d10cddd318172
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4717 @@
+@@ -0,0 +1,4723 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -17270,7 +17385,7 @@ index 0000000000000000000000000000000000000000..4bd60ddf33f6b9e304cce5c08d16f09c
 + * FW_READY is a protocol event, not merely modem SMP2P or a timer estimate.
 + * A missing earlier failure event becomes a bounded timeout, never success. */
 +static uint64_t audio_session_stream_end(uint64_t now,unsigned seconds,uint64_t limit) {
-+ if(!seconds || seconds>300)return 0;
++ if(!seconds || seconds>900)return 0;
 + uint64_t need=(uint64_t)seconds*1000000+10000000;
 + if(limit && (now>=limit || need>limit-now))return 0;
 + return now+need;
@@ -18828,13 +18943,19 @@ index 0000000000000000000000000000000000000000..4bd60ddf33f6b9e304cce5c08d16f09c
 +}
 +
 +
++extern bool mi8_thermgov_last(int *mc);
 +static const struct mi8_pcm_session_ops audio_session_ops={
 + mi8_tas_session_snapshot,mi8_tas_session_wake,mi8_tas_session_mute,mi8_tas_session_zero,
-+ mi8_tas_session_count,mi8_tas_session_stop_request,mi8_tas_session_join,redwood_audio_muted,mi8_tas_session_held,mi8_tas_session_fault,mi8_tas_session_panic_tick
++ mi8_tas_session_count,mi8_tas_session_stop_request,mi8_tas_session_join,redwood_audio_muted,mi8_tas_session_held,mi8_tas_session_fault,mi8_tas_session_panic_tick,
++ mi8_thermgov_last
 +};
 +static void audio_session_report(bool complete,const char *cleanup) {
 + const struct mi8_pcm_session_stats *t=mi8_pcm_session_stats();
 + say("mi8rp: audio=5: LIVE underflow_periods=%llu zero_frames=%llu output_saturated_samples=%llu wake_flush_frames=%llu limit=%u\n",t->underflow_periods,t->zero_frames,t->saturated_samples,t->wake_flush_frames,mi8_pcm_session_limit());
++ if(t->therm_lines){
++  if(t->cpu_seen)say("mi8rp: audio=5: therm lines=%u cpu_max=%d.%dC at %u s\n",t->therm_lines,t->cpu_max_mc/1000,(t->cpu_max_mc<0?-t->cpu_max_mc:t->cpu_max_mc)%1000/100,t->cpu_max_s);
++  else say("mi8rp: audio=5: therm lines=%u cpu_max=NA\n",t->therm_lines);
++ }
 + say("mi8rp: audio=5: coexist DONE_max_gap=%llu us latest_period=%u late=%llu us smmu_audio_hold_max=%llu us wifi_map_wait_max=%llu us\n",t->done_gap_us,t->late_period,t->late_us,audio_lock_max_us,__atomic_load_n(&wifi_lock_wait_max_us,__ATOMIC_ACQUIRE));
 + bool closed=mi8_audio_ring_close();struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
 + struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);static char line[896];char status[320];
@@ -19189,10 +19310,10 @@ index 0000000000000000000000000000000000000000..4bd60ddf33f6b9e304cce5c08d16f09c
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..20b78dcbcd40f3c715e771827b21924157c80140
+index 0000000000000000000000000000000000000000..5d616a506fc59f00525930033c5d005599c0264e
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,1133 @@
+@@ -0,0 +1,1134 @@
 +/* SPDX-License-Identifier: MIT
 + * TAS2557 firmware probe and bounded hard-muted power check. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
@@ -19982,6 +20103,7 @@ index 0000000000000000000000000000000000000000..20b78dcbcd40f3c715e771827b219241
 + o->startup_us=SA(session.startup_us);o->wait_us=SA(session.wait_us);o->health_us=SA(session.health_us);o->unmute_us=SA(session.unmute_us);
 + o->idle_wakes=SA(session.idle_wakes);o->write_trigger=SA(session.trigger)==0;
 + o->done=SA(session.done);o->clean=SA(session.clean);o->reset_low=SA(session.reset_low);
++ o->int1=SA(session.int1);o->int2=SA(session.int2);o->puf=SA(session.puf);
 +}
 +bool mi8_tas_session_held(void) { unsigned s=SA(session.state);return s!=MI8_AMP_PREPARING && s!=MI8_AMP_LATCHED_OFF; }
 +void mi8_tas_session_wake(unsigned peak) {
@@ -20059,7 +20181,7 @@ index 0000000000000000000000000000000000000000..20b78dcbcd40f3c715e771827b219241
 + bool ok=read_regs(t,0,0,0x68,&a,1)&&read_regs(t,0,0,0x6c,&b,1)&&read_regs(t,0,0,0x64,&p,1)&&read_regs(t,0,0,7,&h,1)&&read_regs(t,100,0,7,&soft,1);
 + session.health_retryable=!live && ok && !(a&0xfc) && !(b&0x0c) && (p&0xc0)!=0xc0 && h==3 && soft==(SA(session.wakes)>1?1:7);
 + ok=ok && !(a&0xfc) && !(b&0x0c) && (p&0xc0)==0xc0 && h==(live?0:3) && soft==(live?0:SA(session.wakes)>1?1:7);
-+ amp.healthy=ok;session.int1=a;session.int2=b;session.puf=p;
++ amp.healthy=ok;SP(session.int1,a);SP(session.int2,b);SP(session.puf,p); /* read by the PCM worker */
 + if(t->io->log)t->io->log(t->io->ctx,"audio: health INT1=%02x INT2=%02x PUF=%02x mute=%02x/%02x %s\n",a,b,p,h,soft,ok?"ok":"FAILED");
 + return ok;
 +}
@@ -20328,10 +20450,10 @@ index 0000000000000000000000000000000000000000..20b78dcbcd40f3c715e771827b219241
 +#endif
 diff --git a/bsd/dev/mi8_tas2557.h b/bsd/dev/mi8_tas2557.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e4839b439d797f158038c0865cd54e10d52b2eeb
+index 0000000000000000000000000000000000000000..68a8481ff961a989b1af319d4dfc905197d6e384
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.h
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,84 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef MI8_TAS2557_H
 +#define MI8_TAS2557_H
@@ -20390,6 +20512,7 @@ index 0000000000000000000000000000000000000000..e4839b439d797f158038c0865cd54e10
 + uint64_t startup_us,wait_us,health_us,unmute_us;
 + unsigned idle_wakes; bool write_trigger;
 + bool done, clean, reset_low;
++ uint8_t int1, int2, puf; /* Latest health sample; racy-benign bytes. */
 +};
 +void mi8_tas_session_snapshot(struct mi8_amp_snapshot *);
 +void mi8_tas_session_seconds(unsigned seconds);

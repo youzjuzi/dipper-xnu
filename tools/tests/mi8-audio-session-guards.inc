@@ -31,15 +31,15 @@ void session_guard_tests(void){
   if(fault==2)guard_amp.state=MI8_AMP_WARMING;
   if(fault==3)guard_amp.request=2;
   if(fault==4)guard_amp.reason=4;
-  if(fault==5)guard_clock=guard_amp.live_start+120000000;
+  if(fault==5)guard_clock=guard_amp.live_start+900000000;
   if(fault==6)guard_amp.live_start=2000000;
   if(fault==7)guard_amp.wakes=201;
-  if(fault==8)session_pcm.periods=6000;
+  if(fault==8)session_pcm.periods=45000;
   assert(!submit(&s,fault==9?8:0,fault==10?MI8_PCM_ADDRESS+32768:MI8_PCM_ADDRESS,false,200000000));
   assert(guard_stops==fault+1&&!guard_sends);
  }
  s.jobs[0].active=false;guard_amp=(struct mi8_amp_snapshot){.state=MI8_AMP_LIVE,.wakes=200,.live_start=1,.live_total=90000000};
- guard_clock=119980001;session_pcm.periods=5999;
+ guard_clock=899980001;session_pcm.periods=44999;
  assert(submit(&s,0,MI8_PCM_ADDRESS,false,200000000));assert(guard_sends==1&&!guard_zeros);
  s.jobs[0].active=false;memset(data,0,sizeof(data));guard_amp.state=MI8_AMP_LATCHED_OFF;
  assert(submit(&s,0,MI8_PCM_ADDRESS,false,200000000));assert(guard_sends==2&&guard_zeros==1);

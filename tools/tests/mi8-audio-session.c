@@ -48,7 +48,7 @@ static bool join_control(void){
  struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);CHECK(a.done);session_model_check_done();return a.clean;
 }
 static void request_stop(void){stop_requested=true;mi8_tas_session_stop_request();}
-static const struct mi8_pcm_session_ops session_ops={mi8_tas_session_snapshot,mi8_tas_session_wake,mi8_tas_session_mute,mi8_tas_session_zero,mi8_tas_session_count,request_stop,join_control,muted,mi8_tas_session_held,mi8_tas_session_fault,NULL};
+static const struct mi8_pcm_session_ops session_ops={mi8_tas_session_snapshot,mi8_tas_session_wake,mi8_tas_session_mute,mi8_tas_session_zero,mi8_tas_session_count,request_stop,join_control,muted,mi8_tas_session_held,mi8_tas_session_fault,NULL,NULL};
 void mi8_tas2557_prepare(uint64_t n){(void)n;CHECK(false);}
 void mi8_tas2557_prepare_tone(uint64_t n){(void)n;CHECK(false);}
 void mi8_tas_session_start(uint64_t end){CHECK(end>active->now);control_prepared=true;CHECK(session_model_prepare(0));active->now=session_model_now();stream_start=active->now;}
@@ -118,7 +118,8 @@ int main(int argc,char **argv){
   if(threaded || (mode!=5 && mode!=6 && mode!=10 && mode!=11 && mode!=12 && mode!=13 && mode!=14)){if(!ok)fprintf(stderr,"mode %u %s\n",mode,m.log);CHECK(ok&&m.normal==stream_seconds*50);}
   if(!threaded){
   if(mode==0)CHECK(strstr(m.log,"play:")&&strstr(m.log,"asm stream close errno=0"));
-  if(mode==0 || mode==9)CHECK(a.wakes==(stream_seconds==300?3u:1u)&&a.live_total>(uint64_t)(stream_seconds-10)*1000000);
+  if(mode==0)CHECK(strstr(m.log,"therm: 30 s cpu=NA amp state=")&&strstr(m.log,"therm: 90 s cpu=NA")&&(stream_seconds==300?strstr(m.log,"therm: 270 s cpu=NA")&&!strstr(m.log,"therm: 300 s"):!strstr(m.log,"therm: 120 s")));
+  if(mode==0 || mode==9)CHECK(a.wakes==1u&&a.live_total>(uint64_t)(stream_seconds-10)*1000000);
   if(mode==1 || mode==4)CHECK(a.wakes>=3 && a.checks==a.mutes && a.checks_ok==a.checks);
   if(mode==2)CHECK(!outputs&&a.wakes==5);
   if(mode==3)CHECK(a.wakes==1&&a.mutes==1);
