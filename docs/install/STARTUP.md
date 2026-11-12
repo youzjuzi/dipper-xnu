@@ -135,11 +135,13 @@ dipper 缺省 bt=7；打包器在 --wifi 时核对启动卷里的固件与根镜
 
 ## 扬声器、电量、震动与手电（缺省开启）
 
-配套内核和loader在dipper缺省启用 audio=5、battery=1、haptic=3、torch=3。分别显式追加 audio=0、battery=0、haptic=0、torch=0 可关闭；这些是对应功能的关闭开关。无需 --peripherals。扬声器需要配套的ADSP与功放固件启动卷；默认组合仍待设备验收。
+扬声器只需自备一个文件：TAS2557 功放固件 `tas2557_uCDSP_goer.bin`，由使用者以 root 从自己手机的 Android 系统中只读取出，放进 `work/hackios/fw-audio/` 后重建用户空间，构建脚本会把它放进启动卷 `fw/`；仓库不包含该文件。音频 DSP（ADSP）固件由内核在运行时从手机自身的 `modem` 分区读取，无需提取。
+
+配套内核和loader在dipper缺省启用 audio=5、battery=1、haptic=3、torch=3。分别显式追加 audio=0、battery=0、haptic=0、torch=0 可关闭；这些是对应功能的关闭开关。无需 --peripherals。扬声器需要配套的ADSP与功放固件启动卷；默认组合已完成一次设备试用（2026-11-12）。
 
 `audio_level_db` 可选 −30/−24/−20/−12/−6/0，缺省0dB；例如 audio_level_db=-30 降低数字电平，0dB并非关闭。`audio_seconds=0` 为常驻：有loader_return_after时受运行结束及收尾期限约束，没有则持续运行；1–900为有界诊断，保留900秒/45000周期单窗与200次wake限制。常驻模式去掉这些时长/次数额度，保留LIVE、状态、时钟、单声道/幅度、缓冲地址、健康与失败锁存等检查。
 
-mi8rp_mss开启时音频仍等待Wi-Fi FW_READY，失败或90秒超时就不启动；mss显式关闭时沿用独立音频路径。常驻会话空闲10秒（写入唤醒后无非零）或30秒（其他静默）软关断功放，DSP与DMA仍每20ms运行，功耗未测。音质未调校，组合与常驻的设备表现尚待验证。
+mi8rp_mss开启时音频仍等待Wi-Fi FW_READY，失败或90秒超时就不启动；mss显式关闭时沿用独立音频路径。常驻会话空闲10秒（写入唤醒后无非零）或30秒（其他静默）软关断功放，DSP与DMA仍每20ms运行，功耗未测。音质未调校；常驻的长时间运行与功耗尚待验证。
 
 ## 蓝牙芯片诊断（实验）
 

@@ -125,11 +125,11 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-12，接手时重新核对）
 
-- 分支 `feat/audio-sink`，接手 `3e6d5f7`，58个注册XNU源码与清单相符，tracked干净；本提交固化34项默认配置及常驻会话。work的5个XNU文件和loader.c已导出，电量/手电默认还需配套新loader/UEFI，不能只替换内核。
-- 新缺省bt7/audio5/level0/seconds0/battery1/torch3/haptic3。缺省BT在mss0或无MAC时跳过，显式诊断不改。mss开启时音频Wi-Fi FW_READY依赖保持；常驻只去掉时长与次数额度，保留状态/波形/地址/健康/锁存/panic和10/30秒功放空闲关断。
-- 证据 `work/runs/20261112-audio-default-01/RESULTS.md`：47976秒模型、1003wake/mute与Y校验、3段21分钟连续声、固定内存；全套与sanitizer/TSan、构建/栈、干净重放见运行日志。24小时计数与资源审查列明，ADSP/DMA启停事务不改。
-- P28：--wifi --seconds1080，不加外设/音频参数；七项由原生解析器核对(def)，使用P26-0启动卷及本轮loader/UEFI/内核。原P26/P27证据和local保持；本轮不碰手机、不push。
-- 旧设备0dB连续645.8秒、健康1238次、CPU41–43°C的结论保留。下一步由持有人完整重启验证P28默认外设组合及长短间隔声音；常驻功耗未测，音质未调校，组合设备结果Pending。
+- 音频分支 `feat/audio-sink` 已合并进 `main`（含 `3da41b2` 缺省外设与常驻会话）。work 源码与注册清单相符，无未导出修改。
+- 当前缺省：bt=7、audio=5、audio_level_db=0、audio_seconds=0（常驻）、battery=1、torch=3、haptic=3；显式 `=0` 关闭。电量/手电缺省需配套新 loader/UEFI，不能只替换内核。
+- 设备：P28（`work/runs/20261112-audio-default-01/`，DEVICE.md）无参数试用通过：蓝牙、电量、震动、手电、扬声器正常，无自动播放、无 panic；约 600 秒由主机提前结束，无会话收尾日志。
+- 未决：刚开机浏览器打不开网页（Wi-Fi 关联正常、TCP 停在 SYN_SENT，原因未定，需无音频对照）；音量键 HUD 显示“声音关闭”（疑为静音拨片状态上报）；Safari 视频发绿；常驻功耗、数小时运行与音质未验收。
+- 下一步：按持有人反馈排期，优先 Wi-Fi 数据停滞。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 
