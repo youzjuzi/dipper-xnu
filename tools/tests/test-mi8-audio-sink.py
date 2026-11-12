@@ -24,7 +24,7 @@ def main():
     pieces = '\n'.join(body(audio, signature) for signature in [
         'static void\naudio_play(', 'void\nredwood_audio_set_sink(',
         'bool\nredwood_audio_claim_sink(', 'bool\nredwood_audio_volume('])
-    final = body(loader, 'static void\nloader_audio_summary(')
+    final = body(loader, 'static void\nloader_audio_append(') + '\n' + body(loader, 'static void\nloader_audio_summary(')
     exit_path = body(loader, 'void\nloader_return(')
     assert exit_path.index('psci_smp_stop_others') < exit_path.index('loader_log_linearize')
     assert exit_path.index('loader_log_append_msgbuf') < exit_path.index('loader_audio_summary') < exit_path.index('loader_jump(0, 0)')

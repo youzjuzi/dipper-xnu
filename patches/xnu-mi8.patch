@@ -5570,10 +5570,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc0cae7faa86b503b5968801d4090592ea6b9281
+index 0000000000000000000000000000000000000000..79430af1964f075b4d77adc2cd8b5186bc931113
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,791 @@
+@@ -0,0 +1,796 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
@@ -5829,6 +5829,7 @@ index 0000000000000000000000000000000000000000..bc0cae7faa86b503b5968801d4090592
 +	struct mi8_pcm_ops play_ops;
 +	const struct mi8_pcm_ops *memory_ops;
 +	uint64_t play_deadline, request_deadline;
++	unsigned zero_periods; /* audio=2 (internal step 17): a long zero stream, no amp */
 +	bool (*alive)(void *);
 +	void *alive_ctx;
 +	uint32_t token, rejected;
@@ -6048,6 +6049,8 @@ index 0000000000000000000000000000000000000000..bc0cae7faa86b503b5968801d4090592
 +static uint64_t last_play_teardown;
 +uint64_t mi8_audio_play_teardown_end(void) { return last_play_teardown; }
 +bool mi8_audio_play_proven(void) { return last_play_proven; }
++/* All periods returned without error and the stream closed and unmapped (before the SMMU end). */
++bool mi8_audio_play_completed(void) { return play_pcm.result.completed; }
 +bool mi8_audio_play_needs_finish(void) { return play_live; }
 +
 +bool
@@ -6127,6 +6130,7 @@ index 0000000000000000000000000000000000000000..bc0cae7faa86b503b5968801d4090592
 +	if (s->play) {
 +		if (s->tone) success=mi8_pcm_run_tone(s->pcm,&s->play_ops,s->play_deadline,s->amp);
 +		else if (s->muted) success=mi8_pcm_run_muted(s->pcm,&s->play_ops,s->play_deadline,s->amp);
++		else if (s->zero_periods) success=mi8_pcm_run_zero(s->pcm,&s->play_ops,s->play_deadline,s->zero_periods);
 +		else success=mi8_pcm_run(s->pcm,&s->play_ops,s->play_deadline,s->canary);
 +		goto out;
 +	}
@@ -6202,6 +6206,7 @@ index 0000000000000000000000000000000000000000..bc0cae7faa86b503b5968801d4090592
 +		last_afe_clean=last_smmu_clean=true;*last_cleanup=0;
 +		session->canary=step==13;session->fatal=fatal;
 +		session->tone=step==16;session->muted=step==15 || session->tone;session->amp=session->muted?play_amp:NULL;
++		session->zero_periods=step==17?3000:0;
 +		session->play=true;session->pcm=&play_pcm;session->memory_ops=memory_ops;
 +		session->play_deadline=play_until>3000000?play_until-3000000:0;
 +		last_play_teardown=play_until;
@@ -6367,10 +6372,10 @@ index 0000000000000000000000000000000000000000..bc0cae7faa86b503b5968801d4090592
 +}
 diff --git a/bsd/dev/mi8_audio.h b/bsd/dev/mi8_audio.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..90cfa7c34112e849086aa641b73ab88ad9a0af1d
+index 0000000000000000000000000000000000000000..3db39cf530deec75fd2730471faa743d6ea4bbb9
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.h
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,64 @@
 +/* SPDX-License-Identifier: MIT */
 +/* APR core handshake and explicit AFE MI2S control. The muted check uses explicit worker-owned amplifier callbacks. */
 +#ifndef MI8_AUDIO_H
@@ -6421,6 +6426,7 @@ index 0000000000000000000000000000000000000000..90cfa7c34112e849086aa641b73ab88a
 +};
 +struct mi8_pcm_ops;
 +bool mi8_audio_play_proven(void);
++bool mi8_audio_play_completed(void);
 +const char *mi8_audio_play_cleanup(void);
 +uint64_t mi8_audio_play_teardown_end(void);
 +/* Finish must run after the caller attempts PAS shutdown. Callbacks and their
@@ -6436,10 +6442,10 @@ index 0000000000000000000000000000000000000000..90cfa7c34112e849086aa641b73ab88a
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e0ba2b636d403b935001a1222bc9948e5b6ed22e
+index 0000000000000000000000000000000000000000..686cc896cd085828076c40f2cd63243192a59557
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,388 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6725,9 +6731,9 @@ index 0000000000000000000000000000000000000000..e0ba2b636d403b935001a1222bc9948e
 +}
 +
 +static bool
-+pcm_run(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end, bool canary, bool zero, bool tone, const struct mi8_pcm_amp *amp)
++pcm_run(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end, bool canary, bool zero, bool tone, const struct mi8_pcm_amp *amp, unsigned periods)
 +{
-+	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;s->zero=zero;s->tone=tone;s->amp=amp;
++	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;s->zero=zero;s->tone=tone;s->amp=amp;s->periods=periods;
 +	bool success=false,closed=false,unmapped=false,adm_closed=true;
 +	if (!io->begin(io->ctx,&s->memory)) { pcm_log(s,"smmu: begin failed; no PCM submitted");if (amp) amp->stop();return false; }
 +	s->mapped=true;
@@ -6738,7 +6744,7 @@ index 0000000000000000000000000000000000000000..e0ba2b636d403b935001a1222bc9948e
 +	if (command(s,MI8_PCM_MAP,false) || command(s,MI8_PCM_OPEN,false) || command(s,MI8_PCM_ADM_OPEN,false) ||
 +	    command(s,MI8_PCM_ROUTE,false) || command(s,MI8_PCM_FORMAT,false) || command(s,MI8_PCM_RUN,false)) goto cleanup;
 +	uint64_t start=io->now(io->ctx);s->run_start=start;
-+	for (unsigned n=0;n<MI8_PCM_PERIODS;n++) {
++	for (unsigned n=0;n<s->periods;n++) {
 +		unsigned slot=n%8;
 +		uint64_t wait=start+(uint64_t)n*20000;
 +		while (io->now(io->ctx)<wait || s->jobs[slot].active) if (poll_once(s,s->deadline)) goto cleanup;
@@ -6752,12 +6758,15 @@ index 0000000000000000000000000000000000000000..e0ba2b636d403b935001a1222bc9948e
 +		/* Only the nonzero window has an acoustic deadline. Bounded amp
 +		 * shutdown may take longer than a zero period; keep draining silence. */
 +		if (tone && n>=50 && n<100 && io->now(io->ctx)>wait+20000) { pcm_log(s,"tone schedule late; stopping");goto cleanup; }
++		/* Long zero streams: one progress line every 15 s (750 periods). */
++		if (s->periods>MI8_PCM_PERIODS && n && n%750==0)
++			pcm_log(s,"zero: %u s, submitted=%u done=%u underflow=%u rejected=%u",n/50,s->result.submitted,s->result.done,s->result.underflow,s->result.rejected);
 +		s->period=n;
 +		fill_period(s,slot);
 +		if (!submit(s,slot,MI8_PCM_ADDRESS+(uint64_t)slot*MI8_PCM_PERIOD,false,s->deadline)) goto cleanup;
 +	}
-+	while (io->now(io->ctx)<start+3000000) if (poll_once(s,s->deadline)) goto cleanup;
-+	if (!drain(s,s->deadline) || s->result.errors || s->result.done!=MI8_PCM_PERIODS) goto cleanup;
++	while (io->now(io->ctx)<start+(uint64_t)s->periods*20000) if (poll_once(s,s->deadline)) goto cleanup;
++	if (!drain(s,s->deadline) || s->result.errors || s->result.done!=s->periods) goto cleanup;
 +	struct mi8_smmu_fault f;
 +	if (!io->fault(io->ctx,&f)) { pcm_log(s,"play: fault registers unreadable"); goto cleanup; }
 +		if (f.gfsr || (f.fsr&~IDLE)) {
@@ -6793,14 +6802,19 @@ index 0000000000000000000000000000000000000000..e0ba2b636d403b935001a1222bc9948e
 +}
 +
 +bool mi8_pcm_run(struct mi8_pcm_state *s,const struct mi8_pcm_ops *io,uint64_t end,bool canary) {
-+	return pcm_run(s,io,end,canary,false,false,NULL);
++	return pcm_run(s,io,end,canary,false,false,NULL,MI8_PCM_PERIODS);
 +}
 +bool mi8_pcm_run_muted(struct mi8_pcm_state *s,const struct mi8_pcm_ops *io,uint64_t end,const struct mi8_pcm_amp *amp) {
-+	return pcm_run(s,io,end,false,true,false,amp);
++	return pcm_run(s,io,end,false,true,false,amp,MI8_PCM_PERIODS);
 +}
 +
 +bool mi8_pcm_run_tone(struct mi8_pcm_state *s,const struct mi8_pcm_ops *io,uint64_t end,const struct mi8_pcm_amp *amp) {
-+	return pcm_run(s,io,end,false,false,true,amp);
++	return pcm_run(s,io,end,false,false,true,amp,MI8_PCM_PERIODS);
++}
++
++bool mi8_pcm_run_zero(struct mi8_pcm_state *s,const struct mi8_pcm_ops *io,uint64_t end,unsigned periods) {
++	if (!periods || periods>MI8_PCM_ZERO_MAX) { memset(s,0,sizeof(*s));return false; }
++	return pcm_run(s,io,end,false,true,false,NULL,periods);
 +}
 +
 +bool
@@ -6822,10 +6836,10 @@ index 0000000000000000000000000000000000000000..e0ba2b636d403b935001a1222bc9948e
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d36e5aa6a1505a0c4dffdab36e40e3b9d0e3f837
+index 0000000000000000000000000000000000000000..9129d37950ba5d9c9acd90d53db5b3b08117437c
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,76 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
@@ -6879,7 +6893,7 @@ index 0000000000000000000000000000000000000000..d36e5aa6a1505a0c4dffdab36e40e3b9
 +	struct mi8_pcm_result result;
 +	uint64_t deadline, run_start;
 +	bool zero, tone;
-+	unsigned period, tone_blocks, tone_peak;
++	unsigned period, periods, tone_blocks, tone_peak;
 +	const struct mi8_pcm_amp *amp;
 +	uint32_t token, handle;
 +	uint16_t copp;
@@ -6895,16 +6909,19 @@ index 0000000000000000000000000000000000000000..d36e5aa6a1505a0c4dffdab36e40e3b9
 +bool mi8_pcm_run(struct mi8_pcm_state *, const struct mi8_pcm_ops *, uint64_t, bool canary);
 +bool mi8_pcm_run_muted(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,const struct mi8_pcm_amp *);
 +bool mi8_pcm_run_tone(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,const struct mi8_pcm_amp *);
++/* audio=2: a longer all-zero stream, the amp untouched (1..MI8_PCM_ZERO_MAX periods of 20 ms). */
++#define MI8_PCM_ZERO_MAX 6000u
++bool mi8_pcm_run_zero(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,unsigned periods);
 +/* Called after AFE stop/clock off/pin restore; pass true only after PAS reset.
 + * Without confirmed close+unmap or PAS success, leaves the mapping untouched. */
 +bool mi8_pcm_finish(struct mi8_pcm_state *, bool pas_shutdown);
 +#endif
 diff --git a/bsd/dev/mi8_audio_sink.c b/bsd/dev/mi8_audio_sink.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e2c6d3a04760c808e2fe37079ce4c87b37ac529c
+index 0000000000000000000000000000000000000000..63ebbcf73ccdb953b32ed0ed98bb672df77c3c27
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_sink.c
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,190 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Count-only observer of iOS PCM. No playback buffers or hardware operations. */
 +#ifdef MI8_AUDIO_SINK_HOST_TEST
@@ -7073,7 +7090,7 @@ index 0000000000000000000000000000000000000000..e2c6d3a04760c808e2fe37079ce4c87b
 +	    SecureDTGetProperty(entry, "device_type", &type, &size) != kSuccess ||
 +	    size != sizeof("dipper") || memcmp(type, "dipper", sizeof("dipper"))) return;
 +	if (!PE_parse_boot_argn("audio", &enabled, sizeof(enabled)) || !enabled) return;
-+	if (enabled != 1) { printf("audio: refused unsupported audio value\n"); return; }
++	if (enabled != 1 && enabled != 2) { printf("audio: refused unsupported audio value\n"); return; }
 +	PE_parse_boot_argn("mi8rp_step", &step, sizeof(step));
 +	if (step >= 9) { printf("audio: refused conflict with mi8rp_step>=9; diagnostic unchanged\n"); return; }
 +	/* These upstream backends may install a sink asynchronously. Refuse their
@@ -7092,7 +7109,8 @@ index 0000000000000000000000000000000000000000..e2c6d3a04760c808e2fe37079ce4c87b
 +	}
 +	thread_deallocate(thread);
 +	STORE(&installed, 1);
-+	printf("audio: count-only sink installed (no DSP, no amp)\n");
++	printf(enabled == 2 ? "audio: count sink installed (iOS PCM counted only; the DSP gets zeros, amp untouched)\n" :
++	    "audio: count-only sink installed (no DSP, no amp)\n");
 +}
 diff --git a/bsd/dev/mi8_audio_sink.h b/bsd/dev/mi8_audio_sink.h
 new file mode 100644
@@ -13749,10 +13767,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacfe704b7c5
+index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818ca925a5df
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4364 @@
+@@ -0,0 +1,4412 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -13842,6 +13860,19 @@ index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacf
 +static bool audio_play_brief, audio_play_locked;
 +static uint64_t audio_play_until;
 +static char audio_play_note[400];
++/* audio=2: the worker's own lines, kept for the loader's return (the GPU desktop's log is far
++ * longer than the 32 KiB the loader keeps). One writer (the worker); read after it has finished
++ * or, at the return, with the other processors parked. */
++static bool audio_tail_on;
++static char audio_tail[8192];
++static unsigned audio_tail_len;
++const char *mi8_rproc_audio_tail(unsigned *length);
++const char *
++mi8_rproc_audio_tail(unsigned *length)
++{
++	*length = audio_tail_on ? audio_tail_len : 0;
++	return audio_tail;
++}
 +static bool audio_play_worker(void) { return audio_play_thread && current_thread() == audio_play_thread; }
 +static int say(const char *format, ...) __printflike(1, 2);
 +static uint64_t now_us(void);
@@ -13885,6 +13916,13 @@ index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacf
 +	}
 +	for (const char *c = line; *c != 0; c++) {
 +		loader_log_putc(*c);
++	}
++	if (audio_tail_on && audio_play_worker()) {
++		unsigned n = (unsigned)strnlen(line, sizeof(line));
++		if (n < sizeof(audio_tail) - audio_tail_len) {
++			memcpy(audio_tail + audio_tail_len, line, n);
++			audio_tail_len += n;
++		}
 +	}
 +	printf("%s", line);
 +	return length;
@@ -17760,7 +17798,8 @@ index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacf
 +		audio_play_locked=true;
 +		/* Firmware loading has its own budget; playback starts with ADSP up. */
 +		/* Extra headroom for bounded amp transactions; the PCM window stays 3 s. */
-+		audio_play_until = now_us() + ((last==15 || last==16)?20000000:15000000);
++		/* audio=2 (17): 60 s of zero periods plus setup and teardown. */
++		audio_play_until = now_us() + (last==17?70000000:(last==15 || last==16)?20000000:15000000);
 +		bool okay = mi8_audio_run_play(&cfg, audio_alive, &adsp_remote, NULL, NULL, audio_play_until, last, audio_fatal);
 +		audio_play_until=mi8_audio_play_teardown_end();
 +		if (!mi8_audio_play_needs_finish()) {
@@ -17810,7 +17849,7 @@ index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacf
 +{
 +	uint32_t last = (uint32_t)(uintptr_t)parameter;
 +	uint8_t probe;
-+	if (last >= 13) { audio_play_thread=current_thread();audio_play_until=now_us()+45000000; /* partition readiness, firmware loading and ADSP start */ }
++	if (last >= 13) { audio_play_thread=current_thread();audio_play_until=now_us()+(last==17?90000000:45000000); /* partition readiness, firmware loading and ADSP start (a GPU desktop is starting beside audio=2) */ }
 +
 +	for (unsigned i = 0; i < 600; i++) {
 +		if (last >= 13 && now_us()>=audio_play_until-3000000) {
@@ -17873,7 +17912,11 @@ index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacf
 +			if (started_here && !adsp_last_stop_acked) say("mi8rp: 13: Pending ADSP stop-ack\n");
 +			if (started_here && !down) say("mi8rp: 13: Pending PAS shutdown\n");
 +			if (started_here && !adsp_last_aop_off) say("mi8rp: 13: Pending AOP off\n");
-+			if (last!=15 && last!=16) say("mi8rp: step 13: PROVEN=%u cleanup=%s%s%s\n",mi8_audio_play_proven(),
++			if (last==17) say("mi8rp: audio=2: zero stream %s cleanup=%s%s%s; amp untouched (reset low)\n",
++			    mi8_audio_play_completed()?"completed":"FAILED",mi8_audio_play_cleanup(),
++			    started_here && !adsp_last_stop_acked?" (stop-ack missing)":"",
++			    started_here && !adsp_last_aop_off?" (AOP off Pending)":"");
++			else if (last!=15 && last!=16) say("mi8rp: step 13: PROVEN=%u cleanup=%s%s%s\n",mi8_audio_play_proven(),
 +			    mi8_audio_play_cleanup(),
 +			    started_here && !adsp_last_stop_acked?" (stop-ack missing)":"",
 +			    started_here && !adsp_last_aop_off?" (AOP off Pending)":"");
@@ -17894,7 +17937,7 @@ index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacf
 +		mi8_audio_set_amp(NULL);
 +	}
 +	if (last >= 13) {
-+		if (!image_ok) say("mi8rp: step 13: PROVEN=0 FAILED before ADSP start (image/deadline)\n");
++		if (!image_ok) say(last==17?"mi8rp: audio=2: FAILED before ADSP start (image/deadline)\n":"mi8rp: step 13: PROVEN=0 FAILED before ADSP start (image/deadline)\n");
 +		audio_play_brief=false;audio_play_thread=NULL;
 +	}
 +	thread_terminate(current_thread());
@@ -18022,8 +18065,21 @@ index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacf
 +	uint32_t mss = 0;
 +	uint32_t shared_step = 0;
 +
++	uint32_t audio = 0;
++
 +	/* Set once before starting either worker; default calls take no new lock. */
 +	PE_parse_boot_argn("mi8rp_step", &shared_step, sizeof(shared_step));
++	PE_parse_boot_argn("audio", &audio, sizeof(audio));
++	if (audio == 2 && shared_step == 0) {
++		uint32_t radio = 0;
++		/* Not yet beside the modem/Wi-Fi start: they share the modem partition, SMEM, AOP and the SMMU. */
++		if (PE_parse_boot_argn("mi8rp_mss", &radio, sizeof(radio)) && radio != 0) {
++			say("mi8rp: audio=2 refused: not yet with mi8rp_mss (Wi-Fi)\n");
++			audio = 0;
++		} else {
++			shared_step = 17;       /* the same serialization the diagnostics take */
++		}
++	}
 +	adsp_shared_serial = shared_step >= 9;
 +	audio_smmu_serial = shared_step >= 12;
 +	PE_parse_boot_argn("mi8rp_pause", &pause_ms, sizeof(pause_ms));
@@ -18072,6 +18128,16 @@ index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacf
 +				mss_w2bc(mss);
 +			}
 +		}
++	}
++	if (audio == 2 && shared_step == 17) {
++		thread_t thread;
++		/* audio=2: steps 5..13 without the canary, then 60 s of zero periods; the amp stays in reset. */
++		audio_tail_on = true;
++		say("mi8rp: audio=2: zero stream to the DSP for 60 s, amp untouched\n");
++		if (kernel_thread_start(steps_from_five, (void *)(uintptr_t)17, &thread) == KERN_SUCCESS) {
++			thread_deallocate(thread);
++		}
++		return;
 +	}
 +	if (!PE_parse_boot_argn("mi8rp_step", &last, sizeof(last)) || last == 0) {
 +		return;
@@ -29631,10 +29697,10 @@ index 63ffd4b9906f83f92e3f1ae765f5681f2654dc38..3fa60bb45cee869d7853c6dad857427b
  	if (gicd_base == 0) {
  		DTEntry entry;
 diff --git a/osfmk/arm64/loader_return.c b/osfmk/arm64/loader_return.c
-index a058bb5263934bb489894fc933ba340690f590db..82a5823e04f6e1945f999ce4e27e9ac15a5fc913 100644
+index a058bb5263934bb489894fc933ba340690f590db..9779dee1990426ea3a5a526d53dffce7c67c897b 100644
 --- a/osfmk/arm64/loader_return.c
 +++ b/osfmk/arm64/loader_return.c
-@@ -45,7 +45,11 @@ extern void gic_v3_irq_cpu_shutdown(void);
+@@ -45,7 +45,12 @@ extern void gic_v3_irq_cpu_shutdown(void);
  void loader_log_putc(char c);
  void loader_return(void);
  extern void redwood_adreno_quiesce(void);
@@ -29643,30 +29709,41 @@ index a058bb5263934bb489894fc933ba340690f590db..82a5823e04f6e1945f999ce4e27e9ac1
  extern void redwood_adreno_stop(void);
 +extern void mi8_thermgov_stop(void);
 +extern unsigned mi8_audio_sink_summary(char *out, unsigned capacity);
++extern const char *mi8_rproc_audio_tail(unsigned *length);
  extern void redwood_adreno_minute(void);
  extern void redwood_wifi_stop(void);
  extern void redwood_wifi_quiesce(void);
-@@ -358,9 +362,31 @@ loader_log_append_msgbuf(void)
+@@ -358,9 +363,41 @@ loader_log_append_msgbuf(void)
  	}
  }
  
 +/* After the other CPUs are parked and all other logs are collected. This
 + * append must not take the console/loader lock: its owner may be parked. */
 +static void
-+loader_audio_summary(void)
++loader_audio_append(const char *text, unsigned n)
 +{
-+	char line[768];
-+	unsigned n = mi8_audio_sink_summary(line, sizeof(line));
-+	if (!n) return;
-+	if (n >= sizeof(line)) n = sizeof(line) - 1;
++	if (!n || n > LOADER_LOG_SIZE) return;
 +	/* Preserve the newest diagnostics even if the earlier append filled RAM. */
 +	if (loader_log_len > LOADER_LOG_SIZE - n) {
 +		unsigned discard = loader_log_len - (LOADER_LOG_SIZE - n);
 +		__builtin_memmove(loader_log, loader_log + discard, loader_log_len - discard);
 +		loader_log_len -= discard;
 +	}
-+	__builtin_memcpy(loader_log + loader_log_len, line, n);
++	__builtin_memcpy(loader_log + loader_log_len, text, n);
 +	loader_log_len += n;
++}
++
++static void
++loader_audio_summary(void)
++{
++	char line[768];
++	unsigned n, tail_length;
++	/* audio=2: the DSP worker's own lines first (written before the return), then the sink's. */
++	const char *tail = mi8_rproc_audio_tail(&tail_length);
++	if (tail_length) loader_audio_append(tail, tail_length);
++	n = mi8_audio_sink_summary(line, sizeof(line));
++	if (n >= sizeof(line)) n = sizeof(line) - 1;
++	loader_audio_append(line, n);
 +}
 +
  void
@@ -29678,7 +29755,7 @@ index a058bb5263934bb489894fc933ba340690f590db..82a5823e04f6e1945f999ce4e27e9ac1
  #if defined(GENERIC_PSCI_SMP)
  	/*
  	 * With more than one processor: the others switch themselves off first, and the rest of
-@@ -371,6 +397,11 @@ loader_return(void)
+@@ -371,6 +408,11 @@ loader_return(void)
  #endif
  	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
  	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
@@ -29690,7 +29767,7 @@ index a058bb5263934bb489894fc933ba340690f590db..82a5823e04f6e1945f999ce4e27e9ac1
  	redwood_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
  	redwood_adsp_quiesce();         /* nor the audio DSP */
  	redwood_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
-@@ -378,6 +409,7 @@ loader_return(void)
+@@ -378,6 +420,7 @@ loader_return(void)
  	redwood_torch_quiesce();        /* the flashlight off, if it was lit */
  	redwood_camera_quiesce();       /* the camera powered down, if it was powered up */
  	redwood_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
@@ -29698,7 +29775,7 @@ index a058bb5263934bb489894fc933ba340690f590db..82a5823e04f6e1945f999ce4e27e9ac1
  	/*
  	 * A panic's text is first collected in the panic buffer and only later
  	 * flushed to the console; if the console itself is what failed, that
-@@ -394,7 +426,14 @@ loader_return(void)
+@@ -394,7 +437,14 @@ loader_return(void)
  			loader_log_putc(*c);
  		}
  	}

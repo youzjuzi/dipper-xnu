@@ -69,6 +69,9 @@ static void delay_for_interval(unsigned n,unsigned unit){
 }
 #define LOADER_LOG_SIZE (1536*1024)
 static char loader_log[LOADER_LOG_SIZE];static uint32_t loader_log_len;
+/* audio=2: the DSP worker's tail (mi8_rproc.c), controlled by the test. */
+static const char *test_tail="";static unsigned test_tail_len;
+static const char *mi8_rproc_audio_tail(unsigned *length){*length=test_tail_len;return test_tail;}
 /* @loader */
 #undef printf
 static void reset(void){
@@ -112,7 +115,7 @@ int main(void){
  step_arg=0;const char *owners[]={"adsp","adsp_step","sound","virtio_sound"};
  for(unsigned i=0;i<4;i++){owner_name=owners[i];owner_arg=1;mi8_audio_sink_init();CHECK(!spawned&&!audio_sink);}
  owner_arg=0;audio_sink=other_sink;mi8_audio_sink_init();CHECK(audio_sink==other_sink&&!spawned);audio_sink=NULL;
- audio_arg=2;mi8_audio_sink_init();CHECK(!spawned);audio_arg=1;spawn_fail=true;mi8_audio_sink_init();CHECK(!audio_sink&&!installed);spawn_fail=false;
+ audio_arg=3;mi8_audio_sink_init();CHECK(!spawned);audio_arg=1;spawn_fail=true;mi8_audio_sink_init();CHECK(!audio_sink&&!installed);spawn_fail=false;
  for(unsigned s=0;s<=8;s++){reset();audio_arg=1;step_arg=s;mi8_audio_sink_init();CHECK(installed&&audio_sink==count_sink&&spawned==1&&deallocated==1);}
  mi8_audio_sink_init();CHECK(spawned==1);CHECK(strstr(logs,"count-only sink installed (no DSP, no amp)"));
  reset();audio_arg=1;mi8_audio_sink_init();
@@ -155,6 +158,14 @@ int main(void){
  lck_mtx_unlock(&audio_lock);CHECK(LOAD(&stopping));
  loader_log_len=0;loader_audio_summary();CHECK(loader_log_len>0&&loader_log_len<768&&loader_log[loader_log_len-1]=='\n');
  reset();loader_log_len=42;loader_audio_summary();CHECK(loader_log_len==42);
+ /* audio=2: the worker's tail first, then the sink summary, both in the last 32 KiB of a full log. */
+ reset();audio_arg=2;mi8_audio_sink_init();CHECK(LOAD(&installed));
+ test_tail="mi8rp: audio=2: zero stream completed cleanup=complete\n";test_tail_len=(unsigned)strlen(test_tail);
+ loader_log_len=LOADER_LOG_SIZE;memset(loader_log,'x',sizeof(loader_log));
+ loader_audio_summary();CHECK(loader_log_len==LOADER_LOG_SIZE);
+ memcpy(tail,loader_log+loader_log_len-32768,32768);tail[32768]=0;
+ {char *z=strstr(tail,"mi8rp: audio=2: zero stream completed"),*f=strstr(tail,"audio: final count-only snapshot=");CHECK(z&&f&&z<f);}
+ test_tail_len=0;reset();loader_log_len=42;loader_audio_summary();CHECK(loader_log_len==42);
  printf("Count sink SELFTEST PASS: 8000 concurrent writes; exact totals, detach barrier, atomic snapshots, 58 periodic lines, full-log final tail; %u assertions\n",atomic_load(&checks));
  return 0;
 }

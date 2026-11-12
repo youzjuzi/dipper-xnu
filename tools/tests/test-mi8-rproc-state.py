@@ -103,6 +103,7 @@ static bool step_header(void){return true;}
 static bool step_image(void){return true;}
 static bool mi8_audio_play_proven(void){return false;}
 static const char *mi8_audio_play_cleanup(void){return "complete";}
+static bool mi8_audio_play_completed(void){return true;}
 static bool mi8_audio_finish_play(bool down){return down;}
 static pthread_mutex_t wsmmu_lock;static bool audio_play_locked;
 static void lck_mtx_unlock(pthread_mutex_t *lock);

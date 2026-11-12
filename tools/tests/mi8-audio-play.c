@@ -6,7 +6,7 @@
 #include "mi8_audio_pcm.h"
 struct play_peer {
     uint8_t buffer[32768];
-    uint32_t ops[200]; unsigned count,writes,normal,cache,begin,end,clear;
+    uint32_t ops[4000]; unsigned count,writes,normal,cache,begin,end,clear;
     uint32_t fail,drop,status;
     bool fatal,fatal_canary,fatal_close,hung,reset,no_pas,no_begin,no_end,retain,drop_writes,canary_timeout,canary_close_error,bad_map,bad_copp,ordinary_fault;
     unsigned step,after_fatal;
@@ -26,7 +26,7 @@ static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
 #endif
     if(m->fatal)m->after_fatal++;
     if(q[4]!=7&&q[4]!=8)return 0;
-    CHECK(m->count<200);m->ops[m->count++]=op;
+    CHECK(m->count<4000);m->ops[m->count++]=op;
     b[4]=b[8]=q[4];memcpy(b+6,q+10,2);memcpy(b+10,q+6,2);
     *n=28;wr(b+16,0x110e8);wr(b+20,op);wr(b+24,op==m->fail?m->status:0);
     if(op==0x10bcd){m->close_at=p->now;if(m->fatal_close){m->fatal=true;return -1;}}
@@ -50,7 +50,7 @@ static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
                 int16_t left=(int16_t)(m->buffer[at+4*i]|m->buffer[at+4*i+1]<<8);
                 int16_t right=(int16_t)(m->buffer[at+4*i+2]|m->buffer[at+4*i+3]<<8);
                 CHECK(left==right&&left>=-(m->step==16?1036:1000)&&left<=(m->step==16?1036:1000));
-                if(m->step==15)CHECK(!left && !right);
+                if(m->step==15||m->step==17)CHECK(!left && !right);
                 if(m->step!=16)CHECK(left==(int16_t)(m->buffer[at+4*(i%48)]|m->buffer[at+4*(i%48)+1]<<8));
             }
             if(m->ordinary_fault)m->fault.fsr=2;
@@ -372,4 +372,16 @@ static void lifecycle(void){
     CHECK(!run_play(&p,&m)&&mi8_audio_play_proven()&&m.retain&&m.end==1);
 }
 
-int main(void){layouts();events();integration();lifecycle();printf("PCM SELFTEST PASS %u/%u\n",checks,checks);return 0;}
+/* audio=2 (internal 17): 60 s of zero periods, no canary, amp untouched, ordinary teardown. */
+static void zero_stream(void){
+    struct peer p;struct play_peer m;struct mi8_pcm_state bounds;
+    CHECK(!mi8_pcm_run_zero(&bounds,NULL,0,0)&&!mi8_pcm_run_zero(&bounds,NULL,0,MI8_PCM_ZERO_MAX+1));
+    prepare(&p,&m);m.step=17;m.budget=70000000;CHECK(run_play(&p,&m));
+    CHECK(m.normal==3000&&m.writes==3000&&m.cache==3000&&!m.canary_at&&!mi8_audio_play_proven()&&mi8_audio_play_completed());
+    CHECK(m.begin==1&&m.end==1&&!m.retain&&p.closes==1&&p.now<70000000);
+    CHECK(m.ops[m.count-3]==0x10bcd&&m.ops[m.count-2]==0x10d94&&m.ops[m.count-1]==0x10327);
+    const char *const order[]={"asm run errno=0","zero: 15 s","zero: 30 s","zero: 45 s","play: 3000 periods submitted, done=3000","asm stream close errno=0","asm unmap regions errno=0","adm device close errno=0","AFE completed"};
+    log_order(m.log,order,9);CHECK(!strstr(m.log,"canary"));
+    printf("zero stream: %u periods, %u log lines, %llu us\n",m.normal,p.logs,(unsigned long long)p.now);
+}
+int main(void){layouts();events();integration();lifecycle();zero_stream();printf("PCM SELFTEST PASS %u/%u\n",checks,checks);return 0;}

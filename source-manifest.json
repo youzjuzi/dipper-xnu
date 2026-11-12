@@ -20,27 +20,27 @@
       },
       {
         "path": "bsd/dev/mi8_audio.c",
-        "sha256": "e2d8ba2f7c1e544e3128cdf2a5ef840f0c52474a08635360b69babb1ea28d55e",
+        "sha256": "f76a3dd4b4c09dd26e75b47817d5eef2cdb5cdcdec699e036799d971d291f585",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio.h",
-        "sha256": "cbbcc5c543450685e32df15999c0066c5db5b01e583b2ea5afc8ec481e415420",
+        "sha256": "7ff96581bf0cb7fa9af88f16ca4a4b957b2e873a152bc90b7f1dabc2846ad75c",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.c",
-        "sha256": "1ed87ed7ea5fde9beb161dc597b8f41103208d681f52aa4c8fd9962a649dce4c",
+        "sha256": "2f62ffa04d42ce92bf122d486a5e21cc6ee18fd58bbe82982f02dea3a53a7910",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.h",
-        "sha256": "3bc0205afe8836b91474e823cddba1f3a19841010971c3e04eb284a5b7fb73a8",
+        "sha256": "1ed6da9d554ea82a90247c25bcf0a8064a98405d51758941bd60e6cc9a807126",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_sink.c",
-        "sha256": "54716f43808c4f0840f93d611bb302fe27d4a9f0227eb093079a0b85e9dc0b65",
+        "sha256": "bd76858f6327843f0bda08a8e20995ead59ed67763522bf325c6e58a1272b14e",
         "mode": "0o664"
       },
       {
@@ -95,7 +95,7 @@
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "51bbf9cdab3b97a8b282629359292c63a5d8909941fdf2e657fecb8418e8d65d",
+        "sha256": "2e09be006ffc0d2293cf828c0b09a70c8f936198a8105861d9eb7399e8e92549",
         "mode": "0o664"
       },
       {
@@ -260,7 +260,7 @@
       },
       {
         "path": "osfmk/arm64/loader_return.c",
-        "sha256": "d5d42fbdbb6602420d5e49a336b969ce5fd5b327ec9594b634494b8d5e6700c7",
+        "sha256": "f8b541132f807fa66bbab6237e4786fde5f72c89c143fa7b4b640711a3518445",
         "mode": "0o664"
       },
       {
