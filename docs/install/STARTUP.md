@@ -33,11 +33,11 @@ C 结构中的 GUID 必须按字段正确转换，不能把字符串直接粘进
 bash tools/build/build-loader-uefi.sh
 # RUN_ID 换成本轮唯一名称；候选目录必须不存在。
 : "${RUN_ID:?先设置本轮名称}"
-python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --seconds 300 --wifi --peripherals
+python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --seconds 300 --wifi
 (cd "work/runs/$RUN_ID/candidate" && sha256sum -c SHA256SUMS)
 ```
 
-Wi-Fi 需要已核验的对应固件；基础测试可省略 `--wifi --peripherals`。此处候选限时 300 秒，默认不启用持久存储写入或 var_store；要保留 `/private/var` 见下面的[持久保存](#持久保存可选)。具体测试矩阵见[已有分区测试](EXISTING_INSTALL.md)。
+Wi-Fi 需要已核验的对应固件；无线关闭的对照可省略 `--wifi`，需要关闭扬声器时另加 `--no-audio`。此处候选限时 300 秒，默认不启用持久存储写入或 var_store；要保留 `/private/var` 见下面的[持久保存](#持久保存可选)。具体测试矩阵见[已有分区测试](EXISTING_INSTALL.md)。
 
 重建后核对新 GUID、ARM64 EFI、UEFI 内嵌的 loader，以及 boot 镜像中的 BootShim、FD、USB 引导载荷与 DTB。沿用的内核和用户态产物也要核对摘要；在新的 candidate/ 中保存完整的一组启动文件。
 
@@ -52,7 +52,7 @@ Wi-Fi 需要已核验的对应固件；基础测试可省略 `--wifi --periphera
 | daily | `bootcpu=7 cpus=7 ufs=2 root_apfs=ufs_darwin epoch=<UNIX_TIME> wifi_mac=<LOCAL_WIFI_MAC>` |
 | bench 追加 | `loader_return_after=360 taskload=500 touch_lat=1 mi8_cpuclk=10 perfprof=1 fprof=1000` |
 
-`epoch` 按运行时间提供；`wifi_mac` 仍来自本机私有配置，不能固化进代码。daily 不含测量开关和自动返回期限，并不表示长期稳定性已验证。`bootcpu`、`cpus` 由 loader 在内核启动前消费，必须保留；存储选择 `ufs`、`root_apfs` 也保留。需要其他 loader 功能时仍显式传参。
+`epoch` 按运行时间提供；`wifi_mac` 仍来自本机私有配置，不能固化进代码。daily 不含测量开关和自动返回期限，并不表示长期稳定性已验证。`bootcpu`、`cpus` 由 loader 在内核启动前消费，必须保留；存储选择 `ufs`、`root_apfs` 也保留。电量缓存与手电身份也由配套的新 loader 在 dipper 上缺省准备，显式 battery=0/torch=0 关闭；其他 loader 功能仍按需显式传参。
 
 默认值集中在 `pexpert/arm/pe_bootargs.c`，内核解析器与用户态 `kern.bootargs` 共用展开后的配置：
 
@@ -85,14 +85,21 @@ Wi-Fi 需要已核验的对应固件；基础测试可省略 `--wifi --periphera
 | `wifi_quiet` | `1` |
 | `thermgov` | `66` |
 | `ffix` | `1` |
+| `bt` | `7`（iOS 蓝牙，缺省启动依赖 Wi-Fi 侧） |
+| `audio` | `5`（扬声器会话） |
+| `audio_level_db` | `0`（0 dB 数字增益档） |
+| `audio_seconds` | `0`（常驻） |
+| `battery` | `1` |
+| `torch` | `3` |
+| `haptic` | `3` |
 
 显式参数优先，包括 `0`。例如 `fb_native=0`、`thermgov=0`、`ffix=0` 分别关闭对应功能，`caenv=0` 阻止注入默认环境变量；其他显式值沿用原消费者的解析和约束。启动时 `bootcfg:` 行按 `arg`/`def` 标记来源；MAC 只显示 `wifi_mac=set(arg)`，不输出其值。
 
-默认 Wi-Fi 配置需要匹配固件和私有 MAC。通用打包工具仍保留 `--wifi` 的显式选择：不带该选项时，短参数中增加 `mi8rp_mss=0 wifi_lx=0 wifi_station=0` 以关闭其无线启动路径。`--peripherals` 仍追加 `battery=1 torch=3 haptic=3`，它们不属于本次默认值表。
+默认 Wi-Fi 配置需要匹配固件和私有 MAC。通用打包工具仍保留 `--wifi` 的显式选择：不带该选项时，短参数中增加 `mi8rp_mss=0 wifi_lx=0 wifi_station=0 bt=0` 以关闭其无线启动路径。`--peripherals` 与 `--bluetooth` 是兼容空操作，不再追加对应参数；`--bluetooth` 仍要求 `--wifi`。有 `--wifi` 时打包器同时核对蓝牙固件与用户态文件。`--no-audio` 追加 `audio=0`；缺省 cmdline 无 bt/audio 参数，采用内核默认表。
 
-以 10 位 epoch、17 字符 MAC 计，daily 为 87 字节，bench 为 172 字节（均不含换行）；加 80 字节保守 loader 前缀分别为 167、252 字节。bench 距 600 字节边界为 348 字节，保持严格小于 600 时最多再加 347 字节。带电池等其他 loader 参数时必须另计前缀。loader 的 608 字节输入结构不变；内核另用 2048 字节缓存保存展开配置，`kern.bootargs` 可返回展开值。该缓存不放宽载荷输入长度限制。
+以 10 位 epoch、17 字符 MAC 计，daily 为 87 字节，bench 为 172 字节（均不含换行）；加 80 字节保守 loader 前缀分别为 167、252 字节。bench 距 600 字节边界为 348 字节，保持严格小于 600 时最多再加 347 字节。默认电量缓存使 loader 还会增加 battery_shared_pa 前缀；打包器按含该地址的完整前缀另行检查。loader 的 608 字节输入结构不变；内核另用 2048 字节缓存保存展开配置，`kern.bootargs` 可返回展开值。该缓存不放宽载荷输入长度限制。
 
-此变更已通过主机解析测试、补丁重放和干净内核 build；短参数载荷的设备冒烟仍待持有人验证。
+原27项短参数设备冒烟已有记录；当前34项默认组合和常驻音频完成主机验证，组合设备验收仍待持有人执行。
 
 
 ## 持久保存（可选）
@@ -111,24 +118,34 @@ python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --se
 - 清空存档：在 TWRP 把 darwin 块 2097152..3145727 清零（`dd if=/dev/zero of=/dev/block/<darwin 节点> bs=4096 seek=2097152 count=1048576`），先核对节点是 darwin；系统卷不受影响。
 - 保存期间系统仍在运行，数据库可能存到一半的状态；周期保存、异常退出和存档增长尚未测试。
 
-## 蓝牙（可选）
+## 蓝牙（缺省开启）
 
-需要先把蓝牙固件放进 `work/hackios/fw-bt/`（取法见[设备准备教程](DEVICE_PREPARATION.md#5-蓝牙固件实验)），再重建用户空间（构建入口已带 `BT=1`：蓝牙守护进程 `bluetoothd`、`BlueTool` 及其注入库和占位固件文件）。打包时同时加 `--wifi` 和 `--bluetooth`：
+需要先把蓝牙固件放进 `work/hackios/fw-bt/`（取法见[设备准备教程](DEVICE_PREPARATION.md#5-蓝牙固件实验)），再重建用户空间（构建入口已带 `BT=1`：蓝牙守护进程 `bluetoothd`、`BlueTool` 及其注入库和占位固件文件）。打包时加 `--wifi`：
 
 ```sh
-python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --seconds 600 --wifi --bluetooth
+python3 tools/build/build-payload.py --output "work/runs/$RUN_ID/candidate" --seconds 600 --wifi
 ```
 
-`--bluetooth` 追加 `bt=7`，并核对启动卷里的固件与根镜像里的蓝牙文件，缺一项就拒绝打包；它要求 `--wifi`，因为芯片和 Wi-Fi 共用供电，蓝牙地址也由 `wifi_mac` 推出。不写存储。
+dipper 缺省 bt=7；打包器在 --wifi 时核对启动卷里的固件与根镜像里的蓝牙文件，缺一项就拒绝打包。缺省 bt 在 mi8rp_mss=0 或缺少 wifi_mac 时跳过并记录原因；显式 bt=1..7 保持原诊断行为。显式 bt=0 关闭。芯片和 Wi-Fi 共用供电，蓝牙地址由 wifi_mac 推出，不写存储。
 
 - 开机后内核先等 `bt_delay` 秒（默认 60），再下载固件，芯片约在开机 70 秒后就绪。这之前"设置"里蓝牙显示关闭，就绪后自动打开。
-- 可以开关蓝牙、搜索设备、配对和连接耳机；没有声音（音频子系统未移植）。
+- 可以开关蓝牙、搜索设备、配对和连接耳机；蓝牙耳机声音仍未实现；扬声器会话是另一条输出路径。
 - 配对记录不跨重启保留（与 `--persist` 的组合未测试），重启后需要重新配对。
 - 启动日志里以 `bt:` 开头的行是内核侧记录；芯片拒绝的命令会以 `bridge: the chip refuses` 记下。
 
+## 扬声器、电量、震动与手电（缺省开启）
+
+扬声器只需自备一个文件：TAS2557 功放固件 `tas2557_uCDSP_goer.bin`，由使用者以 root 从自己手机的 Android 系统中只读取出，放进 `work/hackios/fw-audio/` 后重建用户空间，构建脚本会把它放进启动卷 `fw/`；仓库不包含该文件。音频 DSP（ADSP）固件由内核在运行时从手机自身的 `modem` 分区读取，无需提取。
+
+配套内核和loader在dipper缺省启用 audio=5、battery=1、haptic=3、torch=3。分别显式追加 audio=0、battery=0、haptic=0、torch=0 可关闭；这些是对应功能的关闭开关。无需 --peripherals。扬声器需要配套的ADSP与功放固件启动卷；默认组合已完成一次设备试用（2026-11-12）。
+
+`audio_level_db` 可选 −30/−24/−20/−12/−6/0，缺省0dB；例如 audio_level_db=-30 降低数字电平，0dB并非关闭。`audio_seconds=0` 为常驻：有loader_return_after时受运行结束及收尾期限约束，没有则持续运行；1–900为有界诊断，保留900秒/45000周期单窗与200次wake限制。常驻模式去掉这些时长/次数额度，保留LIVE、状态、时钟、单声道/幅度、缓冲地址、健康与失败锁存等检查。
+
+mi8rp_mss开启时音频仍等待Wi-Fi FW_READY，失败或90秒超时就不启动；mss显式关闭时沿用独立音频路径。常驻会话空闲10秒（写入唤醒后无非零）或30秒（其他静默）软关断功放，DSP与DMA仍每20ms运行，功耗未测。音质未调校；常驻的长时间运行与功耗尚待验证。
+
 ## 蓝牙芯片诊断（实验）
 
-`bt=N` 让内核运行蓝牙诊断到第 N 档，默认关闭，不写存储：`1` 只读摸底，`2` 再打开串口引擎时钟，`3` 引擎内部回环自检，`4` 再给芯片上电、发 HCI Reset 与读版本，`5` 再下载固件（补丁与 NVM，115200 baud，约 25 秒）并重发 HCI Reset 与读版本，`6` 与 `5` 相同但先把串口提速到 3.2 Mbaud（下载约 1 秒）。第 4 档会通过 RPMh 请求五路供电并切换四个引脚，先等待 `bt_delay` 秒（默认 60）；第 5、6 档需要启动卷 `fw/` 里有蓝牙固件，取法见[设备准备教程](DEVICE_PREPARATION.md#5-蓝牙固件实验)，限时建议不少于 300 秒。结果从启动日志里以 `bt:` 开头的行读取；建议同时加 `loader_return_after=240` 之类的限时，结束后完整重启。`bt=7` 即上一节的 iOS 蓝牙。各档结果见[验证记录](../validation/VALIDATION.md#蓝牙芯片的-uart-链路2026-11-10)。
+`bt=N` 让内核运行蓝牙诊断到第 N 档，缺省为第7档；显式 `bt=0` 关闭，不写存储：`1` 只读摸底，`2` 再打开串口引擎时钟，`3` 引擎内部回环自检，`4` 再给芯片上电、发 HCI Reset 与读版本，`5` 再下载固件（补丁与 NVM，115200 baud，约 25 秒）并重发 HCI Reset 与读版本，`6` 与 `5` 相同但先把串口提速到 3.2 Mbaud（下载约 1 秒）。第 4 档会通过 RPMh 请求五路供电并切换四个引脚，先等待 `bt_delay` 秒（默认 60）；第 5、6 档需要启动卷 `fw/` 里有蓝牙固件，取法见[设备准备教程](DEVICE_PREPARATION.md#5-蓝牙固件实验)，限时建议不少于 300 秒。结果从启动日志里以 `bt:` 开头的行读取；建议同时加 `loader_return_after=240` 之类的限时，结束后完整重启。`bt=7` 即上一节的 iOS 蓝牙。各档结果见[验证记录](../validation/VALIDATION.md#蓝牙芯片的-uart-链路2026-11-10)。
 
 ## 降低渲染分辨率（可选，不是默认值）
 

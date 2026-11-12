@@ -123,14 +123,13 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 接手顺序固定为：AGENTS → docs/README（文档导航）→ STATUS（功能与设备边界）→ 本文（开发流程和现场交接）。每项任务结束更新下面的现场交接，不另建多个 current/latest 状态文件。设备标识、原始日志和私人配置只引用本机位置，不复制到公共文档。
 
-### 当前开发现场交接（2026-11-11，覆盖更新，接手时重新核对）
+### 当前开发现场交接（2026-11-12，接手时重新核对）
 
-- **分支/基线**：`feat/bluetooth`，来自 `feat/persist-var-store`（持久保存，已提交 `b175b06`）；本地提交，未 push。
-- **本分支内容**：蓝牙驱动 `bsd/dev/mi8_bt.c`（`bt=1..7`，`bt=7` 为交给 iOS 的桥接）与 IOKit 垫片 `iokit/Kernel/RedwoodBT.cpp`（接入 `iokit/conf/files`）；用户态 `userland/build.sh` 的 `BT=1`（构建入口默认开启）、`mkjobs.py` 给 `bluetoothd` 的传输环境变量、注入库 `src/inject_bt.c`、`src/init.c` 绑定 `/etc/bluetool`；打包工具 `build-payload.py --bluetooth`（需 `--wifi`）。补丁与清单由 patchtool 导出写回，许可清单已加新文件；`work/` 源码与补丁一致。
-- **设备证据**：设置里蓝牙开关、搜索、配对和连接耳机（免提与 A2DP 通道）、关开后自动重连都在真机上通过；开机早期打开"设置"不再显示"不可用"。细节见[验证记录](../validation/VALIDATION.md#ios-蓝牙2026-11-11)。内核增量构建复用降分辨率那轮的目标目录，不另建源码副本；蓝牙固件按教程放在 `work/hackios/fw-bt/`。
-- **下一步**：蓝牙音频要等音频子系统；配对记录与 `--persist` 的组合；芯片睡眠省电（主机目前从不让芯片睡）；缩短 `bt_delay`（需确认不影响 Wi-Fi）；BLE 设备连接与 HID 设备测试。
-- **边界**：只测过一副耳机、一次开机内；GPU/基带退出恢复、首次安装外设收尾和完整 all 待验；设备轮次间完整重启。禁止重跑分区脚本。
-- **私人配置**：沿用 local/README.md 和 local/index.json；蓝牙固件原件在 `local/devices/mi8/bt-firmware/`，不进 Git。
+- 音频分支 `feat/audio-sink` 已合并进 `main`（含 `3da41b2` 缺省外设与常驻会话）。work 源码与注册清单相符，无未导出修改。
+- 当前缺省：bt=7、audio=5、audio_level_db=0、audio_seconds=0（常驻）、battery=1、torch=3、haptic=3；显式 `=0` 关闭。电量/手电缺省需配套新 loader/UEFI，不能只替换内核。
+- 设备：P28（`work/runs/20261112-audio-default-01/`，DEVICE.md）无参数试用通过：蓝牙、电量、震动、手电、扬声器正常，无自动播放、无 panic；约 600 秒由主机提前结束，无会话收尾日志。
+- 未决：刚开机浏览器打不开网页（Wi-Fi 关联正常、TCP 停在 SYN_SENT，原因未定，需无音频对照）；音量键 HUD 显示“声音关闭”（疑为静音拨片状态上报）；Safari 视频发绿；常驻功耗、数小时运行与音质未验收。
+- 下一步：按持有人反馈排期，优先 Wi-Fi 数据停滞。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

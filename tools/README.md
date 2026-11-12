@@ -46,8 +46,46 @@ python3 tools/prepare/patchtool.py scan
 
 `python3 tools/tests/test-boot-defaults.py` 编译准备树中的实际 ARM 默认值代码和 XNU 解析器，以合成设备树测试配置等价、平台隔离和覆盖语义；需要本机 C 编译器。`--tree` 可指定干净 XNU 源码树，`--old-cmdline` 可读取本地完整参数文件，测试将 MAC 替换为零占位值且不打印输入。它不操作设备。公开短参数和打包选项见[启动教程](../docs/install/STARTUP.md#dipper-短启动参数与默认值)。
 
+## ADSP GLINK/APR 主机测试
+
+`python3 tools/tests/test-mi8-audio-apr.py` 用 `MI8_GLINK_HOST_TEST` 编译实际 GLINK/APR 源码，合成 SMEM 环形 FIFO 对端，测试 raw open、分片、intent 请求与关闭、APR 坏包拒绝、完整版本列表和默认 IPCRTR/QRTR 兼容性。`python3 tools/tests/test-mi8-rproc-state.py` 提取实际远端状态、查找、调度与互斥代码，检查 ADSP/modem 隔离、嵌套查询、失败收尾与共享事务互斥。两者需要本机 C 编译器与 pthread，输出 `SELFTEST PASS n/n`；`--tree` 指向准备树根目录（包含 `hackios/`）。这些检查不操作设备，不能代替真实固件的通道、APR 或停机验证。
+
+## 有界音频 ring 主机测试
+
+`python3 tools/tests/test-mi8-audio-ring.py` 编译实际 SPSC ring 与 PCM/AFE/APR/GLINK 路径，检查固定种子 10 万次操作、200 万帧并发顺序、关门守恒、6000 周期全零 DMA 与超时收尾。`--sanitize` 启用 ASan/UBSan，`--tsan` 独立启用 TSan，`--tree` 指定干净准备树。配合 `test-mi8-audio-sink.py` 检查实际 cdev 锁、参数冲突与 loader 尾部摘要；这些测试不操作设备。
+
 ## 路径迁移说明（2026-10-31）
 
 原先直接位于 tools/ 根目录的脚本已移入上述分类，文件名不变，不保留第二套脚本或旧入口。当前教程使用新路径。历史验证记录和 work/runs/ 中的原始命令保留当时路径，不修改既有证据；需要再次运行时按本页选择新入口并新建轮次，不直接重跑历史脚本。历史源码/生成器摘要仍指向当时版本，不为目录整理刷新旧实验的来源记录。
 
 新脚本按用途放进现有分类，并更新本页、相关教程和 SHA256SUMS；不要重新堆放到 tools/ 根目录。
+
+## 音频工作线程栈预算
+
+`python3 tools/tests/check-mi8-audio-stack.py <OBJROOT>/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT --json <报告路径>` 反汇编实际链接的 `mi8_*.o`，合计保存寄存器和局部栈分配，以直接调用、尾调用及工具内注明的原生 ops 回调保守并集建图。单帧超过 1 KiB 报警，工作线程最深路径超过 8 KiB 失败；动态 SP、调用环或未审查的间接调用拒绝。SMEM 查找需保留独立快照，列为有理由的单帧例外，其空间仍计入路径。JSON 列出对象摘要、最深路径、人工补边和外部 XNU 入口；余下 8 KiB 留给内核服务、抢占和中断，工具结果不等于整个内核的形式化栈界证明。必须确认对象来自当前源码和交付内核。
+
+## 有界可听片段主机测试
+
+`python3 tools/tests/test-mi8-audio-clip.py --firmware <固件> --reference <离线参考文本> --metadata <摘要JSON>` 链接实际 PCM、GLINK/APR 和 TAS 驱动，验证处理链、触发、150 周期窗口、错误守卫、预热/关断延迟、ring 守恒和完整 worker 出口；`--sanitize` 启用 ASan/UBSan，`--tree` 指定干净准备树。ring 并发继续由 `test-mi8-audio-ring.py --tsan` 验证。栈检查默认覆盖原 worker 与 clip worker；数据对象没有函数，其他线程的超 1 KiB 帧也列为警告，不混算进音频线程路径。
+
+## 会话音频主机测试
+
+`python3 tools/tests/test-mi8-audio-session.py --firmware <固件> --reference <离线参考文本> --metadata <摘要JSON>` 验证实际会话 feeder、TAS 控制、ring/GLINK/APR 路径与独立字对齐 I2C 对端。覆盖多次 wake/mute、静默/时长/次数上限、只读系数校验、健康失败、提交守卫、8 个零块尾段及 worker 出口。`--threads` 使用真实双线程和 0/50/500 ms 控制延迟，`--tsan` 为该并发检查启用 TSan；`--sanitize` 启用 ASan/UBSan。`--tree` 指向干净准备树。
+
+`test-mi8-audio-session-join.py` 单独提取原生 join 实现，验证 300 ms 超时、复位拉低、幂等失败及资源保留。超时不等于线程退出：失败线程及其资源保留至完整重启。栈预算工具另覆盖 session feeder 和 TAS control 两个线程。
+
+`python3 tools/tests/test-mi8-audio-panic.py [--tree <干净准备树>]` 提取原生 panic 钩子和参数处理函数，验证 held-only、单次 MMIO、重复调用锁存、84 组参数组合及首次 LIVE 后 1 秒的触发。主机用普通内存模拟 MMIO，仅替换 ARM 屏障；另静态核对 XNU 回调与 panic buffer 入口。不能替代实际 panic、复位电平或声音停止验证。
+
+`test-mi8-audio-coexist.py [--tree <准备树>] [--sanitize|--tsan]` 提取原生短锁桥接、Wi-Fi map、资源所有权和依赖等待路径，运行真实线程竞争；unmap 仅为测试模型，设备驱动仍为追加映射。`test-mi8-audio-session.py --long` 检查 300 秒、15000 周期，可与 sanitizer/TSan 组合。
+
+`build-payload.py --kernel <本轮 mach 内核> --wifi --bluetooth --seconds 420 --output <新目录>` 显式选择本轮构建；不指定 `--kernel` 时保持原默认路径。`--flashboot <镜像>` 可选择已验证的功放固件镜像，仍执行相同的权限与蓝牙固件检查；缺省保持原镜像路径。打包前仍须确认现有本机输入与固件摘要。默认表现为audio=5、audio_seconds=0常驻、0dB；--wifi候选不必追加音频参数，--no-audio显式关闭。--bluetooth与--peripherals为兼容空操作，前者仍要求--wifi。无--wifi时显式bt=0并关闭Wi-Fi侧；--persist语义保持。
+
+会话回归支持 `test-mi8-audio-session.py --level -30|-24|-20|-12|-6|0`（无效值用于回退测试）及 `--long` 300 秒模拟，覆盖独立提交守卫和 LIVE 欠载统计；计数 sink 回归支持 `--tsan`，覆盖音频写入与 LIVE 世代发布并发、源削顶与同窗 HAL 间隔、实际 worker 滚动尾日志及 loader 最终 32 KiB。
+
+`test-mi8-audio-session-log.py [--tree <准备树>] [--sanitize]` 覆盖真实 audio=5 初始化标志和 PCM→rproc→loader 日志函数链，复现旧 20 行额度在 195 秒耗尽，并验证 300 秒/200 次 wake 后最终 32 KiB 留有 play、asm close、摘要。会话测试独立核对六档系数、所有 mono 输入、499/500（写入唤醒无声音）与1499/1500（其他静默）零周期、WARMING 与首次 LIVE 裁剪及守恒；ring 模型与 TSan 包括消费者裁剪和生产者并发。
+
+会话回归另验证OFF_READY只读Y预校验、预校验wake的I²C事务上限与零系数读取、缓存失效后补校验、200ms健康重试上界及告警立即锁存；模拟HAL零写入唤醒、idle_wakes、10/30秒静默与2400帧渐入。快速唤醒模型采用现有3µs bit-bang半周期、无额外拉伸/MMIO开销、2ms轮询，正常路径约29.6ms；不能代替设备耗时。
+
+`test-mi8-default-peripherals.py [--tree <准备树>]` 提取实际BT入口及loader外设准备函数，验证64种缺省/显式依赖组合、bt=1..6、显式关闭和非dipper隔离；ASan/UBSan。`test-boot-defaults.py --package-cmdline <文件>` 使用原生解析器核对实际候选七项(def)，不打印MAC，参考配置独立手写。
+
+`test-mi8-audio-session.py --resident` 以固定数组运行47976秒虚拟时钟、1000随机短声与3段21分钟连续声，穿过实际PCM/GLINK/APR及独立I²C模型；支持--sanitize，记录启动后原生分配字节保持27512、结束归零及固定尾日志。常驻新增独立性质拒绝测试，有界900秒/45000/201用例保持；原--tsan与--long并发检查继续适用。

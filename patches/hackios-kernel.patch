@@ -1141,7 +1141,7 @@ index 14c7b625539fbd1a22a8b87ca0efbdfe52e4cd36..66bb557d1567b8ae45aad3ae233cc0ff
  
  enum { EfiLoaderData = 2, EfiConventionalMemory = 7 };
 diff --git a/xnuloader/loader.c b/xnuloader/loader.c
-index 640b05d0788b4368384e7f8534b93ea05294bd3b..8a6d1bdc360d678526cecfcf5a5ee73795834a97 100644
+index 640b05d0788b4368384e7f8534b93ea05294bd3b..17ab3087a27ef2a60b1c34c42e23bc9a2c1018d4 100644
 --- a/xnuloader/loader.c
 +++ b/xnuloader/loader.c
 @@ -254,6 +254,9 @@ clean_dcache(uint64_t start, uint64_t end)
@@ -1300,7 +1300,52 @@ index 640b05d0788b4368384e7f8534b93ea05294bd3b..8a6d1bdc360d678526cecfcf5a5ee737
  		}
  		p += sizeof(*e) + ((e->size + 15) & ~15u);
  	}
-@@ -2988,6 +3069,19 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+@@ -2731,6 +2812,21 @@ choose_window(const struct payload_info *pi)
+  */
+ static int starts_with(const char *s, const char *prefix);
+ 
++/* Mirror only loader-owned setup for dipper's kernel peripheral defaults.
++ * An explicit token, including zero, replaces the fallback. Keep the existing
++ * OR behavior for repeated explicit tokens and other diagnostic values. */
++static int loader_peripheral_requested(const char *args,const char *key,int fallback,int exact_one)
++{
++ int found=0,enabled=0;unsigned n=0;while(key[n])n++;
++ for(const char *c=args;*c;c++){
++  if((c==args || c[-1]==' ') && starts_with(c,key) && c[n]=='='){
++   found=1;const char *v=c+n+1;
++   enabled|=exact_one?(v[0]=='1' && (!v[1] || v[1]==' ')):(v[0]>='1' && v[0]<='9');
++  }
++ }
++ return found?enabled:fallback;
++}
++
+ static int
+ run_kernel(int have_checkpoint, uint64_t checkpoint)
+ {
+@@ -2848,9 +2944,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+ 	/* "bootcpu=N" among the kernel's arguments: run it on core N (see run_on_other_cpu) */
+ 	uint64_t this_mpidr = READ_SYSREG(MPIDR_EL1) & 0xFFFFFF, kernel_mpidr = this_mpidr;
+ 	/* "cpus=N" or "cpumask=M" there too: the kernel may have more cores than the one it starts on */
+-	int more_cores = 0, battery_requested = 0, ufs_requested = 0;
++	int more_cores = 0, ufs_requested = 0;
++ int battery_requested=loader_peripheral_requested(pi.cmdline,"battery",PLAT==&platform_dipper,1);
+ 	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (bsd/dev/redwood_torch.c) */
+-	int torch_requested = 0;
++	int torch_requested=loader_peripheral_requested(pi.cmdline,"torch",PLAT==&platform_dipper,0);
+ 	/* "cam=5" there too: the phone's wide camera is iOS's (bsd/dev/redwood_camera.c) */
+ 	int camera_requested = 0;
+ 	/* (the loader stays for run after run: what the last run's arguments said must not hold for this one) */
+@@ -2864,9 +2961,6 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+ 			kernel_mpidr = (uint64_t)(c[8] - '0') << PLAT->core_shift;
+ 		}
+ 		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
+-		battery_requested |= starts_with(c, "battery=1") && (c == pi.cmdline || c[-1] == ' ') &&
+-		    (c[9] == 0 || c[9] == ' ');
+-		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
+ 		camera_requested |= starts_with(c, "cam=5") && (c == pi.cmdline || c[-1] == ' ') && (c[5] == 0 || c[5] == ' ');
+ 		gamut_p3 |= starts_with(c, "gamut=p3") && (c == pi.cmdline || c[-1] == ' ');
+ 		if (starts_with(c, "ufs=") && (c == pi.cmdline || c[-1] == ' ') && c[4] >= '1' && c[4] <= '2' &&
+@@ -2988,6 +3082,19 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
  			ba->commandLine[n++] = *c;
  		}
  	}
@@ -1320,7 +1365,7 @@ index 640b05d0788b4368384e7f8534b93ea05294bd3b..8a6d1bdc360d678526cecfcf5a5ee737
  	if (wdt_armed) {
  		for (const char *c = "hv_wdt_pet=1 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
  			ba->commandLine[n++] = *c;
-@@ -3344,6 +3438,12 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
+@@ -3344,6 +3451,12 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
  		print("ufs: the kernel put its own list in %d times and took it out %d times\n",
  		    (uint64_t)block_shared.kernel_native.switched_in, (uint64_t)block_shared.kernel_native.switched_out);
  	}
@@ -1333,7 +1378,7 @@ index 640b05d0788b4368384e7f8534b93ea05294bd3b..8a6d1bdc360d678526cecfcf5a5ee737
  	if (block_write_requested) {
  		print("ufs: %d writes into darwin, %d bytes, read back the same; %d refused\n", block_writes,
  		    block_write_bytes, block_writes_refused);
-@@ -3788,8 +3888,17 @@ usb_poll_command(void)
+@@ -3788,8 +3901,17 @@ usb_poll_command(void)
  	if (USB == NULL) {
  		return;         /* this run was not started over USB */
  	}
@@ -1353,7 +1398,7 @@ index 640b05d0788b4368384e7f8534b93ea05294bd3b..8a6d1bdc360d678526cecfcf5a5ee737
  	}
  	USB->handle_event(&msg, &size, &data);
  	if (msg == UsbDeviceEventDeviceStateChange) {
-@@ -3917,6 +4026,241 @@ ramfb_phone_screen(void)
+@@ -3917,6 +4039,241 @@ ramfb_phone_screen(void)
  	SCREEN.stride = PHONE_WIDTH * 4;
  }
  
@@ -1595,7 +1640,7 @@ index 640b05d0788b4368384e7f8534b93ea05294bd3b..8a6d1bdc360d678526cecfcf5a5ee737
  efi_status EFIAPI
  efi_main(efi_handle image, efi_system_table *st)
  {
-@@ -3944,24 +4288,67 @@ efi_main(efi_handle image, efi_system_table *st)
+@@ -3944,24 +4301,67 @@ efi_main(efi_handle image, efi_system_table *st)
  		for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
  			if (platforms[i]->fb_base == SCREEN.base)
  				PLAT = platforms[i];

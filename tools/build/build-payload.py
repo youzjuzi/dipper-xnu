@@ -20,22 +20,19 @@ def sha256(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def build_cmdline(seconds, epoch, wifi_mac=None, peripherals=False, persist=False, bluetooth=False):
+def build_cmdline(seconds, epoch, wifi_mac=None, peripherals=False, persist=False, bluetooth=False, no_audio=False):
     """Use kernel defaults; preserve the packager's opt-in radio profile."""
     cmdline = (f'loader_return_after={seconds} epoch={epoch} '
                'bootcpu=7 cpus=7 ufs=2 root_apfs=ufs_darwin')
     if wifi_mac is not None:
         cmdline += f' wifi_mac={wifi_mac}'
     else:
-        cmdline += ' mi8rp_mss=0 wifi_lx=0 wifi_station=0'
-    if peripherals:
-        cmdline += ' battery=1 torch=3 haptic=3'
+        cmdline += ' mi8rp_mss=0 wifi_lx=0 wifi_station=0 bt=0'
     if persist:
         # The data volume is read back at boot and saved when the run ends (darwin blocks >= 2042368 only).
         cmdline += ' ufs_write=1 var_store=1 var_save_ms=120000'
-    if bluetooth:
-        # WCN3990 firmware download at 3.2 Mbaud, then the AppleBTHci bridge for bluetoothd (bsd/dev/mi8_bt.c).
-        cmdline += ' bt=7'
+    if no_audio:
+        cmdline += ' audio=0'
     return cmdline
 
 
@@ -43,12 +40,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='new directory, preferably under ignored work/runs/')
     parser.add_argument('--seconds', type=int, default=300)
+    parser.add_argument('--kernel', type=Path, help='explicit kernel from the current build; otherwise use the default build path')
+    parser.add_argument('--flashboot', type=Path, help='explicit boot APFS image, verified with the same firmware and permission checks')
     parser.add_argument('--wifi', action='store_true', help='enable Mi8 modem/ath10k station mode')
-    parser.add_argument('--peripherals', action='store_true', help='enable battery reporting, iOS torch and haptics')
+    parser.add_argument('--peripherals', action='store_true', help='compatibility option: battery, torch and haptics are enabled by default')
     parser.add_argument('--persist', action='store_true',
                         help='keep /private/var in darwin: read it back at boot, save it when the run ends (writes storage)')
     parser.add_argument('--bluetooth', action='store_true',
-                        help='with --wifi: bring up the WCN3990 Bluetooth controller for iOS (bt=7)')
+                        help='compatibility option: Bluetooth is enabled by default with --wifi')
+    parser.add_argument('--no-audio', action='store_true', help='disable speaker audio for comparison or troubleshooting')
     args = parser.parse_args()
     if args.bluetooth and not args.wifi:
         # The chip shares its supplies with the Wi-Fi side and takes its address from wifi_mac.
@@ -59,9 +59,9 @@ def main():
         raise SystemExit('Use a bounded run between 60 and 1800 seconds')
     k = ROOT / 'work/hackios'
     inputs = {
-        'kernel.macho': k / 'xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837',
+        'kernel.macho': args.kernel or k / 'xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837',
         'root.apfs': k / 'userland/root.apfs',
-        'flashboot.apfs': k / 'userland/flashboot.apfs',
+        'flashboot.apfs': args.flashboot or k / 'userland/flashboot.apfs',
         'boot-dipper.img': ROOT / 'work/edk2/boot-dipper.img',
         'loader.efi': k / 'xnuloader/loader.efi',
     }
@@ -104,7 +104,7 @@ def main():
             raise SystemExit('WCN3990 firmware-5.bin missing or stale in root.apfs; rebuild userland')
         wifi_firmware[name] = expected
     bt_firmware = {}
-    if args.bluetooth:
+    if args.wifi:
         # The bring-up's firmware (pulled from the phone into fw-bt, see docs/install/DEVICE_PREPARATION.md)
         # in the boot volume, and the iOS side (userland/build.sh BT=1) in root.apfs.
         for name in ('crbtfw21.tlv', 'crnv21.bin'):
@@ -133,12 +133,12 @@ def main():
         mac = mac_file.read_text().strip()
         if not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', mac) or int(mac[:2], 16) & 3 != 2:
             raise SystemExit('local/wifi-mac must contain a locally administered unicast MAC')
-    cmdline = build_cmdline(args.seconds, int(time.time()), mac, args.peripherals, args.persist, args.bluetooth)
+    cmdline = build_cmdline(args.seconds, int(time.time()), mac, args.peripherals, args.persist, args.bluetooth, args.no_audio)
     # Maximum generated prefix for this fixed dipper profile (cpus supplied,
     # no serial UART), including the optional watchdog and battery address.
     prefix = 'debug=0x8 rd=md0 vtimer_intid=19 hv_wdt_pet=1 ufs_shared_pa=0x' + '0' * 16 + ' '
-    if args.peripherals:
-        prefix += 'battery_shared_pa=0x' + '0' * 16 + ' '
+    # Default battery uses a loader-owned cache address.
+    prefix += 'battery_shared_pa=0x' + '0' * 16 + ' '
     # ufs_write and var_store are enabled only with --persist.
     if len(cmdline.encode()) + len(prefix) >= 608:
         raise SystemExit('Boot arguments exceed conservative loader allowance')
@@ -165,7 +165,7 @@ def main():
         'scope': 'host package, device GPT and system hash must be checked separately',
         'storage_writes': args.persist, 'restore_old_var_store': args.persist,
         'wifi_enabled': args.wifi, 'seconds': args.seconds, 'cmdline': cmdline,
-        'peripherals_enabled': args.peripherals, 'bluetooth_enabled': args.bluetooth,
+        'peripherals_enabled': True, 'bluetooth_enabled': args.wifi, 'audio_enabled': not args.no_audio,
         'maximum_bootargs_bytes': len(cmdline.encode()) + len(prefix),
         'artifacts': records, 'gpu_firmware': firmware,
         'wifi_feature_metadata': wifi_firmware, 'bluetooth_firmware': bt_firmware,

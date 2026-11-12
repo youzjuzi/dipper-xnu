@@ -101,7 +101,7 @@ index 4f0aa3944cc2b3fd647e6693f6fb605455e01333..027a28f9e83bcd08baf302f0d292d858
  	install_name_tool -id /redwood/lib/libredwoodair.dylib out/libredwoodair.dylib
  	echo "mk-mesa.sh: $B/out/libredwoodair.dylib ($(stat -c %s out/libredwoodair.dylib) bytes," \
 diff --git a/userland/build.sh b/userland/build.sh
-index 582866f82497f32c86226f6a095e0a8e0c9dc791..28aa7e90de5ebb6764d8468fd20e9898ed8ec87d 100755
+index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383399ca8f1 100755
 --- a/userland/build.sh
 +++ b/userland/build.sh
 @@ -17,6 +17,10 @@
@@ -247,10 +247,16 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..28aa7e90de5ebb6764d8468fd20e9898
  # ... and the image of the Wi-Fi DSP, from /vendor/firmware_mnt/image of the same Android into ../fw-wifi
  # (bsd/dev/redwood_wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
  # board data and the regulatory database (image/qca6750 there; 60 and 24 KB)
-@@ -675,6 +712,12 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+@@ -675,6 +712,18 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
  		mkdir -p flashboot/fw
  		cp ../fw-audio/aw882xx_acf.bin flashboot/fw/
  	fi
++	# Private TAS2557 tuning image; consumed only by the gated shutdown probe.
++	if [ -f ../fw-audio/tas2557_uCDSP_goer.bin ]; then
++		mkdir -p flashboot/fw
++		cp ../fw-audio/tas2557_uCDSP_goer.bin flashboot/fw/
++	fi
++
 +	# the Bluetooth chip's firmware, the phone's /bt_firmware/image (the "bluetooth" partition): the rampatch and the NVM of
 +	# the WCN3990, pulled from the phone into ../fw-bt (never in the repository); the kernel's bt=5 step finds them in fw/
 +	if [ -f ../fw-bt/crbtfw21.tlv ] && [ -f ../fw-bt/crnv21.bin ]; then
@@ -260,7 +266,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..28aa7e90de5ebb6764d8468fd20e9898
  	# the package manager's prefix, when tools/mk-jb.sh has fetched one: /jb of the boot volume, which is
  	# /private/preboot/jb once the iOS volume is the root -- the volume where a rootless jailbreak keeps its
  	# Procursus on an iPhone as well; init grafts it onto /var/jb (src/init.c, mount_writable)
-@@ -708,7 +751,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+@@ -708,7 +757,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
  fi
  
  # --- the system image -----------------------------------------------------------------------------
