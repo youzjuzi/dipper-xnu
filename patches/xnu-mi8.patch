@@ -5569,10 +5569,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..d3c2666887c4e6f7269120d6197aa66163db7606
+index 0000000000000000000000000000000000000000..7bd9694b0988a6a50a7a2f03c2e00f1644de3d2a
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,781 @@
+@@ -0,0 +1,790 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
@@ -5813,12 +5813,16 @@ index 0000000000000000000000000000000000000000..d3c2666887c4e6f7269120d6197aa661
 +	return mi8_apr_encode_service(4, 0, 0, token, opcode, payload, n, packet, capacity, bytes);
 +}
 +
++static const struct mi8_pcm_amp *play_amp;
++void mi8_audio_set_amp(const struct mi8_pcm_amp *amp) { play_amp=amp; }
++
 +struct audio_session {
 +	const struct mi8_glink_cfg *io;
 +	struct mi8_glink *link;
 +	struct mi8_apr_reply reply;
 +	struct mi8_apr_pending *pending;
-+	bool afe_active, afe_event, play, canary, fatal_seen;
++	bool afe_active, afe_event, play, canary, fatal_seen, muted;
++	const struct mi8_pcm_amp *amp;
 +	bool (*fatal)(void *);
 +	struct mi8_pcm_state *pcm;
 +	struct mi8_pcm_ops play_ops;
@@ -6090,7 +6094,7 @@ index 0000000000000000000000000000000000000000..d3c2666887c4e6f7269120d6197aa661
 +		}
 +	}
 +	TELL((*s), "mi8rp: 10: amp pins: reset76=%u spkid87=%u irq30=%u (read only)\n", amp[0] & 1, amp[1] & 1, amp[2] & 1);
-+	if (amp[0] & 1) { TELL((*s), "mi8rp: 10: amp reset is not low; AFE skipped\n"); return false; }
++	if ((amp[0] & 1) && !(s->muted && s->amp && s->amp->held())) { TELL((*s), "mi8rp: 10: amp reset is not low; AFE skipped\n"); return false; }
 +	for (unsigned i = 0; i < 4; i++) {
 +		if (!pins->read(pins->ctx, 58 + i, &cfg[i], &io[i])) {
 +			TELL((*s), "mi8rp: 10: pin %u read failed; no pins touched\n", 58 + i); return false;
@@ -6120,7 +6124,8 @@ index 0000000000000000000000000000000000000000..d3c2666887c4e6f7269120d6197aa661
 +	started = !error || uncertain;
 +	if (error) goto out;
 +	if (s->play) {
-+		success=mi8_pcm_run(s->pcm,&s->play_ops,s->play_deadline,s->canary);
++		if (s->muted) success=mi8_pcm_run_muted(s->pcm,&s->play_ops,s->play_deadline,s->amp);
++		else success=mi8_pcm_run(s->pcm,&s->play_ops,s->play_deadline,s->canary);
 +		goto out;
 +	}
 +	{
@@ -6136,6 +6141,7 @@ index 0000000000000000000000000000000000000000..d3c2666887c4e6f7269120d6197aa661
 +	}
 +	success = true;
 +out:
++	if (s->amp) s->amp->stop();
 +	if (started && afe_command(s, MI8_AFE_STOP, true, &uncertain)) {
 +		clean = false; TELL((*s), "mi8rp: 10: Pending DEVICE_STOP; DSP shutdown still required\n");
 +	}
@@ -6193,6 +6199,7 @@ index 0000000000000000000000000000000000000000..d3c2666887c4e6f7269120d6197aa661
 +		memset(&play_pcm,0,sizeof(play_pcm));last_play_proven=false;last_play_clean=false;
 +		last_afe_clean=last_smmu_clean=true;*last_cleanup=0;
 +		session->canary=step==13;session->fatal=fatal;
++		session->muted=step==15;session->amp=session->muted?play_amp:NULL;
 +		session->play=true;session->pcm=&play_pcm;session->memory_ops=memory_ops;
 +		session->play_deadline=play_until>3000000?play_until-3000000:0;
 +		last_play_teardown=play_until;
@@ -6349,22 +6356,27 @@ index 0000000000000000000000000000000000000000..d3c2666887c4e6f7269120d6197aa661
 +{
 +#ifndef MI8_GLINK_HOST_TEST
 +	struct mi8_audio_pin_ops ops = { native_pin_read,native_pin_write,&native };
-+	return audio_run(cfg,alive,ctx,pins?pins:&ops,true,memory_ops,until,step,fatal);
++	bool okay=audio_run(cfg,alive,ctx,pins?pins:&ops,true,memory_ops,until,step,fatal);
 +#else
-+	return pins && memory_ops && audio_run(cfg,alive,ctx,pins,true,memory_ops,until,step,fatal);
++	bool okay=pins && memory_ops && audio_run(cfg,alive,ctx,pins,true,memory_ops,until,step,fatal);
 +#endif
++	if (step==15 && play_amp) play_amp->stop();
++	return okay;
 +}
 diff --git a/bsd/dev/mi8_audio.h b/bsd/dev/mi8_audio.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..db61e0e0959908d718dc8ee8a2f762b3a49a4e13
+index 0000000000000000000000000000000000000000..90cfa7c34112e849086aa641b73ab88ad9a0af1d
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,63 @@
 +/* SPDX-License-Identifier: MIT */
-+/* APR core handshake and explicit AFE MI2S control. The explicit playback entry never controls the amplifier. */
++/* APR core handshake and explicit AFE MI2S control. The muted check uses explicit worker-owned amplifier callbacks. */
 +#ifndef MI8_AUDIO_H
 +#define MI8_AUDIO_H
 +#include "mi8_glink.h"
++
++struct mi8_pcm_amp;
++void mi8_audio_set_amp(const struct mi8_pcm_amp *);
 +
 +#define MI8_APR_MAX_SERVICES 256u
 +struct mi8_audio_service {
@@ -6422,10 +6434,10 @@ index 0000000000000000000000000000000000000000..db61e0e0959908d718dc8ee8a2f762b3
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..c0ac270027ec5adaf74710a4f1e26d591f656200
+index 0000000000000000000000000000000000000000..855fd1ea060bb5298f4d3c9f11df7ea5dabc29b0
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,304 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6565,6 +6577,7 @@ index 0000000000000000000000000000000000000000..c0ac270027ec5adaf74710a4f1e26d59
 +	if (s->io->now(s->io->ctx)>=until) return ETIMEDOUT;
 +	int error=s->io->poll(s->io->ctx);
 +	if (error) return error;
++	if (s->amp && !s->amp->tick(s->io->now(s->io->ctx)-s->run_start,s->deadline)) return EIO;
 +	s->io->sleep(s->io->ctx,1000); return 0;
 +}
 +static bool
@@ -6579,6 +6592,13 @@ index 0000000000000000000000000000000000000000..c0ac270027ec5adaf74710a4f1e26d59
 +	uint8_t packet[52],p[32]={0};size_t bytes;
 +	struct mi8_pcm_job *j=&s->jobs[slot];
 +	if (j->active) return false;
++	if (s->zero) {
++		if (canary || address<MI8_PCM_ADDRESS || address-MI8_PCM_ADDRESS>32768-MI8_PCM_PERIOD) return false;
++		const uint8_t *data=(const uint8_t *)s->memory.buffer+(size_t)(address-MI8_PCM_ADDRESS);
++		for (unsigned i=0;i<MI8_PCM_PERIOD;i++) if (data[i]) {
++			pcm_log(s,"nonzero PCM rejected before submit");return false;
++		}
++	}
 +	*j=(struct mi8_pcm_job){address,++s->token,s->handle,UINT32_MAX,true,canary};
 +	put32(p,(uint32_t)address);put32(p+4,(uint32_t)(address>>32));put32(p+8,s->handle);
 +	put32(p+12,MI8_PCM_PERIOD);put32(p+16,j->token);
@@ -6593,7 +6613,8 @@ index 0000000000000000000000000000000000000000..c0ac270027ec5adaf74710a4f1e26d59
 +	/* 48 integer samples form one 1kHz cycle at 48kHz. No floating point. */
 +	static const int16_t sine[48]={0,131,259,383,500,609,707,793,866,924,966,991,1000,991,966,924,866,793,707,609,500,383,259,131,0,-131,-259,-383,-500,-609,-707,-793,-866,-924,-966,-991,-1000,-991,-966,-924,-866,-793,-707,-609,-500,-383,-259,-131};
 +	uint8_t *p=(uint8_t*)s->memory.buffer+slot*MI8_PCM_PERIOD;
-+	for (unsigned i=0;i<960;i++) { uint16_t v=(uint16_t)sine[s->phase];s->phase=(s->phase+1)%48;put16(p+4*i,v);put16(p+4*i+2,v); }
++	if (s->zero) memset(p,0,MI8_PCM_PERIOD);
++	else for (unsigned i=0;i<960;i++) { uint16_t v=(uint16_t)sine[s->phase];s->phase=(s->phase+1)%48;put16(p+4*i,v);put16(p+4*i+2,v); }
 +	s->io->cache(s->io->ctx,slot*MI8_PCM_PERIOD,MI8_PCM_PERIOD);
 +}
 +int
@@ -6634,24 +6655,25 @@ index 0000000000000000000000000000000000000000..c0ac270027ec5adaf74710a4f1e26d59
 +	return true;
 +}
 +
-+bool
-+mi8_pcm_run(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end, bool canary)
++static bool
++pcm_run(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end, bool canary, bool zero, const struct mi8_pcm_amp *amp)
 +{
-+	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;
++	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;s->zero=zero;s->amp=amp;
 +	bool success=false,closed=false,unmapped=false,adm_closed=true;
-+	if (!io->begin(io->ctx,&s->memory)) { pcm_log(s,"smmu: begin failed; no PCM submitted");return false; }
++	if (!io->begin(io->ctx,&s->memory)) { pcm_log(s,"smmu: begin failed; no PCM submitted");if (amp) amp->stop();return false; }
 +	s->mapped=true;
 +	pcm_log(s,"smmu: claimed bank %u slot %u, low/SID aliases mapped, software walk ok",s->memory.bank,s->memory.slot);
 +	if (!s->memory.buffer || s->memory.address!=MI8_PCM_ADDRESS || s->memory.slot!=8 || s->memory.bank!=43) goto cleanup;
 +	/* Endpoint/session setup follows the pinned q6asm/q6routing paths. */
 +	if (command(s,MI8_PCM_MAP,false) || command(s,MI8_PCM_OPEN,false) || command(s,MI8_PCM_ADM_OPEN,false) ||
 +	    command(s,MI8_PCM_ROUTE,false) || command(s,MI8_PCM_FORMAT,false) || command(s,MI8_PCM_RUN,false)) goto cleanup;
-+	uint64_t start=io->now(io->ctx);
++	uint64_t start=io->now(io->ctx);s->run_start=start;
 +	for (unsigned n=0;n<MI8_PCM_PERIODS;n++) {
 +		unsigned slot=n%8;
 +		uint64_t wait=start+(uint64_t)n*20000;
 +		while (io->now(io->ctx)<wait || s->jobs[slot].active) if (poll_once(s,s->deadline)) goto cleanup;
 +		if (s->result.errors || s->result.unsupported || io->now(io->ctx)>=s->deadline) goto cleanup;
++		if (zero && (io->poll(io->ctx) || (amp && !amp->tick(io->now(io->ctx)-start,s->deadline)))) goto cleanup;
 +		struct mi8_smmu_fault f;
 +		if (!io->fault(io->ctx,&f)) { pcm_log(s,"play: fault registers unreadable"); goto cleanup; }
 +		if (f.gfsr || (f.fsr&~IDLE)) {
@@ -6672,6 +6694,7 @@ index 0000000000000000000000000000000000000000..c0ac270027ec5adaf74710a4f1e26d59
 +	if (canary && !canaries(s)) goto cleanup;
 +	success=true;
 +cleanup:
++	if (amp) amp->stop(); /* before ASM close and before outer AFE stop */
 +	/* Never drain a faulted stream here: terminated DMA may never complete.
 +	 * Each close/unmap gets its own bounded attempt, independent of AFE. */
 +	if (s->stream_attempted) {
@@ -6695,6 +6718,13 @@ index 0000000000000000000000000000000000000000..c0ac270027ec5adaf74710a4f1e26d59
 +	return s->result.completed;
 +}
 +
++bool mi8_pcm_run(struct mi8_pcm_state *s,const struct mi8_pcm_ops *io,uint64_t end,bool canary) {
++	return pcm_run(s,io,end,canary,false,NULL);
++}
++bool mi8_pcm_run_muted(struct mi8_pcm_state *s,const struct mi8_pcm_ops *io,uint64_t end,const struct mi8_pcm_amp *amp) {
++	return pcm_run(s,io,end,false,true,amp);
++}
++
 +bool
 +mi8_pcm_finish(struct mi8_pcm_state *s, bool pas_shutdown)
 +{
@@ -6714,10 +6744,10 @@ index 0000000000000000000000000000000000000000..c0ac270027ec5adaf74710a4f1e26d59
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4d420a4afb53f887102ac6d3b448785ca831816a
+index 0000000000000000000000000000000000000000..a2f57eada18da6ea2937fef30bb02caebaad31b5
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,60 @@
+@@ -0,0 +1,69 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
@@ -6756,12 +6786,20 @@ index 0000000000000000000000000000000000000000..4d420a4afb53f887102ac6d3b448785c
 +	uint32_t failed_opcode, dsp_status, submitted, done, errors, underflow, rejected;
 +	unsigned lines;
 +};
++/* One optional hard-muted check, owned by the serialized play worker. */
++struct mi8_pcm_amp {
++	bool (*held)(void);
++	bool (*tick)(uint64_t elapsed,uint64_t deadline);
++	void (*stop)(void);
++};
 +struct mi8_pcm_state {
 +	const struct mi8_pcm_ops *io;
 +	struct mi8_pcm_memory memory;
 +	struct mi8_pcm_job jobs[10];
 +	struct mi8_pcm_result result;
-+	uint64_t deadline;
++	uint64_t deadline, run_start;
++	bool zero;
++	const struct mi8_pcm_amp *amp;
 +	uint32_t token, handle;
 +	uint16_t copp;
 +	unsigned phase;
@@ -6774,6 +6812,7 @@ index 0000000000000000000000000000000000000000..4d420a4afb53f887102ac6d3b448785c
 +bool mi8_pcm_receive(struct mi8_pcm_state *, const void *, size_t);
 +int mi8_pcm_canary_verdict(uint64_t, const struct mi8_smmu_fault *, const struct mi8_smmu_fault *);
 +bool mi8_pcm_run(struct mi8_pcm_state *, const struct mi8_pcm_ops *, uint64_t, bool canary);
++bool mi8_pcm_run_muted(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,const struct mi8_pcm_amp *);
 +/* Called after AFE stop/clock off/pin restore; pass true only after PAS reset.
 + * Without confirmed close+unmap or PAS success, leaves the mapping untouched. */
 +bool mi8_pcm_finish(struct mi8_pcm_state *, bool pas_shutdown);
@@ -13420,10 +13459,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e241dcc53
+index 0000000000000000000000000000000000000000..78be587b17af4424661007f44ef011c2ba04c2cd
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4345 @@
+@@ -0,0 +1,4364 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -13490,6 +13529,7 @@ index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e
 +#include "mi8_glink.h"
 +#include "mi8_audio.h"
 +#include "mi8_tas2557.h"
++#include "mi8_audio_pcm.h"
 +#include "mi8_audio_smmu.h"
 +#include "mi8_hostsvc.h"
 +#include "mi8_wlfw.h"
@@ -17429,7 +17469,8 @@ index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e
 +		lck_mtx_lock(&wsmmu_lock);
 +		audio_play_locked=true;
 +		/* Firmware loading has its own budget; playback starts with ADSP up. */
-+		audio_play_until = now_us() + 15000000;
++		/* Extra headroom for bounded amp transactions; the PCM window stays 3 s. */
++		audio_play_until = now_us() + (last==15?20000000:15000000);
 +		bool okay = mi8_audio_run_play(&cfg, audio_alive, &adsp_remote, NULL, NULL, audio_play_until, last, audio_fatal);
 +		audio_play_until=mi8_audio_play_teardown_end();
 +		if (!mi8_audio_play_needs_finish()) {
@@ -17469,6 +17510,10 @@ index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e
 +	thread_terminate(current_thread());
 +}
 +
++static const struct mi8_pcm_amp audio_amp_ops = {
++	mi8_tas2557_held,mi8_tas2557_tick,mi8_tas2557_stop
++};
++
 +/* The partitions are there some time after the system starts; steps 5 and on run on a thread that waits for them. */
 +static void
 +steps_from_five(void *parameter, __unused wait_result_t wr)
@@ -17486,6 +17531,12 @@ index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e
 +			break;
 +		}
 +		delay_for_interval(100, NSEC_PER_MSEC);
++	}
++	if (last==15) {
++		uint64_t end=now_us()+20000000;
++		if (end>audio_play_until-3000000) end=audio_play_until-3000000;
++		mi8_tas2557_prepare(end);
++		mi8_audio_set_amp(&audio_amp_ops);
 +	}
 +	if (last >= 13) { audio_play_brief=true;*audio_play_note=0; }
 +	if (last >= 5) {
@@ -17505,6 +17556,7 @@ index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e
 +		if (last >= 9 && !adsp_glink_prepare()) {
 +			say("mi8rp: 9: preparation failed; ADSP not started\n");
 +			qmp_send("{class: image, res: load_state, name: adsp, val: off}");
++			if (last==15) { mi8_tas2557_stop();mi8_tas2557_report("Pending (ADSP preparation)");mi8_audio_set_amp(NULL); }
 +			if (last >= 13) audio_play_thread=NULL;
 +			thread_terminate(current_thread());
 +			return;
@@ -17513,6 +17565,7 @@ index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e
 +		up = step_start();
 +		if (last >= 13) { audio_play_brief=false;say("mi8rp: 13: ADSP start %s: %s",up?"ok":"FAILED",audio_play_note); }
 +		if (up && last >= 9) apr = adsp_audio_handshake(last);
++		if (last==15) mi8_tas2557_stop();
 +		started_here = adsp_started;
 +		if (adsp_started) {
 +			if (last >= 13) { audio_play_brief=true;*audio_play_note=0; }
@@ -17530,7 +17583,7 @@ index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e
 +			if (started_here && !adsp_last_stop_acked) say("mi8rp: 13: Pending ADSP stop-ack\n");
 +			if (started_here && !down) say("mi8rp: 13: Pending PAS shutdown\n");
 +			if (started_here && !adsp_last_aop_off) say("mi8rp: 13: Pending AOP off\n");
-+			say("mi8rp: step 13: PROVEN=%u cleanup=%s%s%s\n",mi8_audio_play_proven(),
++			if (last!=15) say("mi8rp: step 13: PROVEN=%u cleanup=%s%s%s\n",mi8_audio_play_proven(),
 +			    mi8_audio_play_cleanup(),
 +			    started_here && !adsp_last_stop_acked?" (stop-ack missing)":"",
 +			    started_here && !adsp_last_aop_off?" (AOP off Pending)":"");
@@ -17544,6 +17597,11 @@ index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e
 +		}
 +		if (last == 9) say("mi8rp: step 9 APR %s; see channel/stop/PAS results above\n", apr ? "completed" : "FAILED");
 +		if (last < 10) say("mi8rp: step 8 done%s\n", up ? ": the audio DSP came up and was stopped" : ": THE AUDIO DSP DID NOT COME UP");
++	}
++	if (last==15) {
++		mi8_tas2557_stop();
++		mi8_tas2557_report(image_ok && adsp_last_stop_acked && adsp_last_aop_off ? mi8_audio_play_cleanup() : "Pending (ADSP/image/stop/AOP)");
++		mi8_audio_set_amp(NULL);
 +	}
 +	if (last >= 13) {
 +		if (!image_ok) say("mi8rp: step 13: PROVEN=0 FAILED before ADSP start (image/deadline)\n");
@@ -17771,14 +17829,14 @@ index 0000000000000000000000000000000000000000..df7faa52a1b2f71fcbef48856ae4aa0e
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e07eda35371c060bf5703cab4f70c961a83bf4c9
+index 0000000000000000000000000000000000000000..e882b1248b35ed8cb992d4afd3b62818a3bbd242
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,499 @@
+@@ -0,0 +1,646 @@
 +/* SPDX-License-Identifier: MIT
-+ * TAS2557 shutdown-only firmware probe. Independently written from the TI
++ * TAS2557 firmware probe and bounded hard-muted power check. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
-+ * No startup, unmute, calibration, ADSP, DMA, or audio routing here.
++ * No unmute, calibration, ADSP, DMA, or audio routing here.
 + */
 +#include "mi8_tas2557.h"
 +#ifdef MI8_TAS_HOST_TEST
@@ -17906,12 +17964,13 @@ index 0000000000000000000000000000000000000000..e07eda35371c060bf5703cab4f70c961
 +	uint32_t votes,rcg_cfg,rcg_cmd,regs[NSAVE],pins[2],depth;
 +	unsigned book,page,word; bool clocks,se,pins_set,reset,rcg_changed,active;
 +	bool bb; uint32_t bb_io[2];
++	bool guarded, firmware, selecting; uint8_t default_fmt; unsigned lines;
 +};
 +static uint32_t rd(struct tas *t,uint32_t a) { return t->io->read(t->io->ctx,a); }
 +static void wr(struct tas *t,uint32_t a,uint32_t v) { t->io->write(t->io->ctx,a,v); }
 +static uint64_t now(struct tas *t) { return t->io->now(t->io->ctx); }
 +static bool fail(struct tas *t,const char *s) { if (!t->r->error) t->r->error=s; return false; }
-+#define LOG(t,...) do { if ((t)->io->log) (t)->io->log((t)->io->ctx,__VA_ARGS__); } while(0)
++#define LOG(t,...) do { if ((t)->io->log && (!(t)->guarded || (t)->lines++<18)) (t)->io->log((t)->io->ctx,__VA_ARGS__); } while(0)
 +static bool pause_us(struct tas *t,unsigned us) {
 +	uint64_t n=now(t); if (n>=t->end || us>t->end-n) return fail(t,"deadline");
 +	t->io->delay(t->io->ctx,us); return true;
@@ -18029,14 +18088,39 @@ index 0000000000000000000000000000000000000000..e07eda35371c060bf5703cab4f70c961
 +	if (status&ERRORS) return fail(t,"GENI error");
 +	t->r->timeouts++; return fail(t,"timeout");
 +}
++static bool safe_write(unsigned, unsigned, unsigned);
++/* Exact control values; gain is absent. Firmware has a separate, prevalidated
++ * path and may only repeat the reset gain value, before any power sequence. */
++static bool allowed_write(struct tas *t,unsigned reg,uint8_t v) {
++	if (t->selecting) return reg==0 || reg==127;
++	if (t->firmware) return safe_write(t->book,t->page,reg) &&
++	    !(t->book==0 && t->page==0 && reg==6 && v!=0x7c);
++	static const uint8_t control[][4]={
++	    {0,0,1,1},{0,0,33,1},
++	    {0,0,21,5},{0,0,45,0x21},{0,0,46,0x21},{0,0,37,0x5a},
++	    {0,1,106,0x71},{0,1,108,0x11},{0,1,109,0x11},{0,1,110,0x11},
++	    {0,1,111,1},{0,1,64,7},{0,1,114,0x80},
++	    {0,1,0x4d,0x15},{0,1,0x3d,1},{0,1,0x3e,1},
++	    {0,0,5,0xa0},{0,0,5,0xa3},{0,0,4,0xf8},{0,0,0x2c,0x2b},
++	    {0,0,0x2c,0},{100,0,7,1},{0,0,7,3},{0,0,4,0x60},
++	    {0,0,5,0},{0,0,4,0},{0,1,0x3d,0},{0,1,0x3e,0},{0,1,0x4d,0}};
++	if (!t->book && t->page==1 && reg==1) return v==t->default_fmt;
++	for (unsigned i=0;i<sizeof(control)/sizeof(control[0]);i++)
++		if (t->book==control[i][0] && t->page==control[i][1] && reg==control[i][2] && v==control[i][3]) return true;
++	return false;
++}
 +static bool raw_write(struct tas *t,uint8_t reg,const uint8_t *v,unsigned n) {
 +	uint8_t buf[129]; if (!n || n>128 || reg+n>128) return fail(t,"register length");
++	if (t->guarded) for (unsigned i=0;i<n;i++) if (!allowed_write(t,reg+i,v[i])) return fail(t,"write whitelist");
 +	buf[0]=reg;memcpy(buf+1,v,n);return transfer(t,false,buf,n+1,false);
 +}
 +static bool byte_write(struct tas *t,uint8_t reg,uint8_t v) { return raw_write(t,reg,&v,1); }
++static bool select_byte(struct tas *t,uint8_t reg,uint8_t v) {
++	t->selecting=true;bool ok=byte_write(t,reg,v);t->selecting=false;return ok;
++}
 +static bool select_page(struct tas *t,unsigned book,unsigned page) {
-+	if (t->book!=book) { if (!byte_write(t,0,0) || !byte_write(t,127,(uint8_t)book)) return false; t->book=book;t->page=0; }
-+	if (t->page!=page) { if (!byte_write(t,0,(uint8_t)page)) return false; t->page=page; }
++	if (t->book!=book) { if (!select_byte(t,0,0) || !select_byte(t,127,(uint8_t)book)) return false; t->book=book;t->page=0; }
++	if (t->page!=page) { if (!select_byte(t,0,(uint8_t)page)) return false; t->page=page; }
 +	return true;
 +}
 +static bool read_regs(struct tas *t,unsigned b,unsigned p,uint8_t reg,uint8_t *v,unsigned n) {
@@ -18056,15 +18140,17 @@ index 0000000000000000000000000000000000000000..e07eda35371c060bf5703cab4f70c961
 +	    !(b==0 && p==1 && (r==61 || r==62 || r==77)) && !(b==100 && p==0 && r==7);
 +}
 +static bool validate_command(void *ctx,const struct mi8_tas_block *b,uint32_t at,uint8_t book,uint8_t page,uint8_t reg,const uint8_t *v,unsigned n,unsigned ms) {
-+	(void)ctx;(void)b;(void)at;(void)v;
++	(void)b;(void)at;
 +	if (ms>100) return false;
-+	for (unsigned i=0;i<n;i++) if (!safe_write(book,page,reg+i)) return false;
++	for (unsigned i=0;i<n;i++) if (!safe_write(book,page,reg+i) || (ctx && !book && !page && reg+i==6 && v[i]!=0x7c)) return false;
 +	return true;
 +}
 +static bool execute(void *ctx,const struct mi8_tas_block *b,uint32_t at,uint8_t book,uint8_t page,uint8_t reg,const uint8_t *v,unsigned n,unsigned ms) {
 +	struct download *d=ctx;struct tas *t=d->t;uint8_t got[128]; t->word=(at-b->offset-12)/4;t->r->commands++;
 +	if (!n) return pause_us(t,ms*1000);
-+	if (!select_page(t,book,page) || !raw_write(t,reg,v,n)) return false;
++	if (!select_page(t,book,page)) return false;
++	t->firmware=true;bool written=raw_write(t,reg,v,n);t->firmware=false;
++	if (!written) return false;
 +	if (b->y_present) {
 +		unsigned first=0,last=n;while(first<n && !yram(book,page,reg+first)) first++;
 +		while(last>first && !yram(book,page,reg+last-1)) last--;
@@ -18187,18 +18273,23 @@ index 0000000000000000000000000000000000000000..e07eda35371c060bf5703cab4f70c961
 +		t->r->clocks_restored&=(rd(t,VOTE)&VOTES)==(t->votes&VOTES);
 +	}
 +}
-+bool
-+mi8_tas2557_run(const struct mi8_tas_io *io,const uint8_t *raw,size_t size,
-+    uint64_t deadline,struct mi8_tas_result *r)
++static struct {
++	struct tas t;struct mi8_tas_io io;struct mi8_tas_result result;
++	bool initialized, held, attempted, powered, stopped, shutdown, healthy, fault, mute_bad;
++	unsigned samples;uint64_t startup;
++} amp;
++static bool
++tas_run(const struct mi8_tas_io *io,const uint8_t *raw,size_t size,
++    uint64_t deadline,struct mi8_tas_result *r,bool hold)
 +{
-+	struct mi8_tas_firmware fw;struct tas t={.io=io,.r=r,.end=deadline>100000?deadline-100000:0,.book=256,.page=256};
++	struct mi8_tas_firmware fw;struct tas t={.io=io,.r=r,.end=deadline>100000?deadline-100000:0,.book=256,.page=256,.guarded=hold};
 +	uint8_t regs[16]={0},flags[3]={0};bool match=false;
 +	static const uint8_t reference[16]={0,0,0,0xa0,0,0,0x7c,3,0,0x25,8,0x18,0,0x20,0x33,0x28};
 +	if (!r || !io || !io->read || !io->write || !io->now || !io->delay) return false;
 +	memset(r,0,sizeof(*r));r->stage="firmware";
 +	if (!mi8_tas2557_parse(raw,size,&fw,NULL,NULL)) { fail(&t,"invalid firmware");goto out; }
-+	if (!commands(&fw.program,validate_command,NULL) || !commands(&fw.pll,validate_command,NULL) ||
-+	    !commands(&fw.pre,validate_command,NULL) || !commands(&fw.coeff,validate_command,NULL)) { fail(&t,"forbidden firmware command");goto out; }
++	if (!commands(&fw.program,validate_command,hold?&t:NULL) || !commands(&fw.pll,validate_command,hold?&t:NULL) ||
++	    !commands(&fw.pre,validate_command,hold?&t:NULL) || !commands(&fw.coeff,validate_command,hold?&t:NULL)) { fail(&t,"forbidden firmware command");goto out; }
 +	if (now(&t)>=t.end) { fail(&t,"deadline");goto out; }
 +	/* Entry must match the board's reset-low state; do not take a live amp. */
 +	if ((rd(&t,PIN(76)+4)&3) || (rd(&t,PIN(76))&0x3c)) { fail(&t,"reset entry state");goto out; }
@@ -18226,10 +18317,21 @@ index 0000000000000000000000000000000000000000..e07eda35371c060bf5703cab4f70c961
 +		for (unsigned i=0;i<4;i++) if (!byte_write(&t,p0[i][0],p0[i][1])) goto out;
 +		if (!select_page(&t,0,1)) goto out;
 +		for (unsigned i=0;i<7;i++) if (!byte_write(&t,p1[i][0],p1[i][1])) goto out;
-+		if (!read_regs(&t,0,1,1,&fmt,1) || !byte_write(&t,1,(uint8_t)((fmt&~0x18u)|1))) goto out;
++		if (!read_regs(&t,0,1,1,&fmt,1)) goto out;
++		t.default_fmt=(uint8_t)((fmt&~0x18u)|1);
++		if (!byte_write(&t,1,t.default_fmt)) goto out;
 +		LOG(&t,"mi8rp: 14: defaults as TI's load_default; ASI1 format %02x -> %02x\n",fmt,(fmt&~0x18u)|1);
 +	}
 +	if (!load(&t,&fw.program,"prog0") || !load(&t,&fw.pll,"pll0") || !load(&t,&fw.pre,"cfg0 pre") || !load(&t,&fw.coeff,"cfg0 coeff")) goto out;
++	if (hold) {
++		uint8_t gain=0,mute=0;
++		if (!read_regs(&t,0,0,6,&gain,1) || !read_regs(&t,0,0,7,&mute,1)) goto out;
++		LOG(&t,"mi8rp: 15: download CRC match; R06=%02x hard mute=%02x; held in software shutdown\n",gain,mute);
++		if (gain!=0x7c || (mute&3)!=3) { amp.mute_bad=(mute&3)!=3;fail(&t,"gain/mute readback");goto out; }
++		r->ok=true; r->stage="held";
++		amp.io=*io;amp.result=*r;amp.t=t;amp.t.io=&amp.io;amp.t.r=&amp.result;
++		amp.held=true;return true;
++	}
 +	r->stage="flags";
 +	if (!read_regs(&t,0,0,0x68,&flags[0],1) || !read_regs(&t,0,0,0x6c,&flags[1],1) || !read_regs(&t,0,0,0x64,&flags[2],1)) goto out;
 +	LOG(&t,"mi8rp: 14: INT1=%02x INT2=%02x PowerUpFlag=%02x (shutdown observation; PLL lock unknown)\n",flags[0],flags[1],flags[2]);
@@ -18241,6 +18343,94 @@ index 0000000000000000000000000000000000000000..e07eda35371c060bf5703cab4f70c961
 +	return r->ok;
 +}
 +
++bool mi8_tas2557_run(const struct mi8_tas_io *io,const uint8_t *raw,size_t size,uint64_t deadline,struct mi8_tas_result *r) {
++	return tas_run(io,raw,size,deadline,r,false);
++}
++bool mi8_tas2557_hold(const struct mi8_tas_io *io,const uint8_t *raw,size_t size,uint64_t deadline) {
++	if (amp.held) { mi8_tas2557_stop();return false; }
++	memset(&amp,0,sizeof(amp));
++	if (!io || !io->read || !io->write || !io->now || !io->delay) return false;
++	amp.initialized=true;amp.io=*io;
++	bool ok=tas_run(io,raw,size,deadline,&amp.result,true);
++	if (!ok) { amp.stopped=true;amp.fault=true; }
++	return ok;
++}
++bool mi8_tas2557_held(void) { return amp.held && !amp.stopped && (rd(&amp.t,PIN(76)+4)&3)==3; }
++static bool power_write(unsigned b,unsigned p,unsigned r,uint8_t v) {
++	return select_page(&amp.t,b,p) && byte_write(&amp.t,(uint8_t)r,v);
++}
++void mi8_tas2557_stop(void) {
++	if (!amp.held || amp.stopped) return;
++	struct tas *t=&amp.t;uint64_t deadline=now(t)+100000;
++	t->end=deadline-20000;
++	/* A failed transfer may leave a transaction open or the book unknown.
++	 * Recover its boundary before selecting the shutdown registers. */
++	bool ok=true;
++	if (t->active && t->bb) ok=bb_stop(t);
++	if (t->active && t->se) {
++		wr(t,SE+0x604,4);ok=poll(t,SE+0x610,1u<<4,1u<<4,100);
++		if (!ok) { wr(t,SE+0x604,2);ok=poll(t,SE+0x610,1u<<5,1u<<5,100); }
++		wr(t,SE+0x618,0xffffffff);t->active=!ok;
++	}
++	t->book=t->page=256;
++	if (amp.attempted) {
++		ok=ok && power_write(0,0,0x2c,0) && power_write(100,0,7,1) && pause_us(t,10000) &&
++		    power_write(0,0,7,3) && power_write(0,0,4,0x60) && pause_us(t,2000) &&
++		    power_write(0,0,5,0) && power_write(0,0,4,0) && power_write(0,1,0x3d,0) &&
++		    power_write(0,1,0x3e,0) && power_write(0,1,0x4d,0);
++	}
++	amp.shutdown=ok;restore(t,deadline);amp.stopped=true;amp.held=false;
++	if (!ok || !amp.result.reset_low || !amp.result.pins_restored || !amp.result.se_restored || !amp.result.clocks_restored) amp.fault=true;
++	LOG(t,"mi8rp: 15: amp shutdown=%s before AFE stop; reset=%s pins=%s%s\n",ok?"ok":"FAILED; hard reset fallback",
++	    amp.result.reset_low?"low":"UNKNOWN",amp.result.pins_restored?"restored":"Pending",amp.fault?" FAULT":"");
++}
++bool mi8_tas2557_tick(uint64_t elapsed,uint64_t deadline) {
++	if (!amp.held || amp.stopped) return true;
++	struct tas *t=&amp.t;uint64_t n=now(t);
++	if (n>=deadline || deadline-n<200000) { fail(t,"play budget");amp.fault=true;mi8_tas2557_stop();return false; }
++	/* Every I2C operation while powered is bounded by a short sub-budget. */
++	t->end=n+50000;
++	if (!amp.attempted && elapsed>=300000) {
++		if (elapsed>2000000) { fail(t,"late startup");amp.fault=true;mi8_tas2557_stop();return false; }
++		uint8_t gain=0,mute=0;
++		bool read_ok=read_regs(t,0,0,6,&gain,1) && read_regs(t,0,0,7,&mute,1);
++		if (!read_ok || gain!=0x7c || (mute&3)!=3) {
++			amp.mute_bad=read_ok && (mute&3)!=3;
++			LOG(t,"mi8rp: 15: pre-start guard FAULT read=%u R06=%02x hard mute=%02x; no power writes\n",read_ok,gain,mute);
++			goto fault;
++		}
++		amp.attempted=true;
++		if (!power_write(0,1,0x4d,0x15) || !power_write(0,1,0x3d,1) || !power_write(0,1,0x3e,1) ||
++		    !power_write(0,0,5,0xa0) || !power_write(0,0,5,0xa3) || !power_write(0,0,4,0xf8) ||
++		    !pause_us(t,2000) || !power_write(0,0,0x2c,0x2b)) goto fault;
++		amp.powered=true;amp.startup=now(t);
++		LOG(t,"mi8rp: 15: amp startup at +%u ms (hard mute kept, unmute skipped, PCM zero); R06=%02x\n",(unsigned)(elapsed/1000),gain);
++	}
++	if (amp.powered && amp.samples<2 && now(t)-amp.startup>=(amp.samples?1200000u:200000u)) {
++		uint8_t a=0,b=0,p=0,h=0,s=0;
++		if (!read_regs(t,0,0,0x68,&a,1) || !read_regs(t,0,0,0x6c,&b,1) || !read_regs(t,0,0,0x64,&p,1) ||
++		    !read_regs(t,0,0,7,&h,1) || !read_regs(t,100,0,7,&s,1)) goto fault;
++		bool ok=!(a&0xfc) && !(b&0x0c) && (p&0xc0)==0xc0 && (h&3)==3;
++		LOG(t,"mi8rp: 15: amp health +%u ms: INT1=%02x INT2=%02x PowerUpFlag=%02x mute=%02x/%02x irq=%u -> %s\n",
++		    (unsigned)((now(t)-amp.startup)/1000),a,b,p,h,s,rd(t,PIN(30)+4)&1,ok?"ok":"FAULT");
++		amp.samples++;amp.mute_bad=(h&3)!=3;if (!ok) goto fault;
++		amp.healthy=amp.samples==2;
++	}
++	/* Leave at least 500 ms before the 3 s stream ends, even with the
++	 * 100 ms emergency/restore allowance. */
++	if (elapsed>=2300000) mi8_tas2557_stop();
++	return !amp.fault;
++fault:
++	fail(t,"startup/health failure");amp.fault=true;mi8_tas2557_stop();return false;
++}
++void mi8_tas2557_report(const char *cleanup) {
++	if (!amp.initialized || !amp.io.log) return;
++	amp.io.log(amp.io.ctx,"mi8rp: step 15: amp powered=%s health=%s muted=%s shutdown=%s reset=%s cleanup=%s%s\n",
++	    amp.powered?"yes":amp.attempted?"partial":"no",amp.fault?"FAULT":amp.healthy?"ok":"unverified",amp.mute_bad?"FAULT":amp.powered?"hard":"unverified",
++	    amp.shutdown?"ok":amp.attempted?"fallback":"not powered",amp.result.reset_low?"low":"UNKNOWN",cleanup,
++	    amp.result.reset_low && amp.result.pins_restored && amp.result.clocks_restored && amp.result.se_restored?"":" (amp restore Pending)");
++}
++
 +#ifndef MI8_TAS_HOST_TEST
 +extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
 +extern const uint8_t *redwood_image_file(const char *,const char *,uint64_t *,int *);
@@ -18248,7 +18438,9 @@ index 0000000000000000000000000000000000000000..e07eda35371c060bf5703cab4f70c961
 +static struct { uint32_t phys,size;vm_offset_t va; } maps[]={
 +	{GCC,0x60000,0},{SE,0x4000,0},{PIN(76),0x4000,0},{PIN(84),0x4000,0}
 +};
++static vm_offset_t irq_page;
 +static vm_offset_t address(uint32_t pa) {
++	if (pa==PIN(30)+4 && irq_page) return irq_page+0x2004;
 +	for (unsigned i=0;i<sizeof(maps)/sizeof(maps[0]);i++)
 +		if (pa>=maps[i].phys && pa-maps[i].phys<maps[i].size) return maps[i].va+pa-maps[i].phys;
 +	return 0;
@@ -18273,13 +18465,26 @@ index 0000000000000000000000000000000000000000..e07eda35371c060bf5703cab4f70c961
 +	const struct mi8_tas_io io={NULL,native_read,native_write,native_now,native_delay,native_log};
 +	(void)mi8_tas2557_run(&io,fw,(size_t)size,deadline,&result);
 +}
++void mi8_tas2557_prepare(uint64_t deadline) {
++	uint64_t size=0;
++	const uint8_t *fw=redwood_image_file("fw","tas2557_uCDSP_goer.bin",&size,NULL);
++	for (unsigned i=0;i<sizeof(maps)/sizeof(maps[0]);i++) {
++		if (!maps[i].va) maps[i].va=ml_io_map(maps[i].phys,maps[i].size);
++		if (!maps[i].va) { native_log(NULL,"mi8rp: 15: MMIO mapping failed; TAS untouched\n");return; }
++	}
++	if (!irq_page) irq_page=ml_io_map(PIN(28),0x4000);
++	if (!irq_page) { native_log(NULL,"mi8rp: 15: IRQ mapping failed; TAS untouched\n");return; }
++	const struct mi8_tas_io io={NULL,native_read,native_write,native_now,native_delay,native_log};
++	(void)mi8_tas2557_hold(&io,fw,(size_t)size,deadline);
++}
++
 +#endif
 diff --git a/bsd/dev/mi8_tas2557.h b/bsd/dev/mi8_tas2557.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..88f2e04f1033d919350e4128d54c0da87ceadc56
+index 0000000000000000000000000000000000000000..104e5589deb993e8070a050d4849e41fd1f41a17
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.h
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,46 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef MI8_TAS2557_H
 +#define MI8_TAS2557_H
@@ -18314,7 +18519,15 @@ index 0000000000000000000000000000000000000000..88f2e04f1033d919350e4128d54c0da8
 +};
 +bool mi8_tas2557_run(const struct mi8_tas_io *, const uint8_t *, size_t,
 +    uint64_t, struct mi8_tas_result *);
++/* Single play-worker ownership from hold through stop; callbacks are idempotent
++ * after a failed download and never retry touching that amplifier. */
++bool mi8_tas2557_hold(const struct mi8_tas_io *,const uint8_t *,size_t,uint64_t);
++bool mi8_tas2557_held(void);
++bool mi8_tas2557_tick(uint64_t elapsed,uint64_t deadline);
++void mi8_tas2557_stop(void);
++void mi8_tas2557_report(const char *cleanup);
 +#ifndef MI8_TAS_HOST_TEST
++void mi8_tas2557_prepare(uint64_t deadline);
 +void mi8_tas2557_probe(uint64_t deadline);
 +#endif
 +#endif

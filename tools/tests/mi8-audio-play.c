@@ -15,8 +15,15 @@ struct play_peer {
     uint64_t last_write,budget,canary_at,close_at,adm_at;
     char log[16384];size_t log_length;
 };
+#ifdef MI8_AMP_TEST
+static void (*amp_observe)(struct peer *,const uint8_t *);
+static void (*amp_cache_observe)(struct peer *,size_t);
+#endif
 static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
     struct play_peer *m=p->extension;uint32_t op=rd(q+16);
+#ifdef MI8_AMP_TEST
+    if(amp_observe)amp_observe(p,q);
+#endif
     if(m->fatal)m->after_fatal++;
     if(q[4]!=7&&q[4]!=8)return 0;
     CHECK(m->count<200);m->ops[m->count++]=op;
@@ -37,12 +44,13 @@ static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
         m->writes++;
         if(!canary){
             CHECK(address>=0x110000000ull&&address+3840<=0x110008000ull);
-            CHECK(!m->last_write||p->now-m->last_write>=20000);m->last_write=p->now;m->normal++;
+            CHECK(m->step==15||!m->last_write||p->now-m->last_write>=20000);m->last_write=p->now;m->normal++;
             unsigned at=(unsigned)(address-0x110000000ull);
             for(unsigned i=0;i<960;i++){
                 int16_t left=(int16_t)(m->buffer[at+4*i]|m->buffer[at+4*i+1]<<8);
                 int16_t right=(int16_t)(m->buffer[at+4*i+2]|m->buffer[at+4*i+3]<<8);
                 CHECK(left==right&&left>=-1000&&left<=1000);
+                if(m->step==15)CHECK(!left && !right);
                 CHECK(left==(int16_t)(m->buffer[at+4*(i%48)]|m->buffer[at+4*(i%48)+1]<<8));
             }
             if(m->ordinary_fault)m->fault.fsr=2;
@@ -66,7 +74,11 @@ static bool play_begin(void *v,struct mi8_pcm_memory *out){
     if(m->no_begin)return false;
     *out=(struct mi8_pcm_memory){.buffer=m->buffer,.address=MI8_PCM_ADDRESS,.slot=8,.bank=43};return true;
 }
-static void play_cache(void*v,size_t at,size_t n){struct play_peer*m=((struct peer*)v)->extension;CHECK(n==3840&&at+n<=32768);m->cache++;}
+static void play_cache(void*v,size_t at,size_t n){struct play_peer*m=((struct peer*)v)->extension;CHECK(n==3840&&at+n<=32768);m->cache++;
+#ifdef MI8_AMP_TEST
+    if(amp_cache_observe)amp_cache_observe(v,at);
+#endif
+}
 static bool play_fault(void*v,struct mi8_smmu_fault*f){*f=((struct play_peer*)((struct peer*)v)->extension)->fault;return true;}
 static bool play_clear(void*v,uint32_t observed){struct play_peer*m=((struct peer*)v)->extension;CHECK(observed==m->fault.fsr);m->clear++;m->fault.fsr=0x400;return true;}
 static bool play_end(void*v,bool safe){
@@ -231,8 +243,8 @@ static bool dsp_ask_to_stop(unsigned ms){
 static int32_t scm(const char*why,unsigned cmd,unsigned nargs,unsigned dsp,unsigned b,unsigned c,unsigned d,uint64_t*answer){
     (void)why;CHECK(cmd==SCM_PAS_SHUTDOWN&&nargs==SCM_ONE_VALUE&&dsp==PAS_ADSP&&!b&&!c&&!d);
     CHECK(worker_memory->fatal ? worker_peer->afe_count==3 : worker_peer->afe_count==5&&worker_peer->actions[3]==4&&worker_peer->actions[4]==5);
-    CHECK(worker_memory->end==(worker_memory->hung?0u:1u));
-    CHECK(audio_play_locked==worker_memory->hung);pas_calls++;
+    CHECK(worker_memory->end==((worker_memory->hung||worker_memory->fatal)?0u:1u));
+    CHECK(audio_play_locked==(worker_memory->hung||worker_memory->fatal));pas_calls++;
     worker_memory->reset=!worker_memory->no_pas;*answer=worker_memory->no_pas?1:0;
     play_log(worker_peer,"PAS boundary: %s\n",*answer?"failed":"reset confirmed");
     return 0;
@@ -247,12 +259,30 @@ static int redwood_ufs_read_named(const char*n,unsigned a,void*p,unsigned b){(vo
 static void delay_for_interval(unsigned ms,unsigned unit){(void)unit;worker_peer->now+=(uint64_t)ms*1000;}
 static void step_firmware(void){worker_peer->now+=11000000;CHECK(audio_play_until==45000000);}
 static void step_aop(void){}
-static bool step_header(void){return true;}
+#ifdef MI8_AMP_TEST
+static unsigned worker_failure;
+#endif
+static bool step_header(void){
+#ifdef MI8_AMP_TEST
+    if(worker_failure==1)return false;
+#endif
+    return true;
+}
 static bool step_image(void){return true;}
-static bool adsp_glink_prepare(void){return true;}
-static bool step_start(void){adsp_started=true;return true;}
+static bool adsp_glink_prepare(void){
+#ifdef MI8_AMP_TEST
+    if(worker_failure==2)return false;
+#endif
+    return true;
+}
+static bool step_start(void){
+#ifdef MI8_AMP_TEST
+    if(worker_failure==3)return false;
+#endif
+    adsp_started=true;return true;
+}
 static bool adsp_audio_handshake(uint32_t last){
-    CHECK(last==13);audio_play_locked=true;
+    CHECK(last==13||last==15);audio_play_locked=true;
     bool okay=start_play(worker_peer,worker_memory);
     audio_play_until=mi8_audio_play_teardown_end();
     if(!mi8_audio_play_needs_finish())audio_play_locked=false;
@@ -261,6 +291,14 @@ static bool adsp_audio_handshake(uint32_t last){
 static void lck_mtx_unlock(int*lock){CHECK(lock==&wsmmu_lock&&audio_play_locked);unlocks++;}
 static void *current_thread(void){return worker_peer;}
 static void thread_terminate(void*t){CHECK(t==worker_peer);}
+#ifndef MI8_AMP_TEST
+static bool mi8_tas2557_held(void){CHECK(false);return false;}
+static bool mi8_tas2557_tick(uint64_t a,uint64_t b){(void)a;(void)b;CHECK(false);return false;}
+static void mi8_tas2557_stop(void){CHECK(false);}
+static void mi8_tas2557_prepare(uint64_t end){(void)end;CHECK(false);}
+static void mi8_tas2557_report(const char *s){(void)s;CHECK(false);}
+#endif
+static const struct mi8_pcm_amp audio_amp_ops={mi8_tas2557_held,mi8_tas2557_tick,mi8_tas2557_stop};
 /* @steps_from_five */
 static void log_order(const char*text,const char*const*lines,unsigned n){
     for(unsigned i=0;i<n;i++){const char*at=strstr(text,lines[i]);CHECK(at);text=at+strlen(lines[i]);}

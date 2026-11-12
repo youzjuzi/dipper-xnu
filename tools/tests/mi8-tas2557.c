@@ -22,6 +22,9 @@ static struct expected expected[20000];
 static unsigned expected_n,prog_end;
 static uint8_t expected_p;
 struct model {
+	void (*extra_write)(struct model *,unsigned,uint8_t);
+	uint8_t (*extra_read)(struct model *,unsigned,uint8_t);
+	bool (*extra_nack)(void);
 	uint32_t gcc[0x60000/4],se[0x4000/4],cfg[100],pin[100];
 	uint32_t saved_gcc[0x60000/4],saved_se[0x4000/4],saved_cfg[100];
 	uint8_t tx[132],rx[132];unsigned tx_at,tx_n,rx_at,rx_n,book,page,reg,op;
@@ -63,7 +66,7 @@ static uint8_t tas_read(struct model *p,unsigned r) {
      (!p->book && ((p->page>=50&&p->page<=60&&r>=8)||(p->page==61&&r>=8&&r<=27)));
 	if(y && (p->bb_read_start&3) && r/4==p->bb_read_start/4)v=0;
 	if(p->corrupt_y && p->book==140 && p->page==42 && r==88)v^=1;
-	return v;
+	return p->extra_read?p->extra_read(p,r,v):v;
 }
 static void tas_write(struct model *p,unsigned r,uint8_t v) {
 	CHECK(r<128);
@@ -82,6 +85,7 @@ static void tas_write(struct model *p,unsigned r,uint8_t v) {
 		CHECK(e->b==p->book && e->p==p->page && e->r==r && e->v==v);
 		ram[p->book][p->page][r]=v;return;
 	}
+	if(p->seen==expected_n && p->extra_write) {p->extra_write(p,r,v);return;}
 	if((!p->book && !p->page && (r==4||r==5||r==7||r==44)) || (!p->book&&p->page==1&&(r==61||r==62||r==77)) || (p->book==100&&!p->page&&r==7))p->forbidden++;
 	CHECK(p->seen<expected_n);
 	const struct expected *e=&expected[p->seen++];
@@ -100,7 +104,7 @@ static bool sda(struct model *p) { return !master_low(p,85) && !p->slave_low && 
 	!p->arb_low; }
 static void bb_accept(struct model *p) {
 	unsigned v=p->bb_value;
-	p->acked=!(p->fail_at==p->serial && p->which==1);
+	p->acked=!(p->fail_at==p->serial && p->which==1) && !(p->bb_kind==0 && p->extra_nack && p->extra_nack());
 	if(!p->acked)return;
 	if(p->bb_kind==0) { CHECK((v>>1)==0x4c);p->receiving=v&1;p->bb_kind=1;p->bb_index=0;p->bb_read_start=p->reg; }
 	else if(!p->bb_index++) { CHECK(v<128);p->reg=v; }
@@ -197,6 +201,7 @@ static void write32(void *ctx,uint32_t a,uint32_t v) {
 	if(a==SE+0x600) {
 		CHECK(((v>>9)&127)==0x4c);p->serial++;p->op=v>>27;CHECK(p->op==1||p->op==2);
 		if(p->other_vote)p->gcc[0x5200c/4]|=1u<<28;
+		if(p->extra_nack && p->extra_nack()) {p->fail_at=p->serial;p->which=1;}
 		if(p->fail_at==p->serial) {
 			p->se[0x40/4]=1;
 			p->se[0x610/4]=p->which==1?1u<<10:p->which==2?1u<<13:0;return;
