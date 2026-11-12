@@ -255,10 +255,14 @@ iOS 16.5 的 iPhone X 版本按博通 BCM4357 写成，桥接层为此做了几�
 
 `audio=4` 已在 GPU/触摸/按键开启、无线关闭的桌面下验证一次 iOS 铃声片段：持有人确认约 3 秒、只响一次、开头结尾无爆音。固定 −30 dB 线性衰减，无 HPF；150 块，输出峰值 269（上限 1036），静音读回 03/01、关断成功、reset 低，6000/6000 周期、守恒与 cleanup 通过，无 panic。仅此一次短窗口；idle/wake、panic 应急、无线并存及长时/热安全未验证。
 
-`audio=5` 会话内多次播放与空闲关断/再唤醒：主机完成，设备待验证。
+`audio=5` 已在无线关闭、桌面默认配置下完成单次 120 秒设备验证：7 次 wake/mute，后 6 次只读 Y 校验均为 5d，证实软关断且 reset 保持高时系数保留；warmup 225–591 ms，out_peak 1035，每次静音读回 03/01，6000/6000、守恒与 cleanup complete，无 panic。累计准入上限 60 秒、固定 −30 dB 衰减、无 HPF；累计预算末尾有过短窗口，仍待改进。
 
-panic 功放应急复位：主机完成，设备待验证。只在功放 reset-high 持有期响应 PANICLOG 回调，拉低 GPIO76 并锁存；诊断参数 `audio_panic_test=1` 缺省关闭，仅 `audio=5` 第一次 LIVE 后 1 秒触发。
+panic 应急复位已在单独完整重启的受控设备轮次验证：`audio=5 audio_panic_test=1` 首次 LIVE 后约 1 秒触发 panic，缓冲区记录复位拉低标记；持有人确认停声、无爆音。诊断参数默认关闭。钩子不保证早期/嵌套 panic、CPU 停止失败或无 panic 的硬挂死。
 
 会话控制线程与 feeder 的普通、ASan/UBSan、真实双线程 TSan 回归通过；控制延迟 0/50/500 ms 时各 6000 周期、守恒成立。300 ms 无法确认线程退出时直接复位、明确 FAILED、永久禁止重新上电，并保留线程和资源至重启；不声称 join 成功。mi8 调用子图预算：feeder 7280 B、控制线程 3056 B、panic 回调 16 B，均低于 8192 B；XNU 服务与中断的栈不包含在此上界内。
 
-panic 依据：固定 XNU 的 `osfmk/kdp/kdp_callout.h` 约定回调期间关中断、其他 CPU 静止；`osfmk/kern/debug.c` 在 `SavePanicInfo` 前调用 `KDP_EVENT_PANICLOG`。回调不分配、不取锁、不睡眠、不做 I2C，只用预映射复位寄存器和原子锁存，并经 `debug_putc` 向已存在的 panic RAM 追加短标记。不保证未到达回调的早期/深层嵌套 panic、CPU rendezvous 失败或 MMIO 硬件挂死；panic 缓冲区不足时标记可能截断。实际停止声音仍待设备验证。
+panic 依据：固定 XNU 的 `osfmk/kdp/kdp_callout.h` 约定回调期间关中断、其他 CPU 静止；`osfmk/kern/debug.c` 在 `SavePanicInfo` 前调用 `KDP_EVENT_PANICLOG`。回调不分配、不取锁、不睡眠、不做 I2C，只用预映射复位寄存器和原子锁存，并经 `debug_putc` 向已存在的 panic RAM 追加短标记。不保证未到达回调的早期/深层嵌套 panic、CPU rendezvous 失败或 MMIO 硬件挂死；panic 缓冲区不足时标记可能截断。本次受控 panic 的实际停声已由持有人确认；其它故障路径未验。
+
+上述会话与 panic 设备轮次均关闭 Wi-Fi/蓝牙；仅单次有界会话，不支持 ADSP 停后再启，无线并存、长时间与热安全未验收。
+
+会话和受控 panic 的原始记录分别见 `work/runs/20261112-audio-session-01/DEVICE-22.md` 与 `DEVICE-22-panic.md`；本次整理未操作设备。会话记录中的主观听感尚待持有人补充，不据此宣称每次播放均无爆音。

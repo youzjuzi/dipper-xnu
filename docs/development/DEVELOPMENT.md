@@ -125,14 +125,11 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-12，接手时重新核对）
 
-- 分支 `feat/audio-sink`；源码基线 `9d1a653`，设备记录文档提交 `997b2ac`，会话实现 `b986aa5`，本提交增加 panic 应急复位，未 push。work 源码已导出，与清单对应。
-- audio=4 的一次约 3 秒 iOS 铃声已在设备通过，原始记录见 `work/runs/20261112-audio-clip-01/DEVICE.md`；旧 worker、ring、clip、tone 与 stop 函数体保持一致。
-- audio=5 由独立 TAS 控制线程执行 I2C，feeder 通过 acquire/release 原子请求握手；3 秒处理后零输出关窗，20 秒窗口、60 秒累计准入、20 次 wake 上限，mute 前提交至少 8 个零块。只读 Y 校验仅使用 book/page 选择和数据读取，第二次起要求 5d，选择寄存器随后恢复；芯片保留系数仍待设备验证。
-- 控制线程结束先发布资源静止标志，再自终止；清理同时检查标志和线程 active 状态。300 ms 超时直接 reset 低、FAILED，禁止再上电，保留线程与所有资源至重启；不把超时当 join 成功，后续清理不重复等待。
-- 主机构建、干净重放、全部回归及 ASan/UBSan/TSan 通过；session feeder 栈 7280 B，control 栈 3056 B、panic 回调 16 B（mi8 子图，均小于 8 KiB）。验证记录与命令在 `work/runs/20261112-audio-session-01/`；只读设备/旧轮次证据未改动。
-- panic 通过预注册 PANICLOG 回调使用预映射地址拉低 GPIO76，held-only、单次原子锁存，不取锁/睡眠/分配/I2C。日志追加至既有 panic RAM；未到回调、CPU rendezvous 失败、MMIO 硬件挂死不保证。`audio_panic_test=1` 默认关闭，仅 audio=5 首次 LIVE 后 1 秒触发。
-- 最终同一内核的 `P22/` 与 `P22-panic/` 已在上述运行目录打包，除内核/参数/载荷外均硬链接自旧 P21；参数长 129/148 B，含 80 B 预留仍小于 600 B。摘要和全部离线证据见运行目录 `RESULTS.md`。公开摘要、清单、许可已同步。
-- 下一步由持有人完整重启后分别验证多次播放/静默关断/再唤醒及受控 panic 停声。audio=5 与 panic 应急：主机完成，设备待验证；本轮未操作手机、未改 local/。无线并存、长期/热安全仍未验收。
+- 分支 `feat/audio-sink`，基线 `2b19f1a`；本提交仅固化会话音频与受控 panic 的设备结果，work 源码核对与清单一致，无未导出源码改动，未 push。
+- P22 的无线关闭会话完成 7 次 wake/mute、Y=5d 6/6、6000/6000、守恒与 cleanup，无 panic；P22-panic 单独重启后受控 panic，缓冲有复位标记，持有人确认停声无爆音。原始记录见 `work/runs/20261112-audio-session-01/DEVICE-22.md`、`DEVICE-22-panic.md`。会话主观听感仍待补充，长期/热安全未验。
+- 下一步在唯一 work 树实现音频与无线共存；运行目录 `work/runs/20261112-audio-coexist-01/`。先核对无线就绪点、CB43/SMR8 所有权和短 SMMU 临界区，旧 audio=1–4/step 13–16 与无线协议行为保持不变。
+- 累计不足 1 秒仍 wake 的问题待修；INT2 bit1 的数据手册定义为 Reserved，厂商掩码为 0x0c，不能推定该保留位的内部含义，不改健康判据。
+- 只做主机；不碰手机、不改 local/、不 push。新共存功能与载荷尚未完成，设备验证 Pending。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 
