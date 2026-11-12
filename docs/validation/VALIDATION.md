@@ -240,3 +240,11 @@ iOS 16.5 的 iPhone X 版本按博通 BCM4357 写成，桥接层为此做了几�
 - **audio=2（051215b）**：GPU 桌面下 ADSP/AFE/SMMU/ASM/ADM 零流 3000/3000 周期（60 秒）完成，underflow=0、faults=0，cleanup=complete；功放未操作、保持复位。loader returned、无 panic；本轮无人操作，计数 sink 没有写入，不能据此声称 HAL 数据已进入 DMA。证据在 `work/runs/20261112-audio-zero-01/README.md`。
 
 共同边界：只有内核自产诊断短音出过声，iOS 音频输出尚未接通。`audio`、`mi8rp_step` 缺省关闭；未与 Wi-Fi/蓝牙并存，SMMU 共享锁仍跨播放持有。当前流程不支持 ADSP 停后再启，需完整重启；长期与热安全、物理波形未测。历史 loader 偶发 `hung` 仍未解决，近期正常返回不代表该问题消失。
+
+## 音频 ring 强制零输出：主机候选（2026-11-12）
+
+`audio=3` 沿用零流的 ADSP/AFE/SMMU/ASM/ADM 路径，启动时安装有界 ring 接收端，播放期消费真实 PCM 但 DMA 整槽只写零，功放保持复位。缺省关闭，非 dipper 或与非零 `mi8rp_step`/`mi8rp_mss`、其他 sink 选择冲突时拒绝。未改变既有诊断、计数/零流和默认参数表。
+
+干净重放源码下，10 万次固定种子 ring 操作、200 万帧并发顺序、关闭与生产者并发、6000 次全零 DMA 提交（120 秒模拟）、超时/丢回包收尾通过；正常例接受 5775424 帧，消费 5759040 帧，丢弃 16384 帧，守恒成立。普通、ASan/UBSan 和 TSan 均通过，既有全部主机测试继续通过。显式 SOURCE_DIR 构建并核对 sink/rproc/PCM/loader 对象来源，P19 参数为默认桌面、无线关闭、240 秒、audio=3。证据在 `work/runs/20261112-audio-ring-01/`。
+
+以上为主机模拟与构建，**设备 Pending**：不证明真实 HAL 到 ring 到 DSP 的消费、无声、调度稳定性或最终退出。共享 SMMU 锁的持有方式未改，不能据此推断无线并存；未操作设备、未提高输出电平。

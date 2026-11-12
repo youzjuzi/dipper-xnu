@@ -6,7 +6,7 @@
 #include "mi8_audio_pcm.h"
 struct play_peer {
     uint8_t buffer[32768];
-    uint32_t ops[4000]; unsigned count,writes,normal,cache,begin,end,clear;
+    uint32_t ops[8000]; unsigned count,writes,normal,cache,begin,end,clear;
     uint32_t fail,drop,status;
     bool fatal,fatal_canary,fatal_close,hung,reset,no_pas,no_begin,no_end,retain,drop_writes,canary_timeout,canary_close_error,bad_map,bad_copp,ordinary_fault;
     unsigned step,after_fatal;
@@ -26,7 +26,7 @@ static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
 #endif
     if(m->fatal)m->after_fatal++;
     if(q[4]!=7&&q[4]!=8)return 0;
-    CHECK(m->count<4000);m->ops[m->count++]=op;
+    CHECK(m->count<8000);m->ops[m->count++]=op;
     b[4]=b[8]=q[4];memcpy(b+6,q+10,2);memcpy(b+10,q+6,2);
     *n=28;wr(b+16,0x110e8);wr(b+20,op);wr(b+24,op==m->fail?m->status:0);
     if(op==0x10bcd){m->close_at=p->now;if(m->fatal_close){m->fatal=true;return -1;}}
@@ -44,6 +44,9 @@ static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
         m->writes++;
         if(!canary){
             CHECK(address>=0x110000000ull&&address+3840<=0x110008000ull);
+#ifdef MI8_RING_TEST
+            CHECK(address>=MI8_PCM_ADDRESS&&address+MI8_PCM_PERIOD<=MI8_PCM_ADDRESS+8*MI8_PCM_PERIOD);
+#endif
             CHECK((m->step==15||m->step==16)||!m->last_write||p->now-m->last_write>=20000);m->last_write=p->now;m->normal++;
             unsigned at=(unsigned)(address-0x110000000ull);
             for(unsigned i=0;i<960;i++){
@@ -74,7 +77,13 @@ static bool play_begin(void *v,struct mi8_pcm_memory *out){
     if(m->no_begin)return false;
     *out=(struct mi8_pcm_memory){.buffer=m->buffer,.address=MI8_PCM_ADDRESS,.slot=8,.bank=43};return true;
 }
+#ifdef MI8_RING_TEST
+static void ring_feed(void);
+#endif
 static void play_cache(void*v,size_t at,size_t n){struct play_peer*m=((struct peer*)v)->extension;CHECK(n==3840&&at+n<=32768);m->cache++;
+#ifdef MI8_RING_TEST
+    CHECK(at+n<=8*MI8_PCM_PERIOD);ring_feed();
+#endif
 #ifdef MI8_AMP_TEST
     if(amp_cache_observe)amp_cache_observe(v,at);
 #endif
@@ -304,6 +313,9 @@ static const struct mi8_pcm_amp audio_amp_ops={mi8_tas2557_held,mi8_tas2557_tick
 #else
 static const struct mi8_pcm_amp audio_amp_ops={mi8_tas2557_held,mi8_tas2557_tick,mi8_tas2557_stop,NULL,NULL};
 #endif
+static bool audio_ring_stream, audio_tail_on;
+static char audio_tail[8192];static unsigned audio_tail_len;
+/* @audio_ring_report */
 /* @steps_from_five */
 static void log_order(const char*text,const char*const*lines,unsigned n){
     for(unsigned i=0;i<n;i++){const char*at=strstr(text,lines[i]);CHECK(at);text=at+strlen(lines[i]);}

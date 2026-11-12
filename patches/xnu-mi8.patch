@@ -1,8 +1,8 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..bdfd00fe370137dd654ec2104a0a1b0903047f1e 100644
+index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..6672caa7e5f1b2a5be1e56b6ba0d9f911cefa433 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -113,6 +113,19 @@ bsd/dev/redwood_input.c		standard
+@@ -113,6 +113,20 @@ bsd/dev/redwood_input.c		standard
  bsd/dev/redwood_virtio_input.c	standard
  bsd/dev/redwood_goodix.c	standard
  bsd/dev/redwood_buttons.c	standard
@@ -13,6 +13,7 @@ index 9cd24b42caca7d7cb91dd5e55541ddcde932319d..bdfd00fe370137dd654ec2104a0a1b09
 +bsd/dev/mi8_glink.c	standard
 +bsd/dev/mi8_audio.c	standard
 +bsd/dev/mi8_audio_sink.c	standard
++bsd/dev/mi8_audio_ring.c	standard
 +bsd/dev/mi8_audio_pcm.c	standard
 +bsd/dev/mi8_tas2557.c	standard
 +bsd/dev/mi8_audio_smmu.c	standard
@@ -5570,10 +5571,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..79430af1964f075b4d77adc2cd8b5186bc931113
+index 0000000000000000000000000000000000000000..ffc158a811f35e1f7a67f382982d53fa042214b3
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,796 @@
+@@ -0,0 +1,799 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
@@ -5814,6 +5815,8 @@ index 0000000000000000000000000000000000000000..79430af1964f075b4d77adc2cd8b5186
 +	return mi8_apr_encode_service(4, 0, 0, token, opcode, payload, n, packet, capacity, bytes);
 +}
 +
++static bool play_ring;
++void mi8_audio_set_ring(bool enabled) { play_ring=enabled; }
 +static const struct mi8_pcm_amp *play_amp;
 +void mi8_audio_set_amp(const struct mi8_pcm_amp *amp) { play_amp=amp; }
 +
@@ -6130,6 +6133,7 @@ index 0000000000000000000000000000000000000000..79430af1964f075b4d77adc2cd8b5186
 +	if (s->play) {
 +		if (s->tone) success=mi8_pcm_run_tone(s->pcm,&s->play_ops,s->play_deadline,s->amp);
 +		else if (s->muted) success=mi8_pcm_run_muted(s->pcm,&s->play_ops,s->play_deadline,s->amp);
++		else if (s->zero_periods && play_ring) success=mi8_pcm_run_ring(s->pcm,&s->play_ops,s->play_deadline);
 +		else if (s->zero_periods) success=mi8_pcm_run_zero(s->pcm,&s->play_ops,s->play_deadline,s->zero_periods);
 +		else success=mi8_pcm_run(s->pcm,&s->play_ops,s->play_deadline,s->canary);
 +		goto out;
@@ -6372,10 +6376,10 @@ index 0000000000000000000000000000000000000000..79430af1964f075b4d77adc2cd8b5186
 +}
 diff --git a/bsd/dev/mi8_audio.h b/bsd/dev/mi8_audio.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3db39cf530deec75fd2730471faa743d6ea4bbb9
+index 0000000000000000000000000000000000000000..e179fc6591b77e86f5bf12937a2f592e09c37d90
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.h
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,65 @@
 +/* SPDX-License-Identifier: MIT */
 +/* APR core handshake and explicit AFE MI2S control. The muted check uses explicit worker-owned amplifier callbacks. */
 +#ifndef MI8_AUDIO_H
@@ -6383,6 +6387,7 @@ index 0000000000000000000000000000000000000000..3db39cf530deec75fd2730471faa743d
 +#include "mi8_glink.h"
 +
 +struct mi8_pcm_amp;
++void mi8_audio_set_ring(bool);
 +void mi8_audio_set_amp(const struct mi8_pcm_amp *);
 +
 +#define MI8_APR_MAX_SERVICES 256u
@@ -6442,10 +6447,10 @@ index 0000000000000000000000000000000000000000..3db39cf530deec75fd2730471faa743d
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..686cc896cd085828076c40f2cd63243192a59557
+index 0000000000000000000000000000000000000000..1baf07ddec90569b59b726c0ec414256830f7b51
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,388 @@
+@@ -0,0 +1,476 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6801,6 +6806,94 @@ index 0000000000000000000000000000000000000000..686cc896cd085828076c40f2cd632431
 +	return s->result.completed;
 +}
 +
++bool
++mi8_pcm_run_ring(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end)
++{
++	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;s->zero=true;s->periods=6000;
++	bool success=false,closed=false,unmapped=false,adm_closed=true;
++	if (!io->begin(io->ctx,&s->memory)) { pcm_log(s,"smmu: begin failed; no PCM submitted");return false; }
++	s->mapped=true;
++	pcm_log(s,"smmu: claimed bank %u slot %u, low/SID aliases mapped, software walk ok",s->memory.bank,s->memory.slot);
++	if (!s->memory.buffer || s->memory.address!=MI8_PCM_ADDRESS || s->memory.slot!=8 || s->memory.bank!=43) goto cleanup;
++	/* Endpoint/session setup follows the pinned q6asm/q6routing paths. */
++	if (command(s,MI8_PCM_MAP,false) || command(s,MI8_PCM_OPEN,false) || command(s,MI8_PCM_ADM_OPEN,false) ||
++	    command(s,MI8_PCM_ROUTE,false) || command(s,MI8_PCM_FORMAT,false) || command(s,MI8_PCM_RUN,false)) goto cleanup;
++	if (!mi8_audio_ring_open()) { pcm_log(s,"ring: sink unavailable or already used");goto cleanup; }
++	uint64_t start=io->now(io->ctx);s->run_start=start;
++	for (unsigned n=0;n<s->periods;n++) {
++		unsigned slot=n%8;
++		uint64_t wait=start+(uint64_t)n*20000;
++		while (io->now(io->ctx)<wait || s->jobs[slot].active) if (poll_once(s,s->deadline)) goto cleanup;
++		if (s->result.errors || s->result.unsupported || io->now(io->ctx)>=s->deadline) goto cleanup;
++		if (io->poll(io->ctx)) goto cleanup;
++		struct mi8_smmu_fault f;
++		if (!io->fault(io->ctx,&f)) { pcm_log(s,"play: fault registers unreadable"); goto cleanup; }
++		if (f.gfsr || (f.fsr&~IDLE)) {
++			pcm_log(s,"play: unexpected GFSR=%#x FSR=%#x FAR=%#llx",f.gfsr,f.fsr,(unsigned long long)f.far); goto cleanup;
++		}
++		if (n && n%750==0) {
++			struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
++			pcm_log(s,"zero: %u s, submitted=%u done=%u ring: accepted=%llu consumed=%llu queued=%llu dropped=%llu underflow_frames=%llu peak=%llu/%llu",
++			    n/50,s->result.submitted,s->result.done,(unsigned long long)r.accepted,(unsigned long long)r.consumed,
++			    (unsigned long long)r.queued,(unsigned long long)r.dropped,(unsigned long long)r.underflow_frames,
++			    (unsigned long long)r.peak_l,(unsigned long long)r.peak_r);
++		}
++		s->period=n;
++		/* Scratch is never passed to DMA or submit. The only write to a DMA
++		 * slot here is memset(0); submit also independently rejects nonzero. */
++		int16_t scratch[960*2];
++		(void)mi8_audio_ring_take(scratch,960);
++		memset((uint8_t *)s->memory.buffer+slot*MI8_PCM_PERIOD,0,MI8_PCM_PERIOD);
++		io->cache(io->ctx,slot*MI8_PCM_PERIOD,MI8_PCM_PERIOD);
++		if (!submit(s,slot,MI8_PCM_ADDRESS+(uint64_t)slot*MI8_PCM_PERIOD,false,s->deadline)) goto cleanup;
++	}
++	while (io->now(io->ctx)<start+(uint64_t)s->periods*20000) if (poll_once(s,s->deadline)) goto cleanup;
++	if (!drain(s,s->deadline) || s->result.errors || s->result.done!=s->periods) goto cleanup;
++	struct mi8_smmu_fault f;
++	if (!io->fault(io->ctx,&f)) { pcm_log(s,"play: fault registers unreadable"); goto cleanup; }
++		if (f.gfsr || (f.fsr&~IDLE)) {
++			pcm_log(s,"play: unexpected GFSR=%#x FSR=%#x FAR=%#llx",f.gfsr,f.fsr,(unsigned long long)f.far); goto cleanup;
++		}
++	pcm_log(s,"play: %u periods submitted, done=%u errors=%u underflow=%u faults=0 gfsr=0",s->result.submitted,s->result.done,s->result.errors,s->result.underflow);
++
++	success=true;
++cleanup:
++	/* A producer can have observed open just before close. Wait only in this
++	 * worker, never under audio_mutex, and bound the wait independently. */
++	{
++		uint64_t until=io->now(io->ctx)+500000;
++		while (!mi8_audio_ring_close()) {
++			if (io->now(io->ctx)>=until) { success=false;pcm_log(s,"ring: producer close timeout");break; }
++			io->sleep(io->ctx,1000);
++		}
++		struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
++		if (r.accepted!=r.consumed+r.discarded || r.queued) {
++			success=false;pcm_log(s,"ring: conservation FAILED; producer or queued frames remain");
++		}
++	}
++	/* Never drain a faulted stream here: terminated DMA may never complete.
++	 * Each close/unmap gets its own bounded attempt, independent of AFE. */
++	if (s->stream_attempted) {
++		int e=command(s,MI8_PCM_CLOSE,true); closed=!e;
++		if (e) { success=false;pcm_log(s,"Pending ASM stream close; no retry, PAS shutdown required"); }
++	} else closed=true;
++	if (s->map_attempted && s->handle && closed) { int e=command(s,MI8_PCM_UNMAP,true);unmapped=!e; if (e) success=false; }
++	else unmapped=!s->map_attempted;
++	if (s->adm_attempted) {
++		adm_closed=false;
++		if (s->copp==0xffff) { pcm_log(s,"Pending: ADM open completion/COPP unknown; no guessed close port");success=false; }
++		else { int e=command(s,MI8_PCM_ADM_CLOSE,true);adm_closed=!e;if (e) { success=false;pcm_log(s,"Pending ADM device close; no retry, PAS shutdown required"); } }
++	}
++	/* DSP-safe requires confirmed close AND unmap, or an outer PAS reset.
++	 * A drained queue or an error reply alone cannot authorize releasing RAM. */
++	s->result.dsp_safe=closed && unmapped;
++	s->result.deferred=!s->result.dsp_safe || !adm_closed;
++	s->result.completed=success && s->result.dsp_safe && !s->result.errors && !s->result.unsupported;
++	if (!success) pcm_log(s,"play failed: opcode=%#x status=%#x submitted=%u done=%u errors=%u rejected=%u",s->result.failed_opcode,s->result.dsp_status,s->result.submitted,s->result.done,s->result.errors,s->result.rejected);
++	if (s->result.deferred) pcm_log(s,"Pending stream teardown; SMMU mapping and memory kept until PAS shutdown");
++	return s->result.completed;
++}
++
 +bool mi8_pcm_run(struct mi8_pcm_state *s,const struct mi8_pcm_ops *io,uint64_t end,bool canary) {
 +	return pcm_run(s,io,end,canary,false,false,NULL,MI8_PCM_PERIODS);
 +}
@@ -6836,16 +6929,17 @@ index 0000000000000000000000000000000000000000..686cc896cd085828076c40f2cd632431
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..9129d37950ba5d9c9acd90d53db5b3b08117437c
+index 0000000000000000000000000000000000000000..08b1e6d9119cc06446356d2774b4bb51437483ee
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,78 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
 +#define MI8_AUDIO_PCM_H
 +#include "mi8_audio.h"
 +#include "mi8_audio_smmu.h"
++#include "mi8_audio_ring.h"
 +#define MI8_PCM_PERIOD 3840u
 +#define MI8_PCM_PERIODS 150u
 +#define MI8_PCM_ADDRESS (MI8_AS_IOVA | 1ull << 32)
@@ -6914,14 +7008,126 @@ index 0000000000000000000000000000000000000000..9129d37950ba5d9c9acd90d53db5b3b0
 +bool mi8_pcm_run_zero(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,unsigned periods);
 +/* Called after AFE stop/clock off/pin restore; pass true only after PAS reset.
 + * Without confirmed close+unmap or PAS success, leaves the mapping untouched. */
++bool mi8_pcm_run_ring(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t);
 +bool mi8_pcm_finish(struct mi8_pcm_state *, bool pas_shutdown);
++#endif
+diff --git a/bsd/dev/mi8_audio_ring.c b/bsd/dev/mi8_audio_ring.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..0cc906c8a90387023b7f786fb2e7907f5ad2453a
+--- /dev/null
++++ b/bsd/dev/mi8_audio_ring.c
+@@ -0,0 +1,78 @@
++/* SPDX-License-Identifier: MIT */
++#include "mi8_audio_ring.h"
++/* SPSC: cdev holds audio_mutex across each sink call (including multiple
++ * writers); the PCM worker is the sole consumer/open/close owner. Neither
++ * side takes the other's lock. Release/acquire transfers sample ownership. */
++static int16_t ring_samples[MI8_AUDIO_RING_FRAMES * 2];
++static uint64_t ring_head, ring_tail;
++static unsigned ring_ready, ring_gate, ring_started;
++/* gate bit 0 admits writes; bit 1 is one producer publishing. Close clears
++ * bit 0 atomically and cannot discard until bit 1 clears. No producer waits. */
++static struct mi8_audio_ring_counts ring_counts;
++#define RLOAD(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
++#define RSTORE(p,v) __atomic_store_n((p),(v),__ATOMIC_RELEASE)
++#define RADD(p,v) __atomic_fetch_add((p),(v),__ATOMIC_RELAXED)
++_Static_assert(__atomic_always_lock_free(8,0), "ring counters must be lock-free");
++void mi8_audio_ring_ready(void) { RSTORE(&ring_ready,1); }
++bool mi8_audio_ring_open(void)
++{
++	if (!RLOAD(&ring_ready) || ring_started) return false;
++	ring_started=1; RSTORE(&ring_gate,1); return true;
++}
++uint32_t mi8_audio_ring_put(const int16_t *p, uint32_t count)
++{
++	if (!p || !count || count>1024) return 0;
++	unsigned expected=1;
++	if (!__atomic_compare_exchange_n(&ring_gate,&expected,3,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
++		RADD(&ring_counts.outside,count); return count;
++	}
++	uint64_t head=RLOAD(&ring_head),tail=RLOAD(&ring_tail);
++	uint32_t space=MI8_AUDIO_RING_FRAMES-(uint32_t)(head-tail);
++	uint32_t n=count<space?count:space;
++	for (uint32_t i=0;i<n;i++) {
++		unsigned at=(unsigned)(head+i)&(MI8_AUDIO_RING_FRAMES-1);
++		ring_samples[2*at]=p[2*i];ring_samples[2*at+1]=p[2*i+1];
++	}
++	RADD(&ring_counts.accepted,n); RADD(&ring_counts.dropped,count-n);
++	RSTORE(&ring_head,head+n);
++	__atomic_fetch_and(&ring_gate,~2u,__ATOMIC_RELEASE);
++	return n;
++}
++uint32_t mi8_audio_ring_take(int16_t *out, uint32_t count)
++{
++	if (!out || count>960) return 0;
++	uint64_t tail=RLOAD(&ring_tail),head=RLOAD(&ring_head);
++	uint32_t n=(uint32_t)(head-tail); if (n>count) n=count;
++	uint64_t nonzero=0,lmax=RLOAD(&ring_counts.peak_l),rmax=RLOAD(&ring_counts.peak_r);
++	for (uint32_t i=0;i<n;i++) {
++		unsigned at=(unsigned)(tail+i)&(MI8_AUDIO_RING_FRAMES-1);
++		int32_t l=ring_samples[2*at],r=ring_samples[2*at+1];
++		out[2*i]=(int16_t)l;out[2*i+1]=(int16_t)r;
++		uint32_t a=(uint32_t)(l<0?-l:l),b=(uint32_t)(r<0?-r:r);
++		if (a>lmax) lmax=a;
++		if (b>rmax) rmax=b;
++		nonzero+=!!(a|b);
++	}
++	RADD(&ring_counts.consumed,n); RADD(&ring_counts.consumed_nonzero,nonzero);
++	RADD(&ring_counts.underflow_frames,count-n);
++	RSTORE(&ring_counts.peak_l,lmax); RSTORE(&ring_counts.peak_r,rmax);
++	RSTORE(&ring_tail,tail+n); return n;
++}
++bool mi8_audio_ring_close(void)
++{
++	unsigned gate=__atomic_fetch_and(&ring_gate,~1u,__ATOMIC_ACQ_REL);
++	if (gate&2) return false;
++	uint64_t head=RLOAD(&ring_head),tail=RLOAD(&ring_tail);
++	RADD(&ring_counts.discarded,head-tail); RSTORE(&ring_tail,head);
++	return true;
++}
++void mi8_audio_ring_counts(struct mi8_audio_ring_counts *out)
++{
++#define COPY(n) out->n=RLOAD(&ring_counts.n)
++	COPY(accepted);COPY(consumed);COPY(discarded);COPY(dropped);COPY(outside);
++	COPY(underflow_frames);COPY(consumed_nonzero);COPY(peak_l);COPY(peak_r);
++#undef COPY
++	/* Called only by the consumer. Live producer counts are approximate;
++	 * the closed, producer-drained snapshot is exact for conservation. */
++	out->queued=RLOAD(&ring_head)-RLOAD(&ring_tail);
++}
+diff --git a/bsd/dev/mi8_audio_ring.h b/bsd/dev/mi8_audio_ring.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5702ac034fa51420fe910174ef32106a594ccae6
+--- /dev/null
++++ b/bsd/dev/mi8_audio_ring.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef MI8_AUDIO_RING_H
++#define MI8_AUDIO_RING_H
++#include <stdint.h>
++#include <stdbool.h>
++#define MI8_AUDIO_RING_FRAMES 16384u
++struct mi8_audio_ring_counts {
++	uint64_t accepted, consumed, discarded, dropped, outside, queued;
++	uint64_t underflow_frames, consumed_nonzero, peak_l, peak_r;
++};
++/* Init-only ready publication, then one producer and one consumer. */
++void mi8_audio_ring_ready(void);
++bool mi8_audio_ring_open(void);
++uint32_t mi8_audio_ring_put(const int16_t *, uint32_t);
++/* Consumer destination is host scratch, never a DMA address. */
++uint32_t mi8_audio_ring_take(int16_t *, uint32_t);
++/* Closes admission immediately; false means an admitted producer is still
++ * publishing. The worker retries with its bounded sleep/deadline, no mutex. */
++bool mi8_audio_ring_close(void);
++void mi8_audio_ring_counts(struct mi8_audio_ring_counts *);
 +#endif
 diff --git a/bsd/dev/mi8_audio_sink.c b/bsd/dev/mi8_audio_sink.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..63ebbcf73ccdb953b32ed0ed98bb672df77c3c27
+index 0000000000000000000000000000000000000000..5712ede22c0fd6af4cadac82a2865efcd1082773
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_sink.c
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,218 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Count-only observer of iOS PCM. No playback buffers or hardware operations. */
 +#ifdef MI8_AUDIO_SINK_HOST_TEST
@@ -6936,6 +7142,7 @@ index 0000000000000000000000000000000000000000..63ebbcf73ccdb953b32ed0ed98bb672d
 +extern kern_return_t thread_terminate(thread_t thread);
 +#endif
 +#include "mi8_audio_sink.h"
++#include "mi8_audio_ring.h"
 +
 +/* cdev writes are serialized by audio_lock and offer at most 1024 frames.
 + * Every shared scalar is atomic, including the sequence: a bounded reader
@@ -7082,6 +7289,31 @@ index 0000000000000000000000000000000000000000..63ebbcf73ccdb953b32ed0ed98bb672d
 +	return format_counts(out, capacity, "final count-only", &p, &v, stable);
 +}
 +
++/* Checked before either worker starts; non-dipper and conflicting owners
++ * cannot launch the ring DSP path even if the cdev is initialized later. */
++bool mi8_audio_ring_requested(void)
++{
++	DTEntry entry; const void *type; unsigned size;
++	uint32_t audio=0,step=0,mss=0,owner=0;
++	if (SecureDTLookupEntry(NULL,"/arm-io",&entry)!=kSuccess ||
++	    SecureDTGetProperty(entry,"device_type",&type,&size)!=kSuccess ||
++	    size!=sizeof("dipper") || memcmp(type,"dipper",sizeof("dipper"))) return false;
++	PE_parse_boot_argn("audio",&audio,sizeof(audio));
++	PE_parse_boot_argn("mi8rp_step",&step,sizeof(step));
++	PE_parse_boot_argn("mi8rp_mss",&mss,sizeof(mss));
++	if (audio!=3 || step || mss) return false;
++	static const char *const owners[]={"adsp","adsp_step","sound","virtio_sound"};
++	for (unsigned i=0;i<sizeof(owners)/sizeof(*owners);i++) {
++		owner=0;PE_parse_boot_argn(owners[i],&owner,sizeof(owner));if (owner) return false;
++	}
++	return true;
++}
++static uint32_t ring_sink(const int16_t *frames,uint32_t count)
++{
++	uint32_t valid=count_sink(frames,count);
++	return valid ? mi8_audio_ring_put(frames,valid) : 0;
++}
++
 +void mi8_audio_sink_init(void)
 +{
 +	uint32_t enabled = 0, step = 0, owner = 0;
@@ -7090,7 +7322,8 @@ index 0000000000000000000000000000000000000000..63ebbcf73ccdb953b32ed0ed98bb672d
 +	    SecureDTGetProperty(entry, "device_type", &type, &size) != kSuccess ||
 +	    size != sizeof("dipper") || memcmp(type, "dipper", sizeof("dipper"))) return;
 +	if (!PE_parse_boot_argn("audio", &enabled, sizeof(enabled)) || !enabled) return;
-+	if (enabled != 1 && enabled != 2) { printf("audio: refused unsupported audio value\n"); return; }
++	if (enabled != 1 && enabled != 2 && enabled != 3) { printf("audio: refused unsupported audio value\n"); return; }
++	if (enabled==3 && !mi8_audio_ring_requested()) { printf("audio: refused ring platform/step/mss/owner conflict\n"); return; }
 +	PE_parse_boot_argn("mi8rp_step", &step, sizeof(step));
 +	if (step >= 9) { printf("audio: refused conflict with mi8rp_step>=9; diagnostic unchanged\n"); return; }
 +	/* These upstream backends may install a sink asynchronously. Refuse their
@@ -7101,7 +7334,7 @@ index 0000000000000000000000000000000000000000..63ebbcf73ccdb953b32ed0ed98bb672d
 +		if (owner) { printf("audio: refused another sink selector\n"); return; }
 +	}
 +	if (LOAD(&installed)) return;
-+	if (!redwood_audio_claim_sink(count_sink)) { printf("audio: refused existing sink owner\n"); return; }
++	if (!redwood_audio_claim_sink(enabled==3?ring_sink:count_sink)) { printf("audio: refused existing sink owner\n"); return; }
 +	thread_t thread;
 +	if (kernel_thread_start(count_thread, NULL, &thread) != KERN_SUCCESS) {
 +		redwood_audio_set_sink("nothing (count worker unavailable)", NULL);
@@ -7109,19 +7342,21 @@ index 0000000000000000000000000000000000000000..63ebbcf73ccdb953b32ed0ed98bb672d
 +	}
 +	thread_deallocate(thread);
 +	STORE(&installed, 1);
++	if (enabled==3) { mi8_audio_ring_ready();printf("audio: ring sink installed (DSP output forced zero, amp untouched)\n");return; }
 +	printf(enabled == 2 ? "audio: count sink installed (iOS PCM counted only; the DSP gets zeros, amp untouched)\n" :
 +	    "audio: count-only sink installed (no DSP, no amp)\n");
 +}
 diff --git a/bsd/dev/mi8_audio_sink.h b/bsd/dev/mi8_audio_sink.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d12b3e35c8638a670930020db01bd3c3fc3916e4
+index 0000000000000000000000000000000000000000..d4fd6315bb948b6f320e2a6e28944d511b1bc475
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_sink.h
-@@ -0,0 +1,7 @@
+@@ -0,0 +1,8 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef MI8_AUDIO_SINK_H
 +#define MI8_AUDIO_SINK_H
 +void mi8_audio_sink_init(void);
++bool mi8_audio_ring_requested(void);
 +/* Bounded atomic snapshot; no locks, allocation, console or device access. */
 +unsigned mi8_audio_sink_summary(char *out, unsigned capacity);
 +#endif
@@ -13767,10 +14002,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818ca925a5df
+index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d314485e21865
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4412 @@
+@@ -0,0 +1,4450 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -13841,6 +14076,8 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 +#include "mi8_audio_smmu.h"
 +#include "mi8_hostsvc.h"
 +#include "mi8_wlfw.h"
++#include "mi8_audio_sink.h"
++#include "mi8_audio_ring.h"
 +#include <sys/mi8_lx.h>
 +#include <sys/redwood_lx.h>
 +
@@ -13858,6 +14095,7 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 + * Other threads (including Wi-Fi/modem) retain their existing logging/timing. */
 +static thread_t audio_play_thread;
 +static bool audio_play_brief, audio_play_locked;
++static bool audio_ring_stream;
 +static uint64_t audio_play_until;
 +static char audio_play_note[400];
 +/* audio=2: the worker's own lines, kept for the loader's return (the GPU desktop's log is far
@@ -13919,6 +14157,10 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 +	}
 +	if (audio_tail_on && audio_play_worker()) {
 +		unsigned n = (unsigned)strnlen(line, sizeof(line));
++		if (audio_ring_stream && n >= sizeof(audio_tail)-audio_tail_len) {
++			unsigned discard=n-(sizeof(audio_tail)-audio_tail_len)+1;
++			memmove(audio_tail,audio_tail+discard,audio_tail_len-discard);audio_tail_len-=discard;
++		}
 +		if (n < sizeof(audio_tail) - audio_tail_len) {
 +			memcpy(audio_tail + audio_tail_len, line, n);
 +			audio_tail_len += n;
@@ -17774,6 +18016,27 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 +	return (dsp_state(&words)&DSP_FATAL)!=0;
 +}
 +
++static void
++audio_ring_report(bool completed,const char *cleanup)
++{
++	bool closed=mi8_audio_ring_close();
++	struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
++	bool conserved=closed && !r.queued && r.accepted==r.consumed+r.discarded;
++	char line[768];
++	snprintf(line,sizeof(line),"mi8rp: audio=3: ring stream %s cleanup=%s accepted=%llu consumed=%llu discarded=%llu dropped=%llu outside=%llu consumed_nonzero=%llu peak=%llu/%llu underflow_frames=%llu queued=%llu conservation=%s; output forced zero; amp untouched (reset low)\n",
++	    completed && conserved?"completed":"FAILED",cleanup,(unsigned long long)r.accepted,(unsigned long long)r.consumed,
++	    (unsigned long long)r.discarded,(unsigned long long)r.dropped,(unsigned long long)r.outside,
++	    (unsigned long long)r.consumed_nonzero,(unsigned long long)r.peak_l,(unsigned long long)r.peak_r,
++	    (unsigned long long)r.underflow_frames,(unsigned long long)r.queued,conserved?"ok":"FAILED");
++	/* Worker creation failure is reported by init, outside the worker-only
++	 * tail collector. Preserve that final failure for the loader as well. */
++	if (audio_tail_on && !audio_play_worker()) {
++		audio_tail_len=(unsigned)strlen(line);memcpy(audio_tail,line,audio_tail_len);
++	}
++	/* say has a 400-byte buffer; keep worst-case 64-bit counters intact. */
++	for (const char *p=line;*p;p+=(strlen(p)>300?300:strlen(p))) say("%.300s",p);
++}
++
 +static bool
 +adsp_audio_handshake(uint32_t last)
 +{
@@ -17800,6 +18063,7 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 +		/* Extra headroom for bounded amp transactions; the PCM window stays 3 s. */
 +		/* audio=2 (17): 60 s of zero periods plus setup and teardown. */
 +		audio_play_until = now_us() + (last==17?70000000:(last==15 || last==16)?20000000:15000000);
++		if (audio_ring_stream && last==17) audio_play_until=now_us()+130000000;
 +		bool okay = mi8_audio_run_play(&cfg, audio_alive, &adsp_remote, NULL, NULL, audio_play_until, last, audio_fatal);
 +		audio_play_until=mi8_audio_play_teardown_end();
 +		if (!mi8_audio_play_needs_finish()) {
@@ -17854,6 +18118,7 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 +	for (unsigned i = 0; i < 600; i++) {
 +		if (last >= 13 && now_us()>=audio_play_until-3000000) {
 +			say("mi8rp: 13: Pending partition readiness deadline; ADSP not started\n");
++			if (audio_ring_stream) audio_ring_report(false,"not started (partition deadline)");
 +			audio_play_thread=NULL;thread_terminate(current_thread());return;
 +		}
 +		if (redwood_ufs_read_named("modem", 0, &probe, 1) == 0) {
@@ -17886,6 +18151,7 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 +			say("mi8rp: 9: preparation failed; ADSP not started\n");
 +			qmp_send("{class: image, res: load_state, name: adsp, val: off}");
 +			if (last==15 || last==16) { mi8_tas2557_stop();mi8_tas2557_report("Pending (ADSP preparation)");mi8_audio_set_amp(NULL); }
++			if (audio_ring_stream) audio_ring_report(false,"not started (ADSP preparation)");
 +			if (last >= 13) audio_play_thread=NULL;
 +			thread_terminate(current_thread());
 +			return;
@@ -17912,7 +18178,8 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 +			if (started_here && !adsp_last_stop_acked) say("mi8rp: 13: Pending ADSP stop-ack\n");
 +			if (started_here && !down) say("mi8rp: 13: Pending PAS shutdown\n");
 +			if (started_here && !adsp_last_aop_off) say("mi8rp: 13: Pending AOP off\n");
-+			if (last==17) say("mi8rp: audio=2: zero stream %s cleanup=%s%s%s; amp untouched (reset low)\n",
++			if (audio_ring_stream && last==17) audio_ring_report(mi8_audio_play_completed() && down && adsp_last_stop_acked && adsp_last_aop_off,mi8_audio_play_cleanup());
++			else if (last==17) say("mi8rp: audio=2: zero stream %s cleanup=%s%s%s; amp untouched (reset low)\n",
 +			    mi8_audio_play_completed()?"completed":"FAILED",mi8_audio_play_cleanup(),
 +			    started_here && !adsp_last_stop_acked?" (stop-ack missing)":"",
 +			    started_here && !adsp_last_aop_off?" (AOP off Pending)":"");
@@ -17937,7 +18204,8 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 +		mi8_audio_set_amp(NULL);
 +	}
 +	if (last >= 13) {
-+		if (!image_ok) say(last==17?"mi8rp: audio=2: FAILED before ADSP start (image/deadline)\n":"mi8rp: step 13: PROVEN=0 FAILED before ADSP start (image/deadline)\n");
++		if (!image_ok && audio_ring_stream) audio_ring_report(false,"not started (image/deadline)");
++		else if (!image_ok) say(last==17?"mi8rp: audio=2: FAILED before ADSP start (image/deadline)\n":"mi8rp: step 13: PROVEN=0 FAILED before ADSP start (image/deadline)\n");
 +		audio_play_brief=false;audio_play_thread=NULL;
 +	}
 +	thread_terminate(current_thread());
@@ -18070,6 +18338,10 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 +	/* Set once before starting either worker; default calls take no new lock. */
 +	PE_parse_boot_argn("mi8rp_step", &shared_step, sizeof(shared_step));
 +	PE_parse_boot_argn("audio", &audio, sizeof(audio));
++	if (audio==3) {
++		if (!mi8_audio_ring_requested()) { say("mi8rp: audio=3 refused: platform/step/mss/owner conflict\n");audio=0; }
++		else { audio_ring_stream=true;mi8_audio_set_ring(true);audio=2; }
++	}
 +	if (audio == 2 && shared_step == 0) {
 +		uint32_t radio = 0;
 +		/* Not yet beside the modem/Wi-Fi start: they share the modem partition, SMEM, AOP and the SMMU. */
@@ -18133,10 +18405,11 @@ index 0000000000000000000000000000000000000000..394ff6863772f30819fae61a7882818c
 +		thread_t thread;
 +		/* audio=2: steps 5..13 without the canary, then 60 s of zero periods; the amp stays in reset. */
 +		audio_tail_on = true;
-+		say("mi8rp: audio=2: zero stream to the DSP for 60 s, amp untouched\n");
++		if (audio_ring_stream) say("mi8rp: audio=3: ring stream for 120 s; output forced zero, amp untouched\n");
++		else say("mi8rp: audio=2: zero stream to the DSP for 60 s, amp untouched\n");
 +		if (kernel_thread_start(steps_from_five, (void *)(uintptr_t)17, &thread) == KERN_SUCCESS) {
 +			thread_deallocate(thread);
-+		}
++		} else if (audio_ring_stream) audio_ring_report(false,"not started (worker unavailable)");
 +		return;
 +	}
 +	if (!PE_parse_boot_argn("mi8rp_step", &last, sizeof(last)) || last == 0) {

@@ -8,7 +8,7 @@
       "upstream_file_exists": true,
       "license": "LicenseRef-CMU",
       "basis": "Original CMU header retained upstream; see pinned XNU file",
-      "sha256": "8f8680c9b16a65e438fc21c7f1299b65b9522330932a8a549a4ad9bcc4fbef0f"
+      "sha256": "c0618dd744395cac8ca1f83bd2189223efd208c94a17bb892ad8e2a5b62b6ba3"
     },
     {
       "component": "xnu-mi8",
@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "2e09be006ffc0d2293cf828c0b09a70c8f936198a8105861d9eb7399e8e92549"
+      "sha256": "b646c3c9e50f373300a9d75afe7b09d767c31e7d8412b1786a9a8b6dc8b1bd38"
     },
     {
       "component": "xnu-mi8",
@@ -712,7 +712,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 Linux/Android apr/q6core/q6afe 协议与 SDM845 设备树寄存器字段，未复制驱动实现",
-      "sha256": "f76a3dd4b4c09dd26e75b47817d5eef2cdb5cdcdec699e036799d971d291f585"
+      "sha256": "12f2555cb319389dab3a3486c06855f127ca5aa52ca3369e29bbd514a533e561"
     },
     {
       "component": "xnu-mi8",
@@ -720,7 +720,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 Linux/Android apr/q6core/q6afe 协议与 SDM845 设备树寄存器字段，未复制驱动实现",
-      "sha256": "7ff96581bf0cb7fa9af88f16ca4a4b957b2e873a152bc90b7f1dabc2846ad75c"
+      "sha256": "d851bfe2362fb5f880b88a0eb02104570edd479ba3b4e848d08936a9a46fdcfa"
     },
     {
       "component": "xnu-mi8",
@@ -744,7 +744,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "2f62ffa04d42ce92bf122d486a5e21cc6ee18fd58bbe82982f02dea3a53a7910"
+      "sha256": "2f2cc03f186966739ab40fff16148810804698a44e749328821dc5260edaa479"
     },
     {
       "component": "xnu-mi8",
@@ -752,7 +752,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "1ed6da9d554ea82a90247c25bcf0a8064a98405d51758941bd60e6cc9a807126"
+      "sha256": "618c3f16b170d2ce1df0f613681507b65298d36a840aa0487cdc621fe6f1dc18"
     },
     {
       "component": "xnu-mi8",
@@ -776,7 +776,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Original count-only observer; no reference driver implementation copied",
-      "sha256": "bd76858f6327843f0bda08a8e20995ead59ed67763522bf325c6e58a1272b14e"
+      "sha256": "a7c558a6f7e1ea38e0a40d85d8f36e753f9b10a51bdf9eb39432d0baba5207be"
     },
     {
       "component": "xnu-mi8",
@@ -784,7 +784,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Original count-only observer; no reference driver implementation copied",
-      "sha256": "2a9ff3db9fd41af9dd1d9e6b511ff4f1cb795f6702deb9a256bd077c6c75b232"
+      "sha256": "638dff583162d153d8cb5d6a709d25f46973c59d60abeee56e6b6a1f035f476b"
     },
     {
       "component": "xnu-mi8",
@@ -801,6 +801,22 @@
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices and HackiOS root LICENSE continue to apply",
       "sha256": "5bffd1aad09bbe25ce56062fdf4a0c118deaa7d419939b59236da02a41d3a5a3"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/dev/mi8_audio_ring.c",
+      "upstream_file_exists": false,
+      "license": "MIT",
+      "basis": "Original bounded PCM ring implementation; no reference driver implementation copied",
+      "sha256": "7cb1ac8a45bd859d32675ea47184a1738e0f0433cbeb988b7f559e60f113bad2"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/dev/mi8_audio_ring.h",
+      "upstream_file_exists": false,
+      "license": "MIT",
+      "basis": "Original bounded PCM ring implementation; no reference driver implementation copied",
+      "sha256": "40ca1324004b6dd3b04281668654c7899a8da74035eec936df69a99b98ba8f6f"
     }
   ]
 }

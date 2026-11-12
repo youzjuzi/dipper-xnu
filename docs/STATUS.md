@@ -72,6 +72,8 @@ Android 布局恢复、重新划出约 24 GiB darwin、两次 Format Data 与 An
 
 小米 8 的 TAS2557 经 ADSP 的 Quaternary MI2S 供数。内存启动、无线关闭、GPU/触摸/按键关闭的诊断已验证：apps SMMU 自建映射、ASM/ADM/AFE 消费 150 块数据、功放固件下载及静音上电收尾；`mi8rp_step=16` 的内核自产 1 kHz、−30 dBFS、1 秒短音由持有人确认可听，结尾无爆音。GPU 桌面默认配置下，`audio=1` 计数确认 iOS 的 S16LE 立体声 PCM 到达内核，`audio=2` 完成 3000/3000 周期（60 秒）零数据流，功放保持复位。**iOS 的声音还不能从扬声器放出**，可听证据仅限诊断短音。
 
+`audio=3` 的有界 ring 消费与 120 秒强制零 DMA 已完成主机验证，功放保持复位，设备尚待验收。
+
 `audio` 与 `mi8rp_step` 默认关闭。未与 Wi-Fi/蓝牙并存；ADSP 停后不能在当前流程内再次启用，需完整重启；长期运行、热安全与物理波形未测，loader 偶发 `hung` 原因未明。详见[后续音频验证](validation/VALIDATION.md#音频映射播放与功放2026-11-1112)。
 
 ## 降低渲染分辨率（可选）

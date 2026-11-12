@@ -46,10 +46,13 @@ def main():
         d = Path(tmp)
         (d / 'sink-host.h').write_text('/* Host declarations are provided by the harness. */\n')
         code = (ROOT / 'tools/tests/mi8-audio-sink.c').read_text()
+        rproc = (x / 'bsd/dev/mi8_rproc.c').read_text()
+        gate = body(rproc, 'if (audio==3)') + '\n' + body(rproc, 'if (audio == 2 && shared_step == 0)')
+        code = code.replace('/* @ring_gate */', gate)
         code = code.replace('/* @cdev */', pieces).replace('/* @sink */', source).replace('/* @loader */', final)
         (d / 'count.c').write_text(code)
         exe = d / 'count'
-        subprocess.run(['cc', *flags, '-I'+str(d), '-I'+str(x / 'bsd/dev'), str(d/'count.c'), '-o', str(exe)], check=True)
+        subprocess.run(['cc', *flags, '-I'+str(d), '-I'+str(x / 'bsd/dev'), str(d/'count.c'), str(x / 'bsd/dev/mi8_audio_ring.c'), '-o', str(exe)], check=True)
         subprocess.run([str(exe)], check=True, env=env, timeout=30)
     print('Count sink integration/static gates PASS; loader final append is last and lock-free')
 

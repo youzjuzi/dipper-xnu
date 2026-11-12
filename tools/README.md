@@ -50,6 +50,10 @@ python3 tools/prepare/patchtool.py scan
 
 `python3 tools/tests/test-mi8-audio-apr.py` 用 `MI8_GLINK_HOST_TEST` 编译实际 GLINK/APR 源码，合成 SMEM 环形 FIFO 对端，测试 raw open、分片、intent 请求与关闭、APR 坏包拒绝、完整版本列表和默认 IPCRTR/QRTR 兼容性。`python3 tools/tests/test-mi8-rproc-state.py` 提取实际远端状态、查找、调度与互斥代码，检查 ADSP/modem 隔离、嵌套查询、失败收尾与共享事务互斥。两者需要本机 C 编译器与 pthread，输出 `SELFTEST PASS n/n`；`--tree` 指向准备树根目录（包含 `hackios/`）。这些检查不操作设备，不能代替真实固件的通道、APR 或停机验证。
 
+## 有界音频 ring 主机测试
+
+`python3 tools/tests/test-mi8-audio-ring.py` 编译实际 SPSC ring 与 PCM/AFE/APR/GLINK 路径，检查固定种子 10 万次操作、200 万帧并发顺序、关门守恒、6000 周期全零 DMA 与超时收尾。`--sanitize` 启用 ASan/UBSan，`--tsan` 独立启用 TSan，`--tree` 指定干净准备树。配合 `test-mi8-audio-sink.py` 检查实际 cdev 锁、参数冲突与 loader 尾部摘要；这些测试不操作设备。
+
 ## 路径迁移说明（2026-10-31）
 
 原先直接位于 tools/ 根目录的脚本已移入上述分类，文件名不变，不保留第二套脚本或旧入口。当前教程使用新路径。历史验证记录和 work/runs/ 中的原始命令保留当时路径，不修改既有证据；需要再次运行时按本页选择新入口并新建轮次，不直接重跑历史脚本。历史源码/生成器摘要仍指向当时版本，不为目录整理刷新旧实验的来源记录。

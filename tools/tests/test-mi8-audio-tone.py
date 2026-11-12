@@ -32,7 +32,7 @@ def main():
     body = runpy.run_path(str(ROOT / 'tools/tests/test-mi8-audio-smmu.py'))['body']
     source = (dev / 'mi8_rproc.c').read_text()
     fixture = (ROOT / 'tools/tests/mi8-audio-play.c').read_text()
-    for fn in ['dsp_shutdown', 'steps_from_five']:
+    for fn in ['audio_ring_report', 'dsp_shutdown', 'steps_from_five']:
         signature = ('static bool\n' if fn == 'dsp_shutdown' else 'static void\n') + fn + '('
         actual = body(source, signature).replace('now_us(', 'worker_now_us(').replace('say(', 'worker_say(')
         fixture = fixture.replace('/* @' + fn + ' */', actual)
@@ -70,7 +70,7 @@ unsigned mi8_tas_guard_tests(void) {
 ''')
         pcm = tmp / 'pcm-check.c'
         pcm.write_text((dev / 'mi8_audio_pcm.c').read_text() + (ROOT / 'tools/tests/mi8-audio-tone-guards.inc').read_text())
-        compile_command = ['cc', *flags, '-I' + str(tmp), str(ROOT / 'tools/tests/mi8-audio-tone.c'), str(ROOT / 'tools/tests/mi8-audio-tone-model.c'), str(guard), str(pcm), *(str(dev / s) for s in ['mi8_glink.c', 'mi8_audio.c']), '-o', str(exe)]
+        compile_command = ['cc', *flags, '-I' + str(tmp), str(ROOT / 'tools/tests/mi8-audio-tone.c'), str(ROOT / 'tools/tests/mi8-audio-tone-model.c'), str(guard), str(pcm), *(str(dev / s) for s in ['mi8_glink.c', 'mi8_audio.c', 'mi8_audio_ring.c']), '-o', str(exe)]
         subprocess.run(compile_command, check=True)
         subprocess.run([str(exe), str(a.firmware), str(ref), str(tmp / 'wave.raw')], check=True, env=env)
         frames = list(struct.iter_unpack('<hh', (tmp / 'wave.raw').read_bytes()))

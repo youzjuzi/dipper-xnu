@@ -94,6 +94,8 @@ static unsigned smem_items(uint32_t partition,uint32_t line,struct smem_item *ou
 typedef int wait_result_t;
 static bool adsp_started, prep_ok, start_ok, starts_dsp, down_ok, ack_ok, aop_ok, handshake_ok;
 static bool adsp_last_stop_acked, adsp_last_aop_off;
+static bool audio_ring_stream;
+static void audio_ring_report(bool completed,const char *cleanup){(void)completed;(void)cleanup;CHECK(false);}
 static unsigned shutdowns,offs,handshakes,terminations;
 static int redwood_ufs_read_named(const char*n,unsigned off,void*p,unsigned sz){(void)n;(void)off;(void)p;(void)sz;return 0;}
 static void delay_for_interval(unsigned a,unsigned b){(void)a;(void)b;}
