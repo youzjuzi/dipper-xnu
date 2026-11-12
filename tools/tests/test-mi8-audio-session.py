@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import re
 import os
 from pathlib import Path
 import runpy
@@ -34,6 +35,10 @@ def main():
     dev = a.tree.resolve() / 'hackios/xnu-src/xnu-8796.121.2/bsd/dev'
     body = runpy.run_path(str(ROOT / 'tools/tests/test-mi8-audio-smmu.py'))['body']
     source = (dev / 'mi8_rproc.c').read_text()
+    table=(dev/'mi8_audio_pcm.c').read_text().split('session_levels[]=',1)[1].split(';',1)[0]
+    pairs=[(int(db),int(limit)) for db,limit in re.findall(r'\{(-?\d+),(\d+)\}',table)]
+    assert pairs==[(db,min(32767,round(32768*10**(db/20)))) for db in [-30,-24,-20,-12,-6,0]]
+    print('Independent six-level coefficient formula PASS',flush=True)
     fixture = (ROOT / 'tools/tests/mi8-audio-play.c').read_text().replace('ops[8000]','ops[16000]').replace('m->count<8000','m->count<16000').replace('m->step==16?1036:1000','m->step==16?(int)mi8_pcm_session_limit():1000')
     for fn in ['audio_ring_report', 'dsp_shutdown', 'steps_from_five']:
         sig = ('static bool\n' if fn == 'dsp_shutdown' else 'static void\n') + fn + '('

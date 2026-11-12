@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "1327e18c5060a289f1b0aae6ecbe00a3d8815bf27188cc3f2f5b0b280dbd7fa4"
+      "sha256": "ef01d5ce269730fca86570ddb057c1349a840332928da2b3f48b9f30d40c7cb0"
     },
     {
       "component": "xnu-mi8",
@@ -744,7 +744,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "a71dba44caeeacfdd64eeb11d032ec97922ddba6a2ea9895fcc6fd54519d7ae5"
+      "sha256": "fdb3be248cc757f59f888afddf9a2aabdf674a78b51999664416797167fccf0a"
     },
     {
       "component": "xnu-mi8",
@@ -752,7 +752,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "df76fe33f7978becc66758212e6fbea25f36d32469aa1b01d0d0a0b1a6e18743"
+      "sha256": "8ac88f55b5b75818d2dbeff072aab64e21b86f51489644e818f257e10b1f5d67"
     },
     {
       "component": "xnu-mi8",
@@ -808,7 +808,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Original bounded PCM ring implementation; no reference driver implementation copied",
-      "sha256": "a3dc280f4d50956e5f8366a061160f293a92bda0ea53fe79248b21d307174b05"
+      "sha256": "553c07ff047f7e87eafa7797338580d32d5c7a5b320e62c5cb9736f18d29e5c4"
     },
     {
       "component": "xnu-mi8",
@@ -816,7 +816,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Original bounded PCM ring implementation; no reference driver implementation copied",
-      "sha256": "c4f589e9e9175018e0b961db5842d8a18cc6bda6e3ebb1fdebd92f106e4e0eb5"
+      "sha256": "c01a5269ff98364ee1a3e9fa5161a2a2ba1695b370c4fd6afec6a998c9515b5a"
     }
   ]
 }

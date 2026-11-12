@@ -70,7 +70,7 @@ static void ring_feed(void){
  }
  int16_t data[2048];uint64_t elapsed=active->now-stream_start;
  int value=32767;
- if(mode==1 || mode==4 || mode==5 || mode==7)value=(elapsed%((mode==7)?4500000:10000000))<800000?32767:0;
+ if(mode==1 || mode==4 || mode==5 || mode==7)value=(elapsed%((mode==7)?4500000:15000000))<800000?32767:0;
  if(mode==8)value=255;
  if(mode==9)value=256;
  if(mode==3 && elapsed>1000000)return;
@@ -114,13 +114,14 @@ int main(int argc,char **argv){
   fprintf(stderr,"debug mode=%u wakes=%u mutes=%u reason=%u clean=%u live=%llu\n",mode,a.wakes,a.mutes,a.reason,a.clean,(unsigned long long)a.live_total);
   if(threaded || (mode!=5 && mode!=6 && mode!=10 && mode!=11 && mode!=12 && mode!=13 && mode!=14)){if(!ok)fprintf(stderr,"mode %u %s\n",mode,m.log);CHECK(ok&&m.normal==stream_seconds*50);}
   if(!threaded){
+  if(mode==0)CHECK(strstr(m.log,"play:")&&strstr(m.log,"asm stream close errno=0"));
   if(mode==0 || mode==9)CHECK(a.wakes==(stream_seconds==300?3u:1u)&&a.live_total>(uint64_t)(stream_seconds-10)*1000000);
   if(mode==1 || mode==4)CHECK(a.wakes>=3 && a.checks==a.wakes-1 && a.checks_ok==a.checks);
-  if(mode==2)CHECK(!outputs&&a.wakes>20&&a.wakes<200);
+  if(mode==2)CHECK(!outputs&&a.wakes>=10&&a.wakes<20);
   if(mode==3)CHECK(a.wakes==1&&a.mutes==1);
   if(mode==5)CHECK(a.reason==2&&a.checks>a.checks_ok);
   if(mode==6)CHECK(a.reason==4&&!outputs);
-  if(mode==7)CHECK(a.wakes>20&&a.wakes<200&&a.live_total>60000000);
+  if(mode==7)CHECK(a.wakes==1&&a.live_total>110000000);
   if(mode==8)CHECK(!a.wakes&&!outputs);
   if(mode==15)CHECK(a.wakes==200&&!outputs);
   if(mode==16)CHECK(a.wakes==200&&outputs>0);

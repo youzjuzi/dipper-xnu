@@ -25,7 +25,11 @@ static void model(void){
  uint64_t head=0,tail=0;int16_t expected[32768];
  for(unsigned op=0;op<100000;op++){
   unsigned n=1+random_word()%1024;
-  if(random_word()&1){
+  unsigned choice=random_word()%3;
+  if(choice==2){
+   unsigned keep=random_word()%2000;uint64_t drop=head-tail>keep?head-tail-keep:0;
+   CHECK(mi8_audio_ring_trim(keep)==drop);tail+=drop;
+  }else if(choice==1){
    for(unsigned i=0;i<n;i++){in[2*i]=(int16_t)(op+i);in[2*i+1]=(int16_t)~(op+i);}
    unsigned take=n;if(take>16384-(head-tail))take=(unsigned)(16384-(head-tail));
    CHECK(mi8_audio_ring_put(in,n)==take);
@@ -35,7 +39,7 @@ static void model(void){
    CHECK(mi8_audio_ring_take(out,n)==take);
    for(unsigned i=0;i<take;i++){unsigned at=(unsigned)(tail+i)&16383;CHECK(out[2*i]==expected[2*at]&&out[2*i+1]==expected[2*at+1]);}tail+=take;
   }
-  struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);CHECK(r.accepted==r.consumed+r.queued&&r.queued==head-tail);
+  struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);CHECK(r.accepted==r.consumed+r.discarded+r.queued&&r.queued==head-tail);
  }
  CHECK(mi8_audio_ring_close());CHECK(ring_counts.accepted==ring_counts.consumed+ring_counts.discarded);
  /* Deterministically stop a producer after admission, then finish publication. */
@@ -69,6 +73,19 @@ static void concurrency(void){
  CHECK(!pthread_join(p,NULL));CHECK(!pthread_join(c,NULL));CHECK(atomic_load(&producer_done));
  CHECK(mi8_audio_ring_close());CHECK(ring_counts.accepted==TOTAL&&ring_counts.consumed==TOTAL&&!ring_counts.discarded);
  printf("Ring SPSC: %u ordered unique frames PASS\n",TOTAL);
+}
+static void trim_race(void){
+ reset_ring();mi8_audio_ring_ready();CHECK(mi8_audio_ring_open());atomic_store(&producer_done,false);
+ pthread_t p;CHECK(!pthread_create(&p,NULL,producer,NULL));int16_t out[1920];uint32_t at=0;
+ while(at<TOTAL){
+  at+=mi8_audio_ring_trim(1920);
+  unsigned n=mi8_audio_ring_take(out,960);
+  for(unsigned i=0;i<n;i++){uint32_t got=(uint16_t)out[2*i]|(uint32_t)(uint16_t)out[2*i+1]<<16;VERIFY(got==at++);}
+  if(!n)sched_yield();
+ }
+ CHECK(!pthread_join(p,NULL));CHECK(mi8_audio_ring_close());struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
+ CHECK(r.accepted==TOTAL&&r.accepted==r.consumed+r.discarded&&!r.queued);
+ printf("Ring concurrent consumer trim: 2000000 uniquely indexed frames, monotonic order and conservation PASS\n");
 }
 static void close_race(void){
  reset_ring();mi8_audio_ring_ready();CHECK(mi8_audio_ring_open());atomic_store(&producer_done,false);
@@ -118,4 +135,4 @@ static void stream(void){
  m.log_length=0;m.log[0]=0;ring_counts.accepted--;audio_ring_report(true,"complete");CHECK(strstr(m.log,"ring stream FAILED")&&strstr(m.log,"conservation=FAILED"));
  CHECK(audio_tail_len==strlen(m.log)&&!memcmp(audio_tail,m.log,audio_tail_len));
 }
-int main(void){model();concurrency();close_race();stream();printf("Ring SELFTEST PASS %u + %u concurrent checks\n",checks,atomic_load(&concurrent_checks));return 0;}
+int main(void){model();concurrency();trim_race();close_race();stream();printf("Ring SELFTEST PASS %u + %u concurrent checks\n",checks,atomic_load(&concurrent_checks));return 0;}
