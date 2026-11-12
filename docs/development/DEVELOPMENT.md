@@ -125,11 +125,10 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-12，接手时重新核对）
 
-- 分支 `feat/audio-sink`，基线 `54eac28`；设备对比文档已单独提交 `7746d59`，随后本提交固化唤醒裁剪、六档电平、10秒静默和会话日志额度。work 的5个源码变更已导出，53个无关注册XNU源文件保留，TAS代码及硬件事务未改。
-- 采用持有人裁定的 WARMING + 首次 LIVE 裁剪，由同一个 PCM 消费者保留最新1920帧，累计计入 discarded/wake_flush_frames，每次 PCM wake 报 flushed。六档共享启动只读上限，默认仍−30；旧20行日志额度的195秒截断已复现并修复。
-- 主机回归、sanitizer/TSan、干净重放、显式 SOURCE_DIR 构建及栈检查见 `work/runs/20261112-audio-louder-01/RESULTS.md`；P25-6/P25-0 同内核、同P24输入，仅电平不同，无线全开，loader_return_after=420、audio_seconds=300。
-- 旧设备事实保持：−30/−20两轮300秒无panic、cleanup、守恒、饱和0，开头约1秒有杂音，−20音量偏小。证据 `work/runs/20261112-audio-level-01/DEVICE.md`；本轮新行为主机完成、设备待验证。
-- 不碰手机、不改local/、不push；既有源码和设备证据保留。下一步由持有人分别完整重启验收−6与0，检查开头声音、音量/失真/发热、健康读数、flushed、峰值、守恒/cleanup及最终32KiB收尾行。
+- 分支 `feat/audio-sink`，接手 `ffd4325`，58个注册XNU源文件与清单相符，tracked干净。先提交−6dB设备事实，随后处理快速唤醒。
+- P25-6：无线全开300秒，play15000/15000且最终32KiB有asm close，dropped0、wake_flush_frames106880、peak16406≤16423、饱和0、守恒与cleanup完成、无panic；持有人约60dB SPL，开头仍轻微毛刺。0dB尚未上机。证据 `work/runs/20261112-audio-louder-01/DEVICE.md`。
+- 新运行目录 `work/runs/20261112-audio-fastwake-01/`；只读核对厂商startup内置2ms，PLL检查为空，未见额外上电后等待。准备将Y校验移至软关断后的OFF_READY，并保留健康判据；源码尚未修改。
+- 仅主机，不碰手机、不push、不改local/，既有证据和源码保留；新快速唤醒及满幅听感、长期/热安全均Pending。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 
