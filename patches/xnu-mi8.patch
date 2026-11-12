@@ -6461,10 +6461,10 @@ index 0000000000000000000000000000000000000000..3b401e70c9180a9bbb1eaecb706aa87a
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..0203a7ff5343cbf3d63677dda3bfb659ccded47c
+index 0000000000000000000000000000000000000000..f50f9cf35dc4a37a765005312bebc607804230ba
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,788 @@
+@@ -0,0 +1,789 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6717,6 +6717,7 @@ index 0000000000000000000000000000000000000000..0203a7ff5343cbf3d63677dda3bfb659
 + static int16_t scratch[960*2]; /* Sole session feeder, never shared with old modes. */
 + uint8_t *data=(uint8_t *)s->memory.buffer+slot*MI8_PCM_PERIOD;memset(data,0,MI8_PCM_PERIOD);
 + struct mi8_amp_snapshot a;s->session->snapshot(&a);uint64_t n=s->io->now(s->io->ctx);
++ if(s->session->panic_tick)s->session->panic_tick(n);
 + if(a.state==MI8_AMP_WARMING)return;
 + memset(scratch,0,sizeof(scratch));(void)mi8_audio_ring_take(scratch,960);
 + if(a.request || a.reason)return;
@@ -7255,10 +7256,10 @@ index 0000000000000000000000000000000000000000..0203a7ff5343cbf3d63677dda3bfb659
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..15562dc37fc827e9e2853b436ef9007c747d83da
+index 0000000000000000000000000000000000000000..e1e3bfee6a749a6fa2cd4530c1fff3eab7364696
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,113 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
@@ -7336,6 +7337,7 @@ index 0000000000000000000000000000000000000000..15562dc37fc827e9e2853b436ef9007c
 + bool (*muted)(void);
 + bool (*held)(void);
 + void (*fault)(void);
++ void (*panic_tick)(uint64_t);
 +};
 +bool mi8_pcm_run_session(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,const struct mi8_pcm_session_ops *);
 +struct mi8_pcm_state {
@@ -14362,7 +14364,7 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..57cb36b77a33502016187728b7c8c6897f2949b3
+index 0000000000000000000000000000000000000000..1cb81ac19bc4517e1ab18da764a51191b0e69aa2
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
 @@ -0,0 +1,4618 @@
@@ -18659,7 +18661,7 @@ index 0000000000000000000000000000000000000000..57cb36b77a33502016187728b7c8c689
 +
 +static const struct mi8_pcm_session_ops audio_session_ops={
 + mi8_tas_session_snapshot,mi8_tas_session_wake,mi8_tas_session_mute,mi8_tas_session_zero,
-+ mi8_tas_session_count,mi8_tas_session_stop_request,mi8_tas_session_join,redwood_audio_muted,mi8_tas_session_held,mi8_tas_session_fault
++ mi8_tas_session_count,mi8_tas_session_stop_request,mi8_tas_session_join,redwood_audio_muted,mi8_tas_session_held,mi8_tas_session_fault,mi8_tas_session_panic_tick
 +};
 +static void audio_session_report(bool complete,const char *cleanup) {
 + bool closed=mi8_audio_ring_close();struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
@@ -18986,10 +18988,10 @@ index 0000000000000000000000000000000000000000..57cb36b77a33502016187728b7c8c689
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b047a1b135ef1c1ae668ecf32232863abb7a29c
+index 0000000000000000000000000000000000000000..e8c417c22071f5e343b0e09291bec08b0487f090
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,1034 @@
+@@ -0,0 +1,1102 @@
 +/* SPDX-License-Identifier: MIT
 + * TAS2557 firmware probe and bounded hard-muted power check. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
@@ -19003,6 +19005,9 @@ index 0000000000000000000000000000000000000000..5b047a1b135ef1c1ae668ecf32232863
 +#include <libkern/libkern.h>
 +#include <kern/clock.h>
 +#include <kern/thread.h>
++#include <kern/debug.h>
++#include <kdp/kdp_callout.h>
++#include <pexpert/pexpert.h>
 +#include <mach/mach_types.h>
 +#include <mach/thread_act.h>
 +#include <vm/vm_kern.h>
@@ -19849,7 +19854,7 @@ index 0000000000000000000000000000000000000000..5b047a1b135ef1c1ae668ecf32232863
 + if(!ok)return false;
 + amp.unmute_attempted=false;amp.attempted=false;
 + unsigned n=__atomic_add_fetch(&session.mutes,1,__ATOMIC_RELAXED);
-+ if(t->io->log)t->io->log(t->io->ctx,"audio: mute #%u at %llu us live=%llu ms blocks=%u out_peak=%u readback=03/01 shutdown=ok reset=high\n",n,(unsigned long long)now(t),(unsigned long long)((now(t)-SA(session.live_start))/1000),SA(session.blocks),SA(session.peak));
++ if(t->io->log)t->io->log(t->io->ctx,"audio: mute #%u at %llu us live=%llu ms blocks=%u out_peak=%u readback=03/01 shutdown=ok reset=high\n",n,(unsigned long long)now(t),(unsigned long long)((now(t)-SA(session.live_start))/1000),SA(session.window_blocks),SA(session.window_peak));
 + return true;
 +}
 +bool mi8_tas_session_prepare(const struct mi8_tas_io *io,const uint8_t *raw,size_t size,uint64_t deadline) {
@@ -19928,13 +19933,74 @@ index 0000000000000000000000000000000000000000..5b047a1b135ef1c1ae668ecf32232863
 +		if (pa>=maps[i].phys && pa-maps[i].phys<maps[i].size) return maps[i].va+pa-maps[i].phys;
 +	return 0;
 +}
++
++/* KDP callouts run with interrupts disabled and other CPUs quiesced
++ * (osfmk/kdp/kdp_callout.h). PANICLOG is dispatched before SavePanicInfo
++ * (osfmk/kern/debug.c); no callback-side mapping, allocation, I2C or lock.
++ * Panics that never reach this callout (including failed CPU rendezvous,
++ * very early or deeply nested panics) are outside this guarantee. */
++static volatile uint32_t *panic_reset;
++static unsigned panic_amp_state; /* 0 reset low, 1 held/high, 2 panic latched */
++static bool panic_registered;
++static unsigned panic_test_enabled;
++extern void debug_putc(char);
++static bool amp_panic_reset(void) {
++ unsigned armed=1;
++ if(!panic_reset || !__atomic_compare_exchange_n(&panic_amp_state,&armed,2,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return false;
++ *panic_reset=0; /* Only the reset output latch, never GPIO configuration. */
++ __asm__ volatile("dsb sy":::"memory");
++ return true;
++}
++static void amp_panic_callout(void *unused,kdp_event_t event) {
++ (void)unused;
++ if(event!=KDP_EVENT_PANICLOG || !amp_panic_reset())return;
++ /* debug_putc only appends bounded bytes to the existing panic RAM buffer.
++  * Do not use printf, native_log or the loader's log lock here. */
++ static const char marker[]="audio: amp reset low (panic)\n";
++ for(unsigned i=0;i<sizeof(marker)-1;i++)debug_putc(marker[i]);
++}
++static void amp_panic_bind(void) {
++ if(panic_registered)return;
++ panic_reset=(volatile uint32_t *)address(PIN(76)+4);
++ kdp_register_callout(amp_panic_callout,NULL);
++ panic_registered=true;
++}
++static void session_panic_configure(void) {
++ uint32_t audio=0,request=0;
++ PE_parse_boot_argn("audio",&audio,sizeof(audio));
++ PE_parse_boot_argn("audio_panic_test",&request,sizeof(request));
++ SP(panic_test_enabled,audio==5 && request==1);
++}
 +static uint32_t native_read(void *ctx,uint32_t pa) { (void)ctx;return *(volatile uint32_t *)address(pa); }
-+static void native_write(void *ctx,uint32_t pa,uint32_t v) { (void)ctx;if(pa==PIN(76)+4 && v && SA(session.expired))return;*(volatile uint32_t *)address(pa)=v;if(pa==PIN(76)+4 && v && SA(session.expired))*(volatile uint32_t *)address(pa)=0;__asm__ volatile("dsb sy":::"memory"); }
++static void native_write(void *ctx,uint32_t pa,uint32_t v) {
++ (void)ctx;
++ if(pa==PIN(76)+4 && v) {
++  if(SA(session.expired) || SA(panic_amp_state)==2)return;
++  /* The mapping and callback are installed before the first reset-high.
++   * A panic quiesces all other CPUs before the reset callout, so no parked
++   * writer can overwrite the panic reset. Panic does not resume this path. */
++  if(panic_registered)SP(panic_amp_state,1);
++ }
++ *(volatile uint32_t *)address(pa)=v;
++ if(pa==PIN(76)+4) {
++  if(v && SA(session.expired))*(volatile uint32_t *)address(pa)=0;
++  if(!v && panic_registered){unsigned armed=1;(void)__atomic_compare_exchange_n(&panic_amp_state,&armed,0,false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);}
++ }
++ __asm__ volatile("dsb sy":::"memory");
++}
 +static uint64_t native_now(void *ctx) { uint64_t n;(void)ctx;absolutetime_to_nanoseconds(mach_absolute_time(),&n);return n/1000; }
 +static void native_delay(void *ctx,unsigned us) { (void)ctx;delay_for_interval(us,NSEC_PER_USEC); }
 +static void native_log(void *ctx,const char *fmt,...) {
 +	char line[600];va_list ap;(void)ctx;va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);
 +	for (const char *p=line;*p;p++) loader_log_putc(*p);printf("%s",line);
++}
++void mi8_tas_session_panic_tick(uint64_t n) {
++ if(!SA(panic_test_enabled) || !panic_registered || SA(panic_amp_state)!=1)return;
++ struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);
++ if(a.state!=MI8_AMP_LIVE || a.request || a.reason || a.wakes!=1 || n<a.live_start || n-a.live_start<1000000)return;
++ SP(panic_test_enabled,0);
++ native_log(NULL,"audio: panic hook armed\n");
++ panic("audio panic test");
 +}
 +void mi8_tas2557_probe(uint64_t deadline) {
 +	uint64_t size=0;struct mi8_tas_result result;
@@ -19957,6 +20023,7 @@ index 0000000000000000000000000000000000000000..5b047a1b135ef1c1ae668ecf32232863
 +	}
 +	if (!irq_page) irq_page=ml_io_map(PIN(28),0x4000);
 +	if (!irq_page) { native_log(NULL,"mi8rp: 15: IRQ mapping failed; TAS untouched\n");return; }
++	amp_panic_bind();
 +	const struct mi8_tas_io io={NULL,native_read,native_write,native_now,native_delay,native_log};
 +	(void)mi8_tas2557_hold(&io,fw,(size_t)size,deadline);
 +}
@@ -19969,6 +20036,7 @@ index 0000000000000000000000000000000000000000..5b047a1b135ef1c1ae668ecf32232863
 +	}
 +	if (!irq_page) irq_page=ml_io_map(PIN(28),0x4000);
 +	if (!irq_page) { native_log(NULL,"mi8rp: 16: IRQ mapping failed; TAS untouched\n");return; }
++	amp_panic_bind();
 +	const struct mi8_tas_io io={NULL,native_read,native_write,native_now,native_delay,native_log};
 +	(void)mi8_tas2557_hold_tone(&io,fw,(size_t)size,deadline);
 +}
@@ -19982,6 +20050,7 @@ index 0000000000000000000000000000000000000000..5b047a1b135ef1c1ae668ecf32232863
 +	}
 +	if (!irq_page) irq_page=ml_io_map(PIN(28),0x4000);
 +	if (!irq_page) { native_log(NULL,"mi8rp: 16: IRQ mapping failed; TAS untouched\n");return; }
++	amp_panic_bind();
 +	const struct mi8_tas_io io={NULL,native_read,native_write,native_now,native_delay,native_log};
 +	(void)mi8_tas2557_hold_clip(&io,fw,(size_t)size,deadline);
 +}
@@ -20005,6 +20074,7 @@ index 0000000000000000000000000000000000000000..5b047a1b135ef1c1ae668ecf32232863
 +  if(!maps[i].va){SP(session.reason,1);SP(session.state,MI8_AMP_LATCHED_OFF);SP(session.done,1);return;}
 + }
 + if(!irq_page)irq_page=ml_io_map(PIN(28),0x4000);
++ if(irq_page){amp_panic_bind();session_panic_configure();}
 + session_started=irq_page!=0;
 + if(!irq_page || kernel_thread_start(session_control_thread,NULL,&session_thread)!=KERN_SUCCESS){SP(session.reason,1);SP(session.state,MI8_AMP_LATCHED_OFF);SP(session.done,1);return;}
 + /* Initialization only, before PCM/AFE exist; feeder never waits for wake/mute. */
@@ -20026,10 +20096,10 @@ index 0000000000000000000000000000000000000000..5b047a1b135ef1c1ae668ecf32232863
 +#endif
 diff --git a/bsd/dev/mi8_tas2557.h b/bsd/dev/mi8_tas2557.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..db2b762f996d405eb5109d42fd5bdb98144852cc
+index 0000000000000000000000000000000000000000..706cb2ee070cde848cca0864fbd6db1715a071c4
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.h
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,80 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef MI8_TAS2557_H
 +#define MI8_TAS2557_H
@@ -20106,6 +20176,7 @@ index 0000000000000000000000000000000000000000..db2b762f996d405eb5109d42fd5bdb98
 +void mi8_tas2557_prepare_clip(uint64_t deadline);
 +void mi8_tas2557_probe(uint64_t deadline);
 +void mi8_tas_session_start(uint64_t deadline);
++void mi8_tas_session_panic_tick(uint64_t now_us);
 +bool mi8_tas_session_join(void);
 +#endif
 +#endif

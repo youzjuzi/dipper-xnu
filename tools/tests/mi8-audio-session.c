@@ -45,7 +45,7 @@ static bool join_control(void){
  struct mi8_amp_snapshot a;mi8_tas_session_snapshot(&a);CHECK(a.done);session_model_check_done();return a.clean;
 }
 static void request_stop(void){stop_requested=true;mi8_tas_session_stop_request();}
-static const struct mi8_pcm_session_ops session_ops={mi8_tas_session_snapshot,mi8_tas_session_wake,mi8_tas_session_mute,mi8_tas_session_zero,mi8_tas_session_count,request_stop,join_control,muted,mi8_tas_session_held,mi8_tas_session_fault};
+static const struct mi8_pcm_session_ops session_ops={mi8_tas_session_snapshot,mi8_tas_session_wake,mi8_tas_session_mute,mi8_tas_session_zero,mi8_tas_session_count,request_stop,join_control,muted,mi8_tas_session_held,mi8_tas_session_fault,NULL};
 void mi8_tas2557_prepare(uint64_t n){(void)n;CHECK(false);}
 void mi8_tas2557_prepare_tone(uint64_t n){(void)n;CHECK(false);}
 void mi8_tas_session_start(uint64_t end){CHECK(end>active->now);control_prepared=true;CHECK(session_model_prepare(0));active->now=session_model_now();stream_start=active->now;}

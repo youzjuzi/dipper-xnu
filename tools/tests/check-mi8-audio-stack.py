@@ -31,7 +31,7 @@ AMP = names('mi8_tas2557', 'mi8_tas2557_held mi8_tas2557_tick mi8_tas2557_stop m
 # The separate clip table adds warmup/health and the mutex-protected cdev mute
 # accessor. The latter is an external XNU boundary, listed explicitly below.
 CLIP = names('mi8_tas2557', 'mi8_tas2557_clip_warmup mi8_tas2557_clip_audible mi8_tas2557_clip_clean')
-SESSION = names('mi8_tas2557', 'mi8_tas_session_snapshot mi8_tas_session_wake mi8_tas_session_mute mi8_tas_session_zero mi8_tas_session_count mi8_tas_session_stop_request mi8_tas_session_join mi8_tas_session_held mi8_tas_session_fault')
+SESSION = names('mi8_tas2557', 'mi8_tas_session_snapshot mi8_tas_session_wake mi8_tas_session_mute mi8_tas_session_zero mi8_tas_session_count mi8_tas_session_stop_request mi8_tas_session_join mi8_tas_session_held mi8_tas_session_fault mi8_tas_session_panic_tick')
 CALLBACKS = {
     'mi8_glink': TRANSPORT + names('mi8_audio', 'receive'),
     'mi8_audio': names('mi8_rproc', 'audio_alive audio_fatal svc_now_us svc_sleep_us svc_log') + names('mi8_audio', 'native_pin_read native_pin_write') + AMP + CLIP + SESSION,
@@ -83,7 +83,7 @@ def main():
         hashes[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
         text = subprocess.check_output(['llvm-objdump', '--macho', '--disassemble', '--no-show-raw-insn', str(p)], text=True)
         data.update(parse(text, p.stem))
-    roots = args.root or ['mi8_rproc:steps_from_five', 'mi8_rproc:steps_audio_clip', 'mi8_rproc:steps_audio_session', 'mi8_tas2557:session_control_thread']
+    roots = args.root or ['mi8_rproc:steps_from_five', 'mi8_rproc:steps_audio_clip', 'mi8_rproc:steps_audio_session', 'mi8_tas2557:session_control_thread', 'mi8_tas2557:amp_panic_callout']
     graph, external = {}, {}
     for key, row in data.items():
         obj = key.split(':')[0]

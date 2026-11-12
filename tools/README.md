@@ -73,3 +73,5 @@ python3 tools/prepare/patchtool.py scan
 `python3 tools/tests/test-mi8-audio-session.py --firmware <固件> --reference <离线参考文本> --metadata <摘要JSON>` 验证实际会话 feeder、TAS 控制、ring/GLINK/APR 路径与独立字对齐 I2C 对端。覆盖多次 wake/mute、静默/时长/次数上限、只读系数校验、健康失败、提交守卫、8 个零块尾段及 worker 出口。`--threads` 使用真实双线程和 0/50/500 ms 控制延迟，`--tsan` 为该并发检查启用 TSan；`--sanitize` 启用 ASan/UBSan。`--tree` 指向干净准备树。
 
 `test-mi8-audio-session-join.py` 单独提取原生 join 实现，验证 300 ms 超时、复位拉低、幂等失败及资源保留。超时不等于线程退出：失败线程及其资源保留至完整重启。栈预算工具另覆盖 session feeder 和 TAS control 两个线程。
+
+`python3 tools/tests/test-mi8-audio-panic.py [--tree <干净准备树>]` 提取原生 panic 钩子和参数处理函数，验证 held-only、单次 MMIO、重复调用锁存、84 组参数组合及首次 LIVE 后 1 秒的触发。主机用普通内存模拟 MMIO，仅替换 ARM 屏障；另静态核对 XNU 回调与 panic buffer 入口。不能替代实际 panic、复位电平或声音停止验证。
