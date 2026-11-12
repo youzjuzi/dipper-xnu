@@ -5571,10 +5571,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..ffc158a811f35e1f7a67f382982d53fa042214b3
+index 0000000000000000000000000000000000000000..d429a0bbfaa067308291632a3b84fa6605b4b1b5
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,799 @@
+@@ -0,0 +1,801 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
@@ -6188,7 +6188,9 @@ index 0000000000000000000000000000000000000000..ffc158a811f35e1f7a67f382982d53fa
 +		512, 512, 512, 512, 512, 512, 512, 512, 512, 512,
 +		512, 512, 512, 512, 512, 512, 512, 512, 512, 512
 +	};
-+	struct audio_session local_session;
++	/* Only the single ADSP diagnostic/playback worker enters audio_run.
++	 * Non-play sessions are cleared on every entry, just like play_session. */
++	static struct audio_session local_session;
 +	struct audio_session *session=play?&play_session:&local_session;
 +	struct mi8_glink_cfg transport;
 +	struct mi8_glink_channel_status status = { 0 };
@@ -6447,10 +6449,10 @@ index 0000000000000000000000000000000000000000..e179fc6591b77e86f5bf12937a2f592e
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1baf07ddec90569b59b726c0ec414256830f7b51
+index 0000000000000000000000000000000000000000..a1b42f8ee92206dbdb591cec5b34dba796ab7d2e
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,477 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6841,7 +6843,8 @@ index 0000000000000000000000000000000000000000..1baf07ddec90569b59b726c0ec414256
 +		s->period=n;
 +		/* Scratch is never passed to DMA or submit. The only write to a DMA
 +		 * slot here is memset(0); submit also independently rejects nonzero. */
-+		int16_t scratch[960*2];
++		/* Static, not on the 16 KiB worker stack: one consumer thread only. */
++		static int16_t scratch[960*2];
 +		(void)mi8_audio_ring_take(scratch,960);
 +		memset((uint8_t *)s->memory.buffer+slot*MI8_PCM_PERIOD,0,MI8_PCM_PERIOD);
 +		io->cache(io->ctx,slot*MI8_PCM_PERIOD,MI8_PCM_PERIOD);
@@ -14002,10 +14005,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d314485e21865
+index 0000000000000000000000000000000000000000..36c0950649f3cf3168e3af01f3005f40a5640c45
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4450 @@
+@@ -0,0 +1,4457 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -14604,7 +14607,9 @@ index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d3144
 +	wr((vm_offset_t)smem + offset, value);
 +}
 +
-+/* Where an item is in a partition (0: not there). */
++/* Where an item is in a partition (0: not there). Keep this frame separate:
++ * lookups may nest across ADSP/modem users, so its scratch must stay private. */
++static uint32_t item_find(uint32_t, uint32_t, uint32_t, uint32_t *) __attribute__((noinline));
 +static uint32_t
 +item_find(uint32_t partition, uint32_t cacheline, uint32_t item, uint32_t *size)
 +{
@@ -15088,7 +15093,7 @@ index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d3144
 +	}
 +}
 +
-+static void
++static void __attribute__((noinline))
 +step_firmware(void)
 +{
 +	struct fs_file image_dir, f;
@@ -15449,7 +15454,7 @@ index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d3144
 +	return rpmh_level(name, level);
 +}
 +
-+static void
++static void __attribute__((noinline))
 +step_aop(void)
 +{
 +	uint32_t address = 0;
@@ -15522,7 +15527,7 @@ index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d3144
 +static bool adsp_started;
 +static bool adsp_last_stop_acked, adsp_last_aop_off;
 +
-+static bool
++static bool __attribute__((noinline))
 +step_header(void)
 +{
 +	uint8_t *mdt;
@@ -15593,7 +15598,7 @@ index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d3144
 +	return true;
 +}
 +
-+static bool
++static bool __attribute__((noinline))
 +step_image(void)
 +{
 +	volatile uint64_t *dsp;
@@ -15899,10 +15904,12 @@ index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d3144
 +	return true;
 +}
 +
-+static bool
++static bool __attribute__((noinline))
 +step_start(void)
 +{
-+	struct smp2p words, last, ours;
++	/* Only steps_from_five starts ADSP; the boot gates create one worker.
++	 * All three snapshots are filled before use; last is reset below. */
++	static struct smp2p words, last, ours;
 +	uint64_t answer = ~0ull, started, now, limit, ready_at = 0;
 +	uint32_t wait_seconds = 10, state = 0, again = 0, changes = 0, size = 0;
 +	int32_t result;
@@ -18022,7 +18029,8 @@ index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d3144
 +	bool closed=mi8_audio_ring_close();
 +	struct mi8_audio_ring_counts r;mi8_audio_ring_counts(&r);
 +	bool conserved=closed && !r.queued && r.accepted==r.consumed+r.discarded;
-+	char line[768];
++	/* The worker reports, or init reports a failed worker creation; never both. */
++	static char line[768];
 +	snprintf(line,sizeof(line),"mi8rp: audio=3: ring stream %s cleanup=%s accepted=%llu consumed=%llu discarded=%llu dropped=%llu outside=%llu consumed_nonzero=%llu peak=%llu/%llu underflow_frames=%llu queued=%llu conservation=%s; output forced zero; amp untouched (reset low)\n",
 +	    completed && conserved?"completed":"FAILED",cleanup,(unsigned long long)r.accepted,(unsigned long long)r.consumed,
 +	    (unsigned long long)r.discarded,(unsigned long long)r.dropped,(unsigned long long)r.outside,
@@ -18037,7 +18045,7 @@ index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d3144
 +	for (const char *p=line;*p;p+=(strlen(p)>300?300:strlen(p))) say("%.300s",p);
 +}
 +
-+static bool
++static bool __attribute__((noinline))
 +adsp_audio_handshake(uint32_t last)
 +{
 +	uint64_t until = now_us() + 4000000ull;
@@ -18107,6 +18115,8 @@ index 0000000000000000000000000000000000000000..cdbaa0af8039a7de8407616a5b1d3144
 +	mi8_tas2557_held,mi8_tas2557_tick,mi8_tas2557_stop,mi8_tas2557_audible,mi8_tas2557_tone_count
 +};
 +
++/* Stage helpers are noinline so temporary setup frames are released before
++ * entering the long-lived stream. No shared scratch or new serialization. */
 +/* The partitions are there some time after the system starts; steps 5 and on run on a thread that waits for them. */
 +static void
 +steps_from_five(void *parameter, __unused wait_result_t wr)

@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "b646c3c9e50f373300a9d75afe7b09d767c31e7d8412b1786a9a8b6dc8b1bd38"
+      "sha256": "a90a85ac880b80d2c6d8282d576af31276e4003ad04092b094553b02a7d00ab2"
     },
     {
       "component": "xnu-mi8",
@@ -712,7 +712,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 Linux/Android apr/q6core/q6afe 协议与 SDM845 设备树寄存器字段，未复制驱动实现",
-      "sha256": "12f2555cb319389dab3a3486c06855f127ca5aa52ca3369e29bbd514a533e561"
+      "sha256": "30de8caf6fa606f2721b8d0c8d39272bd5184159b9ef9cc151ca20feab32f4b8"
     },
     {
       "component": "xnu-mi8",
@@ -744,7 +744,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "2f2cc03f186966739ab40fff16148810804698a44e749328821dc5260edaa479"
+      "sha256": "3edb2e3e4f8897ff68f780fec23383a091322ecac09b6a17067f84d0d5b0cc78"
     },
     {
       "component": "xnu-mi8",
