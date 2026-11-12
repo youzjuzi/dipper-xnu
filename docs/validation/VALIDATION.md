@@ -263,14 +263,20 @@ panic 应急复位已在单独完整重启的受控设备轮次验证：`audio=5
 
 panic 依据：固定 XNU 的 `osfmk/kdp/kdp_callout.h` 约定回调期间关中断、其他 CPU 静止；`osfmk/kern/debug.c` 在 `SavePanicInfo` 前调用 `KDP_EVENT_PANICLOG`。回调不分配、不取锁、不睡眠、不做 I2C，只用预映射复位寄存器和原子锁存，并经 `debug_putc` 向已存在的 panic RAM 追加短标记。不保证未到达回调的早期/深层嵌套 panic、CPU rendezvous 失败或 MMIO 硬件挂死；panic 缓冲区不足时标记可能截断。本次受控 panic 的实际停声已由持有人确认；其它故障路径未验。
 
-上述会话与 panic 设备轮次均关闭 Wi-Fi/蓝牙；仅单次有界会话，不支持 ADSP 停后再启，无线并存、长时间与热安全未验收。
+上述早期会话与 panic 设备轮次均关闭 Wi-Fi/蓝牙；其证据仅覆盖单次有界会话，无线共存结果见下文。不支持 ADSP 停后再启，长时间与热安全未验收。
 
 会话和受控 panic 的原始记录分别见 `work/runs/20261112-audio-session-01/DEVICE-22.md` 与 `DEVICE-22-panic.md`；本次整理未操作设备。会话记录中的主观听感尚待持有人补充，不据此宣称每次播放均无爆音。
 
-`audio=5` 与无线共存主机完成，设备待验证。会话显式启用共享事务串行化，预留 CB43/SMR8；SMMU 锁仅覆盖映射建立和 detach，DMA 播放期间释放，Wi-Fi 仅允许使用 CB44 且避开 SMR8。ADSP 加载等待 WLFW FW_READY 和有效 CB44 映射，失败或最多 90 秒超时则保持音频关闭。
+`audio=5` 与 Wi-Fi/蓝牙/GPU 共存已完成单次 300 秒设备验证：无线就绪等待 16032 ms，DONE 最大间隔 21.7 ms，最大迟到 1.76 ms（周期 5282），音频持 SMMU 锁最长 1.35 ms，Wi-Fi map 等锁最长 0；6 次 wake/mute、只读系数校验 5/5、out_peak 1007，ring 守恒，cleanup complete，无 panic。无音频对照组的 Wi-Fi 网页与蓝牙耳机连接正常；音频组持有人确认无线正常、无卡顿。
 
-新增 `audio_seconds=1..300`（缺省 120），共存候选使用 300 秒、15000 周期和 `loader_return_after=420`。开始流前检查完整时长及收尾余量，不足则拒绝；累计剩余不足 1 秒时不再 wake，摘要标记 `budget exhausted`。单窗 20 秒、累计 60 秒、20 次 wake、固定 −30 dB 和 ±1036 上限保持不变。最终摘要新增 DONE 最大间隔、最迟成功提交周期/迟到量、音频持锁和 Wi-Fi map 等锁最长时间；这些设备数值仍待采集。
+该轮仍为固定 −30 dB、单窗 20 秒、累计 60 秒、20 次 wake 上限；live_total 59990 ms 后 budget exhausted，后续不再出声符合当前额度。持有人在最大音量下反馈“声音不大，有一点破音感”；未定位源削顶、LIVE 欠载或量化误差，不能称音质通过。仅单次 300 秒，不支持 ADSP 停后再启，长期与热安全未验。
+
+会话显式启用共享事务串行化，预留 CB43/SMR8；SMMU 锁仅覆盖映射建立和 detach，DMA 播放期间释放，Wi-Fi 仅允许使用 CB44 且避开 SMR8。ADSP 加载等待 WLFW FW_READY 和有效 CB44 映射，失败或最多 90 秒超时则保持音频关闭。
+
+新增 `audio_seconds=1..300`（缺省 120），共存候选使用 300 秒、15000 周期和 `loader_return_after=420`。开始流前检查完整时长及收尾余量，不足则拒绝；累计剩余不足 1 秒时不再 wake，摘要标记 `budget exhausted`。单窗 20 秒、累计 60 秒、20 次 wake、固定 −30 dB 和 ±1036 上限保持不变。最终摘要新增 DONE 最大间隔、最迟成功提交周期/迟到量、音频持锁和 Wi-Fi map 等锁最长时间；本轮已采集上述共存统计，数值见设备结果。
 
 干净补丁重放覆盖旧 APR/AFE/SMMU/PCM/TAS、计数/ring/clip/session、panic 和参数门控。会话另验证 15000 周期、剩余 999999/1000000 微秒边界；真实线程竞争测试交错 100 次音频 claim/end 与 2000 次原生 Wi-Fi map，普通、ASan/UBSan 与 TSan 检查。Wi-Fi 当前没有原生 unmap，测试只模拟其锁和所有权契约，不声称验证了设备 unmap。ARM64 对象调用图与链接内核帧核对通过，音频路径低于 8 KiB；外部内核服务与调度/中断用栈仍在工具声明的边界外。证据及具体计数见 `work/runs/20261112-audio-coexist-01/RESULTS.md`。
 
-INT_DET_2 bit1 在 TI SLASEC2B §9.6.2.34/Table 56 标为 Reserved；固定厂商驱动使用 0x0c 检查 CLK1/2。不推测保留位功能，不改健康掩码。共存的新内核、无线开关、300 秒调度和听感均待设备验收，主机模拟耗时不能作为设备时延。
+INT_DET_2 bit1 在 TI SLASEC2B §9.6.2.34/Table 56 标为 Reserved；固定厂商驱动使用 0x0c 检查 CLK1/2。不推测保留位功能，不改健康掩码。共存的新内核、无线开关与单次 300 秒会话已完成设备验证；音质问题尚待定位，主机模拟耗时不能作为设备时延。
+
+共存设备证据见 `work/runs/20261112-audio-coexist-01/DEVICE.md`。每轮完整重启，内存启动且无存储写入参数，loader 420 秒；该轮 ADSP shutdown 在 347.2 秒。ring accepted=consumed=4193472，dropped=61376（预热暂停期间）；HAL 每次写入 128..1024 帧，源峰值 32768。现有统计未区分 LIVE 欠载，不能据此确定破音原因。worker 尾巴在流 195 秒后缺少进度、play 和 asm close 行，最终摘要保留；不能把这些缺失行当作已核对的逐项设备证据。本次只整理既有记录，未操作设备。
