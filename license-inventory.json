@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "d6a27628a56cd84dbc7c4086e463067c94cf14277402056e9a8716aa3c55e814"
+      "sha256": "51bbf9cdab3b97a8b282629359292c63a5d8909941fdf2e657fecb8418e8d65d"
     },
     {
       "component": "xnu-mi8",
@@ -712,7 +712,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 Linux/Android apr/q6core/q6afe 协议与 SDM845 设备树寄存器字段，未复制驱动实现",
-      "sha256": "cf8be5067db6f041d600443629dbe8bf384fceb017bdecceb89eb3120b9cbac1"
+      "sha256": "e2d8ba2f7c1e544e3128cdf2a5ef840f0c52474a08635360b69babb1ea28d55e"
     },
     {
       "component": "xnu-mi8",
@@ -744,7 +744,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "1ddb15a33349711cb9d677df1a33944f50a98a131b42e38b7392b5107280f419"
+      "sha256": "35b642ed248557691cb480a22d954c71a5be67fd97e35e57559dee28ff2c568e"
     },
     {
       "component": "xnu-mi8",
@@ -752,7 +752,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "7e2f30916f9d0207e9130a1765fb25bbb32529381f5ee2621a06d4e54b447ffd"
+      "sha256": "3bc0205afe8836b91474e823cddba1f3a19841010971c3e04eb284a5b7fb73a8"
     },
     {
       "component": "xnu-mi8",
@@ -760,7 +760,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 TI tas2557 驱动的固件格式，未复制代码",
-      "sha256": "7f997215658d7de3bc22018183ba2873196894c5a8bcbebeb3075fdedb1d06b2"
+      "sha256": "7afc69458b694f5f5dca34444bca563c3307b9050a634ba9f45ea4898a0f74b5"
     },
     {
       "component": "xnu-mi8",
@@ -768,7 +768,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 TI tas2557 驱动的固件格式，未复制代码",
-      "sha256": "64d7e96fdf4f6c5fbf69606556c5bc342b12bd01acaa15cf1e99c56533566ae1"
+      "sha256": "d25a527b5fd3eb5a4f6e401384029f6bd82865fa110928590b32ee4fd2ac829f"
     }
   ]
 }

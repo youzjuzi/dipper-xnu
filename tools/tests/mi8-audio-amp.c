@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "mi8_tas2557.h"
 void mi8_tas2557_prepare(uint64_t);
+void mi8_tas2557_prepare_tone(uint64_t);
 #include "play-fixture.c"
 extern void amp_model_load(const char *,const char *);
 extern bool amp_model_begin(uint64_t *,unsigned,bool);
@@ -9,6 +10,7 @@ extern void amp_model_check(unsigned);
 extern unsigned long amp_model_checks(void);
 extern unsigned mi8_tas_guard_tests(void);
 static unsigned scenario;
+void mi8_tas2557_prepare_tone(uint64_t end){(void)end;CHECK(false);}
 /* The actual worker body is also compiled; its legacy tests remain callable. */
 void mi8_tas2557_prepare(uint64_t until){CHECK(until>worker_peer->now);worker_peer->amp_high=amp_model_begin(&worker_peer->now,scenario,true);}
 static void observe(struct peer *p,const uint8_t *q){

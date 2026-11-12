@@ -109,6 +109,7 @@ static void lck_mtx_unlock(pthread_mutex_t *lock);
 static int audio_play_thread;static bool audio_play_brief;static uint64_t audio_play_until;static char audio_play_note[400];
 static uint64_t now_us(void){return 0;}
 static const int audio_amp_ops=0;
+static void mi8_tas2557_prepare_tone(uint64_t end){(void)end;CHECK(false);}
 static void mi8_tas2557_prepare(uint64_t end){(void)end;CHECK(false);}
 static void mi8_tas2557_stop(void){CHECK(false);}
 static void mi8_tas2557_report(const char *s){(void)s;CHECK(false);}

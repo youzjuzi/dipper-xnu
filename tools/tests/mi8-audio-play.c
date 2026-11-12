@@ -44,14 +44,14 @@ static int play_reply(struct peer *p,const uint8_t *q,uint8_t *b,unsigned *n) {
         m->writes++;
         if(!canary){
             CHECK(address>=0x110000000ull&&address+3840<=0x110008000ull);
-            CHECK(m->step==15||!m->last_write||p->now-m->last_write>=20000);m->last_write=p->now;m->normal++;
+            CHECK((m->step==15||m->step==16)||!m->last_write||p->now-m->last_write>=20000);m->last_write=p->now;m->normal++;
             unsigned at=(unsigned)(address-0x110000000ull);
             for(unsigned i=0;i<960;i++){
                 int16_t left=(int16_t)(m->buffer[at+4*i]|m->buffer[at+4*i+1]<<8);
                 int16_t right=(int16_t)(m->buffer[at+4*i+2]|m->buffer[at+4*i+3]<<8);
-                CHECK(left==right&&left>=-1000&&left<=1000);
+                CHECK(left==right&&left>=-(m->step==16?1036:1000)&&left<=(m->step==16?1036:1000));
                 if(m->step==15)CHECK(!left && !right);
-                CHECK(left==(int16_t)(m->buffer[at+4*(i%48)]|m->buffer[at+4*(i%48)+1]<<8));
+                if(m->step!=16)CHECK(left==(int16_t)(m->buffer[at+4*(i%48)]|m->buffer[at+4*(i%48)+1]<<8));
             }
             if(m->ordinary_fault)m->fault.fsr=2;
             if(m->drop_writes)return -1;
@@ -282,7 +282,7 @@ static bool step_start(void){
     adsp_started=true;return true;
 }
 static bool adsp_audio_handshake(uint32_t last){
-    CHECK(last==13||last==15);audio_play_locked=true;
+    CHECK(last==13||last==15||last==16);audio_play_locked=true;
     bool okay=start_play(worker_peer,worker_memory);
     audio_play_until=mi8_audio_play_teardown_end();
     if(!mi8_audio_play_needs_finish())audio_play_locked=false;
@@ -295,10 +295,15 @@ static void thread_terminate(void*t){CHECK(t==worker_peer);}
 static bool mi8_tas2557_held(void){CHECK(false);return false;}
 static bool mi8_tas2557_tick(uint64_t a,uint64_t b){(void)a;(void)b;CHECK(false);return false;}
 static void mi8_tas2557_stop(void){CHECK(false);}
+static void mi8_tas2557_prepare_tone(uint64_t end){(void)end;CHECK(false);}
 static void mi8_tas2557_prepare(uint64_t end){(void)end;CHECK(false);}
 static void mi8_tas2557_report(const char *s){(void)s;CHECK(false);}
 #endif
-static const struct mi8_pcm_amp audio_amp_ops={mi8_tas2557_held,mi8_tas2557_tick,mi8_tas2557_stop};
+#ifdef MI8_TONE_TEST
+static const struct mi8_pcm_amp audio_amp_ops={mi8_tas2557_held,mi8_tas2557_tick,mi8_tas2557_stop,mi8_tas2557_audible,mi8_tas2557_tone_count};
+#else
+static const struct mi8_pcm_amp audio_amp_ops={mi8_tas2557_held,mi8_tas2557_tick,mi8_tas2557_stop,NULL,NULL};
+#endif
 /* @steps_from_five */
 static void log_order(const char*text,const char*const*lines,unsigned n){
     for(unsigned i=0;i<n;i++){const char*at=strstr(text,lines[i]);CHECK(at);text=at+strlen(lines[i]);}
@@ -352,7 +357,9 @@ static void lifecycle(void){
     prepare(&p,&m);m.hung=true;m.fatal_close=true;CHECK(!run_play(&p,&m));
     CHECK(m.fatal&&!m.after_fatal&&!m.adm_at&&p.afe_count==3&&p.pin_writes==8);
     CHECK(strstr(m.log,"ADSP fatal; APR teardown skipped")&&strstr(mi8_audio_play_cleanup(),"AFE: DSP fatal"));
-    for(unsigned step=14;step<=16;step++){
+    /* The tone entry requires an owned amplifier; it must not emit nonzero PCM without one. */
+    prepare(&p,&m);m.step=16;CHECK(!run_play(&p,&m));CHECK(m.writes==50&&!m.clear);
+    for(unsigned step=14;step<=15;step++){
         prepare(&p,&m);m.step=step;CHECK(run_play(&p,&m));CHECK(m.writes==150&&!m.clear&&!mi8_audio_play_proven());
         CHECK(!strstr(m.log,"canary ")&&!strstr(m.log,"translation:"));
     }

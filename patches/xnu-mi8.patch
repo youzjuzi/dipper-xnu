@@ -5569,10 +5569,10 @@ index 0000000000000000000000000000000000000000..f4d222440ee02b58cd1e4f1914762cb5
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..7bd9694b0988a6a50a7a2f03c2e00f1644de3d2a
+index 0000000000000000000000000000000000000000..bc0cae7faa86b503b5968801d4090592ea6b9281
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,790 @@
+@@ -0,0 +1,791 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
@@ -5821,7 +5821,7 @@ index 0000000000000000000000000000000000000000..7bd9694b0988a6a50a7a2f03c2e00f16
 +	struct mi8_glink *link;
 +	struct mi8_apr_reply reply;
 +	struct mi8_apr_pending *pending;
-+	bool afe_active, afe_event, play, canary, fatal_seen, muted;
++	bool afe_active, afe_event, play, canary, fatal_seen, muted, tone;
 +	const struct mi8_pcm_amp *amp;
 +	bool (*fatal)(void *);
 +	struct mi8_pcm_state *pcm;
@@ -6124,7 +6124,8 @@ index 0000000000000000000000000000000000000000..7bd9694b0988a6a50a7a2f03c2e00f16
 +	started = !error || uncertain;
 +	if (error) goto out;
 +	if (s->play) {
-+		if (s->muted) success=mi8_pcm_run_muted(s->pcm,&s->play_ops,s->play_deadline,s->amp);
++		if (s->tone) success=mi8_pcm_run_tone(s->pcm,&s->play_ops,s->play_deadline,s->amp);
++		else if (s->muted) success=mi8_pcm_run_muted(s->pcm,&s->play_ops,s->play_deadline,s->amp);
 +		else success=mi8_pcm_run(s->pcm,&s->play_ops,s->play_deadline,s->canary);
 +		goto out;
 +	}
@@ -6199,7 +6200,7 @@ index 0000000000000000000000000000000000000000..7bd9694b0988a6a50a7a2f03c2e00f16
 +		memset(&play_pcm,0,sizeof(play_pcm));last_play_proven=false;last_play_clean=false;
 +		last_afe_clean=last_smmu_clean=true;*last_cleanup=0;
 +		session->canary=step==13;session->fatal=fatal;
-+		session->muted=step==15;session->amp=session->muted?play_amp:NULL;
++		session->tone=step==16;session->muted=step==15 || session->tone;session->amp=session->muted?play_amp:NULL;
 +		session->play=true;session->pcm=&play_pcm;session->memory_ops=memory_ops;
 +		session->play_deadline=play_until>3000000?play_until-3000000:0;
 +		last_play_teardown=play_until;
@@ -6360,7 +6361,7 @@ index 0000000000000000000000000000000000000000..7bd9694b0988a6a50a7a2f03c2e00f16
 +#else
 +	bool okay=pins && memory_ops && audio_run(cfg,alive,ctx,pins,true,memory_ops,until,step,fatal);
 +#endif
-+	if (step==15 && play_amp) play_amp->stop();
++	if ((step==15 || step==16) && play_amp) play_amp->stop();
 +	return okay;
 +}
 diff --git a/bsd/dev/mi8_audio.h b/bsd/dev/mi8_audio.h
@@ -6434,10 +6435,10 @@ index 0000000000000000000000000000000000000000..90cfa7c34112e849086aa641b73ab88a
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..855fd1ea060bb5298f4d3c9f11df7ea5dabc29b0
+index 0000000000000000000000000000000000000000..1d0164fb493af862a618e9b42b05c29093c2baed
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,378 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6586,16 +6587,30 @@ index 0000000000000000000000000000000000000000..855fd1ea060bb5298f4d3c9f11df7ea5
 +	while (pending_count(s)) if (poll_once(s,until)) return false;
 +	return true;
 +}
++static bool tone_guard(struct mi8_pcm_state *s,const uint8_t *data,unsigned *peak,bool *nonzero) {
++	*peak=0;*nonzero=false;
++	for (unsigned i=0;i<MI8_PCM_PERIOD;i+=4) {
++		int v=(int16_t)((unsigned)data[i]|(unsigned)data[i+1]<<8);
++		unsigned magnitude=(unsigned)(v<0?-v:v);
++		if (magnitude>1036 || data[i]!=data[i+2] || data[i+1]!=data[i+3]) return false;
++		if (magnitude>*peak) *peak=magnitude;
++		*nonzero|=v!=0;
++	}
++	return !*nonzero || (s->period>=50 && s->period<100 && s->tone_blocks<60 && s->amp && s->amp->audible && s->amp->audible());
++}
 +static bool
 +submit(struct mi8_pcm_state *s, unsigned slot, uint64_t address, bool canary, uint64_t until)
 +{
 +	uint8_t packet[52],p[32]={0};size_t bytes;
 +	struct mi8_pcm_job *j=&s->jobs[slot];
++	unsigned peak=0;bool nonzero=false;
 +	if (j->active) return false;
-+	if (s->zero) {
++	if (s->zero || s->tone) {
 +		if (canary || address<MI8_PCM_ADDRESS || address-MI8_PCM_ADDRESS>32768-MI8_PCM_PERIOD) return false;
 +		const uint8_t *data=(const uint8_t *)s->memory.buffer+(size_t)(address-MI8_PCM_ADDRESS);
-+		for (unsigned i=0;i<MI8_PCM_PERIOD;i++) if (data[i]) {
++		if (s->tone) {
++			if (!tone_guard(s,data,&peak,&nonzero)) { pcm_log(s,"tone bound/state rejected before submit");if (s->amp) s->amp->stop();return false; }
++		} else for (unsigned i=0;i<MI8_PCM_PERIOD;i++) if (data[i]) {
 +			pcm_log(s,"nonzero PCM rejected before submit");return false;
 +		}
 +	}
@@ -6604,8 +6619,56 @@ index 0000000000000000000000000000000000000000..855fd1ea060bb5298f4d3c9f11df7ea5
 +	put32(p+12,MI8_PCM_PERIOD);put32(p+16,j->token);
 +	mi8_apr_encode_service(7,0x101,0x101,j->token,WRITE,p,sizeof(p),packet,sizeof(packet),&bytes);
 +	if (s->io->send(s->io->ctx,packet,bytes,until)) return false;
++	if (s->tone) {
++		if (nonzero) s->tone_blocks++;
++		if (peak>s->tone_peak) s->tone_peak=peak;
++		if (s->amp && s->amp->tone_count) s->amp->tone_count(s->tone_peak,s->tone_blocks);
++	}
 +	if (!canary) s->result.submitted++;
 +	return true;
++}
++/* round(1036*sin(2*pi*n/48)); fade[n]=round(32768*(1-cos(pi*n/479))/2).
++ * Offline integer tables: 480 frames = 10 ms, both endpoints included.
++ * A 48,000-frame tone uses mirrored fades and nearest integer multiplication. */
++static int16_t tone_sample(unsigned frame) {
++	static const int16_t wave[48]={0,135,268,396,518,631,733,822,897,957,1001,1027,1036,1027,1001,957,897,822,733,631,518,396,268,135,0,-135,-268,-396,-518,-631,-733,-822,-897,-957,-1001,-1027,-1036,-1027,-1001,-957,-897,-822,-733,-631,-518,-396,-268,-135};
++	static const uint16_t fade[480]={
++	    0,0,1,3,6,9,13,17,23,29,35,43,51,60,69,79,
++	    90,102,114,127,141,155,170,186,203,220,238,256,275,295,316,337,
++	    360,382,406,430,455,480,506,533,561,589,618,647,677,708,740,772,
++	    805,839,873,908,944,980,1017,1054,1093,1132,1171,1211,1252,1294,1336,1379,
++	    1422,1466,1511,1557,1603,1649,1697,1745,1793,1842,1892,1943,1994,2045,2098,2150,
++	    2204,2258,2313,2368,2424,2481,2538,2596,2654,2713,2772,2833,2893,2954,3016,3079,
++	    3142,3205,3269,3334,3399,3465,3532,3598,3666,3734,3802,3872,3941,4011,4082,4153,
++	    4225,4297,4370,4444,4517,4592,4667,4742,4818,4894,4971,5048,5126,5204,5283,5363,
++	    5442,5522,5603,5684,5766,5848,5931,6013,6097,6181,6265,6350,6435,6521,6607,6693,
++	    6780,6867,6955,7043,7131,7220,7309,7399,7489,7580,7670,7762,7853,7945,8037,8130,
++	    8223,8316,8410,8504,8599,8693,8788,8884,8979,9075,9172,9268,9365,9463,9560,9658,
++	    9756,9854,9953,10052,10151,10251,10351,10451,10551,10652,10752,10853,10955,11056,11158,11260,
++	    11362,11464,11567,11670,11773,11876,11979,12083,12187,12291,12395,12499,12604,12708,12813,12918,
++	    13023,13128,13234,13339,13445,13551,13657,13763,13869,13975,14081,14188,14294,14401,14508,14614,
++	    14721,14828,14935,15042,15149,15257,15364,15471,15578,15686,15793,15901,16008,16115,16223,16330,
++	    16438,16545,16653,16760,16867,16975,17082,17190,17297,17404,17511,17619,17726,17833,17940,18047,
++	    18154,18260,18367,18474,18580,18687,18793,18899,19005,19111,19217,19323,19429,19534,19640,19745,
++	    19850,19955,20060,20164,20269,20373,20477,20581,20685,20789,20892,20995,21098,21201,21304,21406,
++	    21508,21610,21712,21813,21915,22016,22116,22217,22317,22417,22517,22617,22716,22815,22914,23012,
++	    23110,23208,23305,23403,23500,23596,23693,23789,23884,23980,24075,24169,24264,24358,24452,24545,
++	    24638,24731,24823,24915,25006,25098,25188,25279,25369,25459,25548,25637,25725,25813,25901,25988,
++	    26075,26161,26247,26333,26418,26503,26587,26671,26755,26837,26920,27002,27084,27165,27246,27326,
++	    27405,27485,27564,27642,27720,27797,27874,27950,28026,28101,28176,28251,28324,28398,28471,28543,
++	    28615,28686,28757,28827,28896,28966,29034,29102,29170,29236,29303,29369,29434,29499,29563,29626,
++	    29689,29752,29814,29875,29935,29996,30055,30114,30172,30230,30287,30344,30400,30455,30510,30564,
++	    30618,30670,30723,30774,30825,30876,30926,30975,31023,31071,31119,31165,31211,31257,31302,31346,
++	    31389,31432,31474,31516,31557,31597,31636,31675,31714,31751,31788,31824,31860,31895,31929,31963,
++	    31996,32028,32060,32091,32121,32150,32179,32207,32235,32262,32288,32313,32338,32362,32386,32408,
++	    32431,32452,32473,32493,32512,32530,32548,32565,32582,32598,32613,32627,32641,32654,32666,32678,
++	    32689,32699,32708,32717,32725,32733,32739,32745,32751,32755,32759,32762,32765,32767,32768,32768,
++	};
++	int v=wave[frame%48];unsigned gain=32768;
++	if (frame<480) gain=fade[frame];
++	else if (frame>=48000-480) gain=fade[47999-frame];
++	int magnitude=((v<0?-v:v)*(int)gain+16384)/32768;
++	return (int16_t)(v<0?-magnitude:magnitude);
 +}
 +static void
 +fill_period(struct mi8_pcm_state *s, unsigned slot)
@@ -6613,7 +6676,12 @@ index 0000000000000000000000000000000000000000..855fd1ea060bb5298f4d3c9f11df7ea5
 +	/* 48 integer samples form one 1kHz cycle at 48kHz. No floating point. */
 +	static const int16_t sine[48]={0,131,259,383,500,609,707,793,866,924,966,991,1000,991,966,924,866,793,707,609,500,383,259,131,0,-131,-259,-383,-500,-609,-707,-793,-866,-924,-966,-991,-1000,-991,-966,-924,-866,-793,-707,-609,-500,-383,-259,-131};
 +	uint8_t *p=(uint8_t*)s->memory.buffer+slot*MI8_PCM_PERIOD;
-+	if (s->zero) memset(p,0,MI8_PCM_PERIOD);
++	if (s->tone) {
++		memset(p,0,MI8_PCM_PERIOD);
++		if (s->period>=50 && s->period<100) for (unsigned i=0;i<960;i++) {
++			uint16_t v=(uint16_t)tone_sample((s->period-50)*960+i);put16(p+4*i,v);put16(p+4*i+2,v);
++		}
++	} else if (s->zero) memset(p,0,MI8_PCM_PERIOD);
 +	else for (unsigned i=0;i<960;i++) { uint16_t v=(uint16_t)sine[s->phase];s->phase=(s->phase+1)%48;put16(p+4*i,v);put16(p+4*i+2,v); }
 +	s->io->cache(s->io->ctx,slot*MI8_PCM_PERIOD,MI8_PCM_PERIOD);
 +}
@@ -6656,12 +6724,13 @@ index 0000000000000000000000000000000000000000..855fd1ea060bb5298f4d3c9f11df7ea5
 +}
 +
 +static bool
-+pcm_run(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end, bool canary, bool zero, const struct mi8_pcm_amp *amp)
++pcm_run(struct mi8_pcm_state *s, const struct mi8_pcm_ops *io, uint64_t end, bool canary, bool zero, bool tone, const struct mi8_pcm_amp *amp)
 +{
-+	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;s->zero=zero;s->amp=amp;
++	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;s->zero=zero;s->tone=tone;s->amp=amp;
 +	bool success=false,closed=false,unmapped=false,adm_closed=true;
 +	if (!io->begin(io->ctx,&s->memory)) { pcm_log(s,"smmu: begin failed; no PCM submitted");if (amp) amp->stop();return false; }
 +	s->mapped=true;
++	if (tone) pcm_log(s,"16: tone 1 kHz -30 dBFS peak=1036, 1 s blocks 50..99, fades 10 ms, L=R");
 +	pcm_log(s,"smmu: claimed bank %u slot %u, low/SID aliases mapped, software walk ok",s->memory.bank,s->memory.slot);
 +	if (!s->memory.buffer || s->memory.address!=MI8_PCM_ADDRESS || s->memory.slot!=8 || s->memory.bank!=43) goto cleanup;
 +	/* Endpoint/session setup follows the pinned q6asm/q6routing paths. */
@@ -6673,12 +6742,14 @@ index 0000000000000000000000000000000000000000..855fd1ea060bb5298f4d3c9f11df7ea5
 +		uint64_t wait=start+(uint64_t)n*20000;
 +		while (io->now(io->ctx)<wait || s->jobs[slot].active) if (poll_once(s,s->deadline)) goto cleanup;
 +		if (s->result.errors || s->result.unsupported || io->now(io->ctx)>=s->deadline) goto cleanup;
-+		if (zero && (io->poll(io->ctx) || (amp && !amp->tick(io->now(io->ctx)-start,s->deadline)))) goto cleanup;
++		if ((zero || tone) && (io->poll(io->ctx) || (amp && !amp->tick(io->now(io->ctx)-start,s->deadline)))) goto cleanup;
 +		struct mi8_smmu_fault f;
 +		if (!io->fault(io->ctx,&f)) { pcm_log(s,"play: fault registers unreadable"); goto cleanup; }
 +		if (f.gfsr || (f.fsr&~IDLE)) {
 +			pcm_log(s,"play: unexpected GFSR=%#x FSR=%#x FAR=%#llx",f.gfsr,f.fsr,(unsigned long long)f.far); goto cleanup;
 +		}
++		if (tone && io->now(io->ctx)>wait+20000) { pcm_log(s,"tone schedule late; stopping");goto cleanup; }
++		s->period=n;
 +		fill_period(s,slot);
 +		if (!submit(s,slot,MI8_PCM_ADDRESS+(uint64_t)slot*MI8_PCM_PERIOD,false,s->deadline)) goto cleanup;
 +	}
@@ -6719,10 +6790,14 @@ index 0000000000000000000000000000000000000000..855fd1ea060bb5298f4d3c9f11df7ea5
 +}
 +
 +bool mi8_pcm_run(struct mi8_pcm_state *s,const struct mi8_pcm_ops *io,uint64_t end,bool canary) {
-+	return pcm_run(s,io,end,canary,false,NULL);
++	return pcm_run(s,io,end,canary,false,false,NULL);
 +}
 +bool mi8_pcm_run_muted(struct mi8_pcm_state *s,const struct mi8_pcm_ops *io,uint64_t end,const struct mi8_pcm_amp *amp) {
-+	return pcm_run(s,io,end,false,true,amp);
++	return pcm_run(s,io,end,false,true,false,amp);
++}
++
++bool mi8_pcm_run_tone(struct mi8_pcm_state *s,const struct mi8_pcm_ops *io,uint64_t end,const struct mi8_pcm_amp *amp) {
++	return pcm_run(s,io,end,false,false,true,amp);
 +}
 +
 +bool
@@ -6744,10 +6819,10 @@ index 0000000000000000000000000000000000000000..855fd1ea060bb5298f4d3c9f11df7ea5
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a2f57eada18da6ea2937fef30bb02caebaad31b5
+index 0000000000000000000000000000000000000000..d36e5aa6a1505a0c4dffdab36e40e3b9d0e3f837
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,73 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
@@ -6791,6 +6866,8 @@ index 0000000000000000000000000000000000000000..a2f57eada18da6ea2937fef30bb02cae
 +	bool (*held)(void);
 +	bool (*tick)(uint64_t elapsed,uint64_t deadline);
 +	void (*stop)(void);
++	bool (*audible)(void);
++	void (*tone_count)(unsigned peak,unsigned blocks);
 +};
 +struct mi8_pcm_state {
 +	const struct mi8_pcm_ops *io;
@@ -6798,7 +6875,8 @@ index 0000000000000000000000000000000000000000..a2f57eada18da6ea2937fef30bb02cae
 +	struct mi8_pcm_job jobs[10];
 +	struct mi8_pcm_result result;
 +	uint64_t deadline, run_start;
-+	bool zero;
++	bool zero, tone;
++	unsigned period, tone_blocks, tone_peak;
 +	const struct mi8_pcm_amp *amp;
 +	uint32_t token, handle;
 +	uint16_t copp;
@@ -6813,6 +6891,7 @@ index 0000000000000000000000000000000000000000..a2f57eada18da6ea2937fef30bb02cae
 +int mi8_pcm_canary_verdict(uint64_t, const struct mi8_smmu_fault *, const struct mi8_smmu_fault *);
 +bool mi8_pcm_run(struct mi8_pcm_state *, const struct mi8_pcm_ops *, uint64_t, bool canary);
 +bool mi8_pcm_run_muted(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,const struct mi8_pcm_amp *);
++bool mi8_pcm_run_tone(struct mi8_pcm_state *,const struct mi8_pcm_ops *,uint64_t,const struct mi8_pcm_amp *);
 +/* Called after AFE stop/clock off/pin restore; pass true only after PAS reset.
 + * Without confirmed close+unmap or PAS success, leaves the mapping untouched. */
 +bool mi8_pcm_finish(struct mi8_pcm_state *, bool pas_shutdown);
@@ -13459,7 +13538,7 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..78be587b17af4424661007f44ef011c2ba04c2cd
+index 0000000000000000000000000000000000000000..b36c8460948594ca9f06961f34a4dacfe704b7c5
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
 @@ -0,0 +1,4364 @@
@@ -17470,7 +17549,7 @@ index 0000000000000000000000000000000000000000..78be587b17af4424661007f44ef011c2
 +		audio_play_locked=true;
 +		/* Firmware loading has its own budget; playback starts with ADSP up. */
 +		/* Extra headroom for bounded amp transactions; the PCM window stays 3 s. */
-+		audio_play_until = now_us() + (last==15?20000000:15000000);
++		audio_play_until = now_us() + ((last==15 || last==16)?20000000:15000000);
 +		bool okay = mi8_audio_run_play(&cfg, audio_alive, &adsp_remote, NULL, NULL, audio_play_until, last, audio_fatal);
 +		audio_play_until=mi8_audio_play_teardown_end();
 +		if (!mi8_audio_play_needs_finish()) {
@@ -17511,7 +17590,7 @@ index 0000000000000000000000000000000000000000..78be587b17af4424661007f44ef011c2
 +}
 +
 +static const struct mi8_pcm_amp audio_amp_ops = {
-+	mi8_tas2557_held,mi8_tas2557_tick,mi8_tas2557_stop
++	mi8_tas2557_held,mi8_tas2557_tick,mi8_tas2557_stop,mi8_tas2557_audible,mi8_tas2557_tone_count
 +};
 +
 +/* The partitions are there some time after the system starts; steps 5 and on run on a thread that waits for them. */
@@ -17532,10 +17611,10 @@ index 0000000000000000000000000000000000000000..78be587b17af4424661007f44ef011c2
 +		}
 +		delay_for_interval(100, NSEC_PER_MSEC);
 +	}
-+	if (last==15) {
++	if (last==15 || last==16) {
 +		uint64_t end=now_us()+20000000;
 +		if (end>audio_play_until-3000000) end=audio_play_until-3000000;
-+		mi8_tas2557_prepare(end);
++		if (last==16) mi8_tas2557_prepare_tone(end);else mi8_tas2557_prepare(end);
 +		mi8_audio_set_amp(&audio_amp_ops);
 +	}
 +	if (last >= 13) { audio_play_brief=true;*audio_play_note=0; }
@@ -17556,7 +17635,7 @@ index 0000000000000000000000000000000000000000..78be587b17af4424661007f44ef011c2
 +		if (last >= 9 && !adsp_glink_prepare()) {
 +			say("mi8rp: 9: preparation failed; ADSP not started\n");
 +			qmp_send("{class: image, res: load_state, name: adsp, val: off}");
-+			if (last==15) { mi8_tas2557_stop();mi8_tas2557_report("Pending (ADSP preparation)");mi8_audio_set_amp(NULL); }
++			if (last==15 || last==16) { mi8_tas2557_stop();mi8_tas2557_report("Pending (ADSP preparation)");mi8_audio_set_amp(NULL); }
 +			if (last >= 13) audio_play_thread=NULL;
 +			thread_terminate(current_thread());
 +			return;
@@ -17565,7 +17644,7 @@ index 0000000000000000000000000000000000000000..78be587b17af4424661007f44ef011c2
 +		up = step_start();
 +		if (last >= 13) { audio_play_brief=false;say("mi8rp: 13: ADSP start %s: %s",up?"ok":"FAILED",audio_play_note); }
 +		if (up && last >= 9) apr = adsp_audio_handshake(last);
-+		if (last==15) mi8_tas2557_stop();
++		if (last==15 || last==16) mi8_tas2557_stop();
 +		started_here = adsp_started;
 +		if (adsp_started) {
 +			if (last >= 13) { audio_play_brief=true;*audio_play_note=0; }
@@ -17583,7 +17662,7 @@ index 0000000000000000000000000000000000000000..78be587b17af4424661007f44ef011c2
 +			if (started_here && !adsp_last_stop_acked) say("mi8rp: 13: Pending ADSP stop-ack\n");
 +			if (started_here && !down) say("mi8rp: 13: Pending PAS shutdown\n");
 +			if (started_here && !adsp_last_aop_off) say("mi8rp: 13: Pending AOP off\n");
-+			if (last!=15) say("mi8rp: step 13: PROVEN=%u cleanup=%s%s%s\n",mi8_audio_play_proven(),
++			if (last!=15 && last!=16) say("mi8rp: step 13: PROVEN=%u cleanup=%s%s%s\n",mi8_audio_play_proven(),
 +			    mi8_audio_play_cleanup(),
 +			    started_here && !adsp_last_stop_acked?" (stop-ack missing)":"",
 +			    started_here && !adsp_last_aop_off?" (AOP off Pending)":"");
@@ -17598,7 +17677,7 @@ index 0000000000000000000000000000000000000000..78be587b17af4424661007f44ef011c2
 +		if (last == 9) say("mi8rp: step 9 APR %s; see channel/stop/PAS results above\n", apr ? "completed" : "FAILED");
 +		if (last < 10) say("mi8rp: step 8 done%s\n", up ? ": the audio DSP came up and was stopped" : ": THE AUDIO DSP DID NOT COME UP");
 +	}
-+	if (last==15) {
++	if (last==15 || last==16) {
 +		mi8_tas2557_stop();
 +		mi8_tas2557_report(image_ok && adsp_last_stop_acked && adsp_last_aop_off ? mi8_audio_play_cleanup() : "Pending (ADSP/image/stop/AOP)");
 +		mi8_audio_set_amp(NULL);
@@ -17829,14 +17908,14 @@ index 0000000000000000000000000000000000000000..78be587b17af4424661007f44ef011c2
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e882b1248b35ed8cb992d4afd3b62818a3bbd242
+index 0000000000000000000000000000000000000000..b78c80dd505363876ea77a4480beba5f3ce21f7a
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,646 @@
+@@ -0,0 +1,759 @@
 +/* SPDX-License-Identifier: MIT
 + * TAS2557 firmware probe and bounded hard-muted power check. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
-+ * No unmute, calibration, ADSP, DMA, or audio routing here.
++ * Unmute is restricted to the bounded tone check; no calibration or routing here.
 + */
 +#include "mi8_tas2557.h"
 +#ifdef MI8_TAS_HOST_TEST
@@ -17964,13 +18043,13 @@ index 0000000000000000000000000000000000000000..e882b1248b35ed8cb992d4afd3b62818
 +	uint32_t votes,rcg_cfg,rcg_cmd,regs[NSAVE],pins[2],depth;
 +	unsigned book,page,word; bool clocks,se,pins_set,reset,rcg_changed,active;
 +	bool bb; uint32_t bb_io[2];
-+	bool guarded, firmware, selecting; uint8_t default_fmt; unsigned lines;
++	bool guarded, firmware, selecting, tone, unmute_window; uint8_t default_fmt; unsigned lines;
 +};
 +static uint32_t rd(struct tas *t,uint32_t a) { return t->io->read(t->io->ctx,a); }
 +static void wr(struct tas *t,uint32_t a,uint32_t v) { t->io->write(t->io->ctx,a,v); }
 +static uint64_t now(struct tas *t) { return t->io->now(t->io->ctx); }
 +static bool fail(struct tas *t,const char *s) { if (!t->r->error) t->r->error=s; return false; }
-+#define LOG(t,...) do { if ((t)->io->log && (!(t)->guarded || (t)->lines++<18)) (t)->io->log((t)->io->ctx,__VA_ARGS__); } while(0)
++#define LOG(t,...) do { if ((t)->io->log && (!(t)->guarded || (t)->lines++<((t)->tone?28u:18u))) (t)->io->log((t)->io->ctx,__VA_ARGS__); } while(0)
 +static bool pause_us(struct tas *t,unsigned us) {
 +	uint64_t n=now(t); if (n>=t->end || us>t->end-n) return fail(t,"deadline");
 +	t->io->delay(t->io->ctx,us); return true;
@@ -18095,6 +18174,8 @@ index 0000000000000000000000000000000000000000..e882b1248b35ed8cb992d4afd3b62818
 +	if (t->selecting) return reg==0 || reg==127;
 +	if (t->firmware) return safe_write(t->book,t->page,reg) &&
 +	    !(t->book==0 && t->page==0 && reg==6 && v!=0x7c);
++	if (t->tone && t->unmute_window && !t->page && reg==7 && !v &&
++	    (t->book==0 || t->book==100)) return true;
 +	static const uint8_t control[][4]={
 +	    {0,0,1,1},{0,0,33,1},
 +	    {0,0,21,5},{0,0,45,0x21},{0,0,46,0x21},{0,0,37,0x5a},
@@ -18277,6 +18358,9 @@ index 0000000000000000000000000000000000000000..e882b1248b35ed8cb992d4afd3b62818
 +	struct tas t;struct mi8_tas_io io;struct mi8_tas_result result;
 +	bool initialized, held, attempted, powered, stopped, shutdown, healthy, fault, mute_bad;
 +	unsigned samples;uint64_t startup;
++	bool tone, unmute_attempted, unmuted, remuted;
++	unsigned tone_peak, tone_blocks, live_samples;
++	uint64_t run_start, unmute_at, mute_at, next_health;
 +} amp;
 +static bool
 +tas_run(const struct mi8_tas_io *io,const uint8_t *raw,size_t size,
@@ -18359,8 +18443,95 @@ index 0000000000000000000000000000000000000000..e882b1248b35ed8cb992d4afd3b62818
 +static bool power_write(unsigned b,unsigned p,unsigned r,uint8_t v) {
 +	return select_page(&amp.t,b,p) && byte_write(&amp.t,(uint8_t)r,v);
 +}
++/* Tone-only gate: even a partially completed unmute must be muted on exit. */
++bool mi8_tas2557_hold_tone(const struct mi8_tas_io *io,const uint8_t *raw,size_t size,uint64_t deadline) {
++	bool ok=mi8_tas2557_hold(io,raw,size,deadline);
++	amp.tone=true;amp.t.tone=true;
++	return ok;
++}
++bool mi8_tas2557_audible(void) { return amp.tone && amp.unmuted && !amp.stopped && !amp.fault; }
++void mi8_tas2557_tone_count(unsigned peak,unsigned blocks) { amp.tone_peak=peak;amp.tone_blocks=blocks; }
++static bool tone_mute(void) {
++	struct tas *t=&amp.t;uint8_t h=0,s=0;
++	if (!power_write(100,0,7,1) || !pause_us(t,10000) || !power_write(0,0,7,3)) return false;
++	if (!read_regs(t,0,0,7,&h,1) || !read_regs(t,100,0,7,&s,1) || h!=3 || s!=7) return false;
++	amp.remuted=true;amp.unmuted=false;amp.mute_at=now(t);
++	LOG(t,"mi8rp: 16: muted at +%u ms; read back R07=%02x/%02x\n",(unsigned)((amp.mute_at-amp.run_start)/1000),h,s);
++	return true;
++}
++static void tone_stop(void) {
++	struct tas *t=&amp.t;uint64_t deadline=now(t)+100000;
++	t->end=deadline-20000;t->unmute_window=false;
++	bool ok=true;
++	if (t->active && t->bb) ok=bb_stop(t);
++	if (t->active && t->se) {
++		wr(t,SE+0x604,4);ok=poll(t,SE+0x610,1u<<4,1u<<4,100);
++		if (!ok) { wr(t,SE+0x604,2);ok=poll(t,SE+0x610,1u<<5,1u<<5,100); }
++		wr(t,SE+0x618,0xffffffff);t->active=!ok;
++	}
++	t->book=t->page=256;
++	/* After unmute the first register writes must mute, before disabling
++	 * clock error detection. On any failure, restore starts with reset low. */
++	if (amp.unmute_attempted) ok=ok && tone_mute();
++	if (amp.attempted) {
++		ok=ok && power_write(0,0,0x2c,0);
++		if (!amp.unmute_attempted) ok=ok && power_write(100,0,7,1) && pause_us(t,10000) && power_write(0,0,7,3);
++		ok=ok && power_write(0,0,4,0x60) && pause_us(t,2000) && power_write(0,0,5,0) &&
++		    power_write(0,0,4,0) && power_write(0,1,0x3d,0) && power_write(0,1,0x3e,0) && power_write(0,1,0x4d,0);
++	}
++	amp.shutdown=ok;restore(t,deadline);amp.stopped=true;amp.held=false;
++	if (!amp.mute_at) amp.mute_at=now(t); /* Include failed mute time until hard reset. */
++	amp.unmuted=false;
++	if (!ok || !amp.result.reset_low || !amp.result.pins_restored || !amp.result.se_restored || !amp.result.clocks_restored) amp.fault=true;
++	LOG(t,"mi8rp: 16: shutdown=%s before AFE stop; reset=%s pins=%s\n",ok?"ok":"FAILED; hard reset fallback",
++	    amp.result.reset_low?"low":"UNKNOWN",amp.result.pins_restored?"restored":"Pending");
++}
++static bool tone_health(bool live) {
++	struct tas *t=&amp.t;uint8_t a=0,b=0,p=0,h=0,s=0;
++	if (!read_regs(t,0,0,0x68,&a,1) || !read_regs(t,0,0,0x6c,&b,1) || !read_regs(t,0,0,0x64,&p,1) ||
++	    !read_regs(t,0,0,7,&h,1) || !read_regs(t,100,0,7,&s,1)) return false;
++	bool ok=!(a&0xfc) && !(b&0x0c) && (p&0xc0)==0xc0 && h==(live?0:3) && s==(live?0:7);
++	LOG(t,"mi8rp: 16: health +%u ms: INT1=%02x INT2=%02x PowerUpFlag=%02x mute=%02x/%02x irq=%u -> %s\n",
++	    (unsigned)((now(t)-amp.run_start)/1000),a,b,p,h,s,rd(t,PIN(30)+4)&1,ok?"ok":"FAULT");
++	amp.samples++;if (live) amp.live_samples++;
++	amp.healthy=ok;return ok;
++}
++static bool tone_tick(uint64_t elapsed,uint64_t deadline) {
++	struct tas *t=&amp.t;uint64_t n=now(t);amp.run_start=n-elapsed;
++	if (n>=deadline || deadline-n<200000) goto fault;
++	t->end=n+50000;
++	if (!amp.attempted && elapsed>=300000) {
++		uint8_t g=0,h=0;
++		if (elapsed>450000 || !read_regs(t,0,0,6,&g,1) || !read_regs(t,0,0,7,&h,1) || g!=0x7c || h!=3) goto fault;
++		amp.attempted=true;
++		if (!power_write(0,1,0x4d,0x15) || !power_write(0,1,0x3d,1) || !power_write(0,1,0x3e,1) ||
++		    !power_write(0,0,5,0xa0) || !power_write(0,0,5,0xa3) || !power_write(0,0,4,0xf8) ||
++		    !pause_us(t,2000) || !power_write(0,0,0x2c,0x2b)) goto fault;
++		amp.powered=true;amp.startup=now(t);
++		LOG(t,"mi8rp: 16: startup at +%u ms; hard mute kept R06=%02x\n",(unsigned)(elapsed/1000),g);
++	}
++	if (amp.powered && !amp.samples && now(t)-amp.startup>=200000 && !tone_health(false)) goto fault;
++	if (!amp.unmute_attempted && elapsed>=600000) {
++		if (!amp.healthy || elapsed>=900000) goto fault;
++		amp.unmute_attempted=true;amp.unmute_at=now(t);t->unmute_window=true;
++		bool ok=power_write(0,0,7,0) && power_write(100,0,7,0);
++		t->unmute_window=false;uint8_t h=255,s=255;
++		if (!ok || !read_regs(t,0,0,7,&h,1) || !read_regs(t,100,0,7,&s,1) || h || s) goto fault;
++		amp.unmuted=true;amp.next_health=now(t)+250000;
++		LOG(t,"mi8rp: 16: unmute at +%u ms after health ok; read back R07=%02x/%02x\n",(unsigned)((now(t)-amp.run_start)/1000),h,s);
++	}
++	if (amp.unmute_attempted && elapsed>=2050000) { mi8_tas2557_stop();return !amp.fault; }
++	if (amp.unmuted && now(t)>=amp.next_health) {
++		if (amp.live_samples>=6 || !tone_health(true)) goto fault;
++		amp.next_health=now(t)+250000;
++	}
++	return !amp.fault;
++fault:
++	fail(t,"tone startup/health/budget failure");amp.fault=true;mi8_tas2557_stop();return false;
++}
 +void mi8_tas2557_stop(void) {
 +	if (!amp.held || amp.stopped) return;
++	if (amp.tone) { tone_stop();return; }
 +	struct tas *t=&amp.t;uint64_t deadline=now(t)+100000;
 +	t->end=deadline-20000;
 +	/* A failed transfer may leave a transaction open or the book unknown.
@@ -18386,6 +18557,7 @@ index 0000000000000000000000000000000000000000..e882b1248b35ed8cb992d4afd3b62818
 +}
 +bool mi8_tas2557_tick(uint64_t elapsed,uint64_t deadline) {
 +	if (!amp.held || amp.stopped) return true;
++	if (amp.tone) return tone_tick(elapsed,deadline);
 +	struct tas *t=&amp.t;uint64_t n=now(t);
 +	if (n>=deadline || deadline-n<200000) { fail(t,"play budget");amp.fault=true;mi8_tas2557_stop();return false; }
 +	/* Every I2C operation while powered is bounded by a short sub-budget. */
@@ -18425,6 +18597,14 @@ index 0000000000000000000000000000000000000000..e882b1248b35ed8cb992d4afd3b62818
 +}
 +void mi8_tas2557_report(const char *cleanup) {
 +	if (!amp.initialized || !amp.io.log) return;
++	if (amp.tone) {
++		amp.io.log(amp.io.ctx,"mi8rp: step 16: tone submitted=%s peak=%u blocks=%u health=%s unmuted_ms=%u muted=%s shutdown=%s reset=%s cleanup=%s%s\n",
++		    amp.tone_blocks==50?"yes":amp.tone_blocks?"partial":"no",amp.tone_peak,amp.tone_blocks,amp.fault?"FAULT":amp.healthy?"ok":"unverified",
++		    amp.unmute_at?(unsigned)((amp.mute_at-amp.unmute_at)/1000):0,amp.remuted?"yes":amp.unmute_attempted?"hard reset":"not unmuted",
++		    amp.shutdown?"ok":amp.attempted?"fallback":"not powered",amp.result.reset_low?"low":"UNKNOWN",cleanup,
++		    amp.result.reset_low && amp.result.pins_restored && amp.result.clocks_restored && amp.result.se_restored?"":" (amp restore Pending)");
++		return;
++	}
 +	amp.io.log(amp.io.ctx,"mi8rp: step 15: amp powered=%s health=%s muted=%s shutdown=%s reset=%s cleanup=%s%s\n",
 +	    amp.powered?"yes":amp.attempted?"partial":"no",amp.fault?"FAULT":amp.healthy?"ok":"unverified",amp.mute_bad?"FAULT":amp.powered?"hard":"unverified",
 +	    amp.shutdown?"ok":amp.attempted?"fallback":"not powered",amp.result.reset_low?"low":"UNKNOWN",cleanup,
@@ -18477,14 +18657,26 @@ index 0000000000000000000000000000000000000000..e882b1248b35ed8cb992d4afd3b62818
 +	const struct mi8_tas_io io={NULL,native_read,native_write,native_now,native_delay,native_log};
 +	(void)mi8_tas2557_hold(&io,fw,(size_t)size,deadline);
 +}
++void mi8_tas2557_prepare_tone(uint64_t deadline) {
++	uint64_t size=0;
++	const uint8_t *fw=redwood_image_file("fw","tas2557_uCDSP_goer.bin",&size,NULL);
++	for (unsigned i=0;i<sizeof(maps)/sizeof(maps[0]);i++) {
++		if (!maps[i].va) maps[i].va=ml_io_map(maps[i].phys,maps[i].size);
++		if (!maps[i].va) { native_log(NULL,"mi8rp: 16: MMIO mapping failed; TAS untouched\n");return; }
++	}
++	if (!irq_page) irq_page=ml_io_map(PIN(28),0x4000);
++	if (!irq_page) { native_log(NULL,"mi8rp: 16: IRQ mapping failed; TAS untouched\n");return; }
++	const struct mi8_tas_io io={NULL,native_read,native_write,native_now,native_delay,native_log};
++	(void)mi8_tas2557_hold_tone(&io,fw,(size_t)size,deadline);
++}
 +
 +#endif
 diff --git a/bsd/dev/mi8_tas2557.h b/bsd/dev/mi8_tas2557.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..104e5589deb993e8070a050d4849e41fd1f41a17
+index 0000000000000000000000000000000000000000..a49b9ecabf8ff118cc1afa48cf259096b5e2c605
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,50 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef MI8_TAS2557_H
 +#define MI8_TAS2557_H
@@ -18522,12 +18714,16 @@ index 0000000000000000000000000000000000000000..104e5589deb993e8070a050d4849e41f
 +/* Single play-worker ownership from hold through stop; callbacks are idempotent
 + * after a failed download and never retry touching that amplifier. */
 +bool mi8_tas2557_hold(const struct mi8_tas_io *,const uint8_t *,size_t,uint64_t);
++bool mi8_tas2557_hold_tone(const struct mi8_tas_io *,const uint8_t *,size_t,uint64_t);
++bool mi8_tas2557_audible(void);
++void mi8_tas2557_tone_count(unsigned peak,unsigned blocks);
 +bool mi8_tas2557_held(void);
 +bool mi8_tas2557_tick(uint64_t elapsed,uint64_t deadline);
 +void mi8_tas2557_stop(void);
 +void mi8_tas2557_report(const char *cleanup);
 +#ifndef MI8_TAS_HOST_TEST
 +void mi8_tas2557_prepare(uint64_t deadline);
++void mi8_tas2557_prepare_tone(uint64_t deadline);
 +void mi8_tas2557_probe(uint64_t deadline);
 +#endif
 +#endif
