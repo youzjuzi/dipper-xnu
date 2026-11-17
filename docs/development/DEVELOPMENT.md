@@ -10,12 +10,13 @@
 
 ## 开始一项功能修改
 
-在仓库根目录先检查：
+在仓库根目录先检查（或一键运行 `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py --deep`）：
 
 ```sh
 git status --short
 git branch -vv
 sha256sum -c SHA256SUMS
+PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py --deep
 ```
 
 有摘要失配时先解释差异，不要先重写清单掩盖问题。`origin/main` 是本地远端跟踪记录，未 fetch 不代表实时 GitHub 状态。
@@ -39,7 +40,7 @@ sha256sum -c SHA256SUMS
 
 补丁导出使用 `python3 tools/prepare/patchtool.py export --out work/runs/<run-id>/export`，默认只读日常源码，将补丁、清单和差异报告写入新目录。逐项审查清单外文件，新增用 `--add COMPONENT:PATH` 登记；删除自动记录。工具从锁定 Git 对象重建正确基线，共用准备工具的 XNU 叠加逻辑，并恢复已知 loader 身份占位字段；无法确认的隐私内容会阻止导出。只有明确使用 `--write` 才更新仓库补丁和清单，采纳后仍须复核许可与摘要。
 
-干净验证使用 `prepare.py --prepare --dest ../experiments/patchtool/clean`，再运行 `patchtool.py replay --tree ../experiments/patchtool/clean`，核对补丁检查/应用、摘要、模式和清单外差异。提交前运行 `patchtool.py scan` 与离线自测 `tools/tests/test-patchtool.py`；隐私 error 必须处理，历史 warning 逐项审查。完整用法见[工具导航](../../tools/README.md#补丁导出与重放)。历史归档脚本仍不是通用导出入口。
+干净验证与主机全套测试可使用 `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/run-tests.py --suite all --clean-replay --sanitize`（会自动搭建一次性干净重放树、运行 `patchtool.py replay` 与全部测试并销毁临时目录）；如需手工分步调试，再使用 `prepare.py --prepare --dest ../experiments/<topic>/clean` 与 `patchtool.py replay --tree ../experiments/<topic>/clean`（用完清理临时树）。提交前运行 `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py check --refresh-sums`（含摘要核对、`patchtool.py scan` 与 `git diff --check`）；隐私 error 必须处理，历史 warning 逐项审查。完整用法见[工具导航](../../tools/README.md#补丁导出与重放)。历史归档脚本仍不是通用导出入口。
 
 ## 补丁与实际源码的对应关系
 
@@ -65,7 +66,7 @@ sha256sum -c SHA256SUMS
 | 驱动/用户态 | 补丁干净重放、清单匹配、相关编译与主机测试；设备行为变化补设备验收或明确待验 |
 | 上游版本 | 单独任务更新 lock，检查全部组件补丁、接口和许可证，不随功能修复一起升级 |
 
-摘要清单不含 `SHA256SUMS` 自身。新增文件经审查后加入清单；既有文件改变时只刷新已审查项，不递归扫描 `work/`、`local/` 或下载目录。提交前执行 `git diff --check` 和 `sha256sum -c SHA256SUMS`，逐个指定暂存文件，再审查 `git diff --cached`。
+摘要清单不含 `SHA256SUMS` 自身。新增文件经审查后加入清单；既有文件改变时可通过 `python3 -B tools/prepare/status.py check --refresh-sums` 或人工刷新已审查项，不递归扫描 `work/`、`local/` 或下载目录。提交前执行 `git diff --check` 和 `sha256sum -c SHA256SUMS`，逐个指定暂存文件，再审查 `git diff --cached`。
 
 完整 XNU `all` 检查仍未通过，不能用 `build` 通过替代；详见 [BUILD](../build/BUILD.md)。
 
@@ -97,7 +98,9 @@ sha256sum -c SHA256SUMS
 
 默认“所属仓库”就是 dipper-xnu。额外验证树采用相同内部布局，但必须标明其临时用途。有效修改只汇入 dipper-xnu 主线，不维护第二套发布副本。
 
-`sources/` 停用并保持为空，不再用它建立第二套源码入口。工作区 `archive/20261030/reproduction-logs/`、`archive/20261030/release-review/` 和旧 MI8-IOS 工作区作为历史档案保留，不继续追加日常开发内容。已有脚本固定写入的位置本次不搬迁；以后确需改路径时，必须连同脚本、文档和验证一起修改。
+原停用的顶层 `sources/` 空目录已清理移除，不再重建第二套源码入口。工作区 `archive/20261030/reproduction-logs/`、`archive/20261030/release-review/` 和旧 MI8-IOS 工作区作为历史档案保留，不继续追加日常开发内容。已有脚本固定写入的位置本次不搬迁；以后确需改路径时，必须连同脚本、文档和验证一起修改。
+
+不再保留已过期任务的 `experiments/` 临时树与废弃的 `work/release/` 重复大镜像；日常打包推荐使用 `tools/build/build-payload.py --link-inputs`，周期性清理旧实验中间产物可使用 `python3 -B tools/prepare/status.py prune-runs --apply`。
 
 任何新增顶层目录都先说明用途并更新此目录表；已有类别必须使用表中位置。删除实验 worktree 或历史资料前，先检查被 Git 忽略的源码、设备配置和证据，不以 Git 工作区干净作为可删除依据。
 
@@ -123,13 +126,14 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 接手顺序固定为：AGENTS → docs/README（文档导航）→ STATUS（功能与设备边界）→ 本文（开发流程和现场交接）。每项任务结束更新下面的现场交接，不另建多个 current/latest 状态文件。设备标识、原始日志和私人配置只引用本机位置，不复制到公共文档。
 
-### 当前开发现场交接（2026-11-12，接手时重新核对）
+### 当前开发现场交接（2026-11-18，接手时重新核对）
 
-- 音频分支 `feat/audio-sink` 已合并进 `main`（含 `3da41b2` 缺省外设与常驻会话）。work 源码与注册清单相符，无未导出修改。
-- 当前缺省：bt=7、audio=5、audio_level_db=0、audio_seconds=0（常驻）、battery=1、torch=3、haptic=3；显式 `=0` 关闭。电量/手电缺省需配套新 loader/UEFI，不能只替换内核。
-- 设备：P28（`work/runs/20261112-audio-default-01/`，DEVICE.md）无参数试用通过：蓝牙、电量、震动、手电、扬声器正常，无自动播放、无 panic；约 600 秒由主机提前结束，无会话收尾日志。
-- 未决：刚开机浏览器打不开网页（Wi-Fi 关联正常、TCP 停在 SYN_SENT，原因未定，需无音频对照）；音量键 HUD 显示“声音关闭”（疑为静音拨片状态上报）；Safari 视频发绿；常驻功耗、数小时运行与音质未验收。
-- 下一步：按持有人反馈排期，优先 Wi-Fi 数据停滞。
+- 主线状态：`main` 已合入扬声器音频与缺省外设（bt=7、audio=5 常驻、battery=1、torch=3、haptic=3）；当前分支 `feat/sideload-apps`（与 `main`、`fix/wifi-stall` 同基线，后续工作树具工具增强提交将同步对齐）。
+- `work/` 源码与未导出修改：`xnuloader/loader.c` 仅含本机配置差异（经占位归一化后与清单一致）。另有 **4 处未导出实验修改**（已于 `local/backups/20261118-sideload-work-01/` 完整留存快照与差异补丁）：
+  - `xnu-mi8`（未登记清单）：`bsd/vfs/vfs_attrlist.c`（`UIO_SIZEOF` 栈缓冲对齐）。
+  - `hackios-userland`（清单内差异）：`userland/build.sh`、`userland/src/init.c`、`userland/src/inject_sb.c`（用于启动卷 `/apps` 联合挂载、`RedwoodMetal.bundle` 绑定与 SpringBoard Metal 隔离，配合 `work/hackios/apps/Via.app` 与 `apps-off/bili-overseas.app` 测试）。
+- 构建与验证现场：标准内核增量 `BUILD` 目录已预热对齐（`tools/build/build-kernel.sh`）；干净重放与全套主机回归（含 ASan/UBSan）通过，可复现树自动清理不占位。设备端 P28（`work/runs/20261112-audio-default-01/`）无参数试用正常。
+- 未决与下一步：若切换去排查 Wi-Fi 接收停滞（`fix/wifi-stall`，TCP SYN_SENT / `ath10k rx_confused`）或其他任务，先决定上述 4 处未导出改动是导出合入还是按备份还原，切勿混入无关分支提交；其余未决项仍含音量键 HUD“声音关闭”、Safari 视频发绿及常驻音质/功耗长测。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

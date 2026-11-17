@@ -2,7 +2,8 @@
 
 ## 开始工作
 
-- 本仓库是后续开发入口。先读 `docs/README.md`、`docs/STATUS.md`、`docs/development/DEVELOPMENT.md`（含当前现场交接），再检查 Git 分支与未提交修改。
+- 本仓库是后续开发入口。先运行 `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py --deep` 核查当前 Git 分支、校验摘要、构建产物及 `work/` 中未导出改动（该命令自动忽略已归一化的本机 `loader.c` 占位差异），再依次读 `docs/README.md`、`docs/STATUS.md`、`docs/development/DEVELOPMENT.md`（含当前现场交接）。若本机 `local/` 下存在已有索引或私有交接资料，可仅作只读参考，严禁把任何私有路径、编号或内容写入公开文件或提交。
+- 日常开发常用统一入口：查看未导出差异用 `python3 -B tools/prepare/status.py diff`；内核增量构建用 `bash tools/build/build-kernel.sh`；全套主机回归与自动清理干净重放用 `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/run-tests.py --suite all --clean-replay`；提交前校验用 `python3 -B tools/prepare/status.py check --refresh-sums`。
 - 当前可复现交付物是固定上游版本 + `patches/` + `source-manifest.json` + 构建工具，不是单独的 `work/`。
 - `work/` 和 `local/` 虽被 Git 忽略，可能包含未导出的源码、本机配置、固件和唯一的测试证据。不得默认清理、覆盖或切换其内层仓库。
 - 旧 MI8-IOS 工作区只作历史参考。不要把旧启动脚本、旧产物和当前复现树混合使用。
@@ -28,8 +29,8 @@
 ## 目录纪律
 
 - 严格遵循 `docs/development/DEVELOPMENT.md` 的固定目录表。已有类别不得另建顶层目录；新增类别先说明用途并更新目录表。
-- 仅干净重放/重建验证或明确需要的并行工作使用顶层 `experiments/<topic>/` 临时树；日常运行日志和产物放本仓库的 `work/runs/YYYYMMDD-<topic>-NN/`，发布审查放 `local/reviews/YYYYMMDD-<topic>/`。
-- 顶层 `sources/` 停用；工作区 archive/20261030 下的历史 reproduction-logs、release-review 和旧 MI8-IOS 工作区不再追加日常内容。禁止再维护第二套发布源码副本。
+- 仅干净重放/重建验证或明确需要的并行工作使用顶层 `experiments/<topic>/` 临时树（验证后清理）；日常运行日志和产物放本仓库的 `work/runs/YYYYMMDD-<topic>-NN/`，发布审查放 `local/reviews/YYYYMMDD-<topic>/`。
+- 原停用的顶层 `sources/` 目录已移除，不再重建；工作区 archive/20261030 下的历史 reproduction-logs、release-review 和旧 MI8-IOS 工作区不再追加日常内容。禁止再维护第二套发布源码副本。
 - 不为整理外观移动现有构建树或输入。路径调整须同步脚本、文档并验证；可复用脚本放 `tools/`，一次性脚本跟随对应实验记录。
 
 - `local/` 遵循开发文档的 local 管理约定：现有配置路径不变，新配置/来源/备份/审查分别归入 devices、provenance、backups、reviews；同步本机 index.json，禁止临时堆在根目录。运行产物放 work/runs，不放 local。

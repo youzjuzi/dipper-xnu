@@ -4,6 +4,14 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 K="$ROOT/work/hackios"
+if [ -z "${THEOS:-}" ]; then
+    if [ -d "$ROOT/local/theos/toolchain/linux/iphone" ]; then
+        THEOS="$ROOT/local/theos"
+    elif [ -d "$ROOT/../dependencies/theos/toolchain/linux/iphone" ]; then
+        THEOS="$(cd "$ROOT/../dependencies/theos" && pwd)"
+    fi
+    export THEOS
+fi
 : "${THEOS:?Set THEOS to the verified local SDK/toolchain directory}"
 [ -z "${PREBUILT:-}" ] || { echo 'PREBUILT is not allowed for source reproduction.' >&2; exit 1; }
 [ -x "$THEOS/toolchain/linux/iphone/bin/ld" ] || { echo 'Missing Theos linker.' >&2; exit 1; }

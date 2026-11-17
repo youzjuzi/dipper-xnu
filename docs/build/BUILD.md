@@ -86,18 +86,21 @@ work/
 
 ## 4. 编译内核与 Wi-Fi 驱动
 
-先完成 [外部材料页的缓存放置](INPUTS.md#让构建脚本使用已校验的原包)，确认本 shell 已设置 `THEOS`。然后进入合并后的构建树：
+先完成 [外部材料页的缓存放置](INPUTS.md#让构建脚本使用已校验的原包)，确认已设置 `THEOS`（或将工具链与 SDK 放在 `local/theos`、`../dependencies/theos` 供构建脚本自动探测）。
+
+在日常主构建树进行增量编译时，可直接从仓库根目录执行统一入口（内部自动设置 `THEOS` 并显式传入 `SOURCE_DIR="$XNU_SRC"`）：
+
+```sh
+bash tools/build/build-kernel.sh [--with-ath10k] [--out work/runs/<run-id>/kernel]
+```
+
+首次从零准备依赖或分步手工排查时，也可进入合并后的构建树依次执行：
 
 ```sh
 cd "$DIPPER_PROJECT_ROOT/work/hackios"
-```
-
-依次准备依赖、编译 ath10k，再编译 XNU。每条命令结束后先检查输出，失败时不要直接继续下一条。
-
-```sh
 bash xnu-deps/setup.sh
 bash tools/mk-ath10k.sh
-bash xnu-build.sh -j8 build
+bash xnu-build.sh -j8 build SOURCE_DIR="$PWD/xnu-src/xnu-8796.121.2"
 ```
 
 `-j8` 为并行任务数，可按主机资源调整。依赖脚本会联网取得额外源码；ath10k 获取脚本固定 Linux 7.0.14，并检查归档 SHA256 和逐文件许可证；其他传递依赖尚未全部锁定。

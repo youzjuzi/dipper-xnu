@@ -4,10 +4,10 @@
 
 | 目录 | 用途 | 入口 |
 | --- | --- | --- |
-| prepare/ | 固定源码准备、补丁维护、SDK 校验、IPSW 提取 | [prepare.py](prepare/prepare.py)、[patchtool.py](prepare/patchtool.py)、[check-sdk.py](prepare/check-sdk.py)、[prepare-ios.py](prepare/prepare-ios.py) |
-| build/ | loader/UEFI、用户态编译及镜像/载荷打包 | [build-loader-uefi.sh](build/build-loader-uefi.sh)、[build-userland.sh](build/build-userland.sh)、[build-payload.py](build/build-payload.py)、[pack-darwin.py](build/pack-darwin.py) |
+| prepare/ | 固定源码准备、补丁维护、状态与清理、SDK 校验、IPSW 提取 | [prepare.py](prepare/prepare.py)、[patchtool.py](prepare/patchtool.py)、[status.py](prepare/status.py)、[check-sdk.py](prepare/check-sdk.py)、[prepare-ios.py](prepare/prepare-ios.py) |
+| build/ | 内核、loader/UEFI、用户态编译及镜像/载荷打包 | [build-kernel.sh](build/build-kernel.sh)、[build-loader-uefi.sh](build/build-loader-uefi.sh)、[build-userland.sh](build/build-userland.sh)、[build-payload.py](build/build-payload.py)、[pack-darwin.py](build/pack-darwin.py) |
 | partition/ | 离线生成分区/恢复方案，核验回读 | [partition-darwin.py](partition/partition-darwin.py)、[restore-android-layout.py](partition/restore-android-layout.py) |
-| tests/ | 合成 GPT、CLI 与假设备保护测试 | [test-patchtool.py](tests/test-patchtool.py)、[test-partition-darwin.py](tests/test-partition-darwin.py)、[test-restore-android-layout.py](tests/test-restore-android-layout.py) |
+| tests/ | 统一主机测试入口、合成 GPT、CLI、音频与工作流回归测试 | [run-tests.py](tests/run-tests.py)、[test-patchtool.py](tests/test-patchtool.py)、[test-workflow-tools.py](tests/test-workflow-tools.py)、[test-partition-darwin.py](tests/test-partition-darwin.py)、[test-restore-android-layout.py](tests/test-restore-android-layout.py) |
 
 `build/cc-gnu17/cc` 是构建兼容包装器，保留原位置，由 UEFI 构建入口使用。分区工具只在主机生成方案；生成的设备脚本由持有人核对后执行，不会自动操作手机。
 
@@ -18,10 +18,29 @@
 - 回归测试：
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 tools/tests/test-patchtool.py
-PYTHONDONTWRITEBYTECODE=1 python3 tools/tests/test-restore-android-layout.py
-PYTHONDONTWRITEBYTECODE=1 python3 tools/tests/test-partition-darwin.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/run-tests.py --suite fast
+PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/run-tests.py --suite all --clean-replay --sanitize
 ```
+
+`run-tests.py` 自动向子进程传入 `PYTHONDONTWRITEBYTECODE=1`，并在 `local/devices/*/audio-android/` 自动发现 TAS2557 测试参考夹具；加 `--clean-replay` 会从锁定 Git 对象搭建一次性干净重放树完成 `patchtool.py replay` 与测试，结束后自动销毁临时树，不留下永久大目录。也可单独运行 `tools/tests/test-workflow-tools.py`、`test-patchtool.py`、`test-restore-android-layout.py`、`test-partition-darwin.py`。
+
+## 工作区状态、内核构建与日常检查
+
+`tools/prepare/status.py` 提供日常开发自检与维护子命令（运行时不生成字节码）：
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py --deep
+PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py diff
+PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py check --refresh-sums
+PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py prune-runs [--apply]
+```
+
+- `status`（默认子命令）：显示当前 Git 分支与跟踪改动、核对 `SHA256SUMS`、探测 `THEOS`、比对 `source-manifest.json` 列出 `work/` 未导出改动（对本机 `xnuloader/loader.c` 唯一设备字段执行占位归一化后再判别，避免误报），并汇报内核/UEFI/用户态产物就绪情况。加 `--deep` 时扫描清单外改动（默认折叠已知构建符号链接与辅助子模块，加 `--all-unowned` 展开）。
+- `diff`：基于离线重建的公开参考生成统一 diff；输出前先做隐私扫描，命中禁止模式时整文件脱敏。
+- `check`：联合核对暂存区不含忽略目录、`SHA256SUMS` 与 `git ls-files` 完整对应、隐私扫描无 error 以及 `git diff --check` 干净；`--refresh-sums` 从跟踪文件列表刷新 `SHA256SUMS`。
+- `prune-runs`：默认只读预览（dry-run），加 `--apply` 时清理 `work/runs/` 下残留的 `replay-tree*` 目录及 `obj/`、`sym/`、`dst/` 编译中间产物（`.o`、`.cpo`、`.d`、`.a`、`*.dSYM`、`mach.*.unstripped*`，保留 `mach.development.bcm2837` 与 `kernel.macho`），并将同文件系统下的重复大镜像（`.apfs`、`.img`、`.macho`、`.efi`）替换为硬链接，结果写入 `_pruned-YYYYMMDD.tsv`。
+
+`bash tools/build/build-kernel.sh [-j N] [--with-ath10k] [--out DIR]` 在仓库根目录执行，自动探测 `THEOS`（依次检查环境变量 `THEOS`、`local/theos`、`../dependencies/theos`），显式传入 `SOURCE_DIR="$XNU_SRC"` 调用标准 `BUILD` 目录增量编译内核；指定 `--out DIR` 时把日志、内核及 `.sha256` 写入新建运行目录。`build-userland.sh` 同样支持上述 `THEOS` 回退探测；`build-payload.py --link-inputs` 支持在同一文件系统下以硬链接复用只读输入以节省运行目录空间。
 
 ## 补丁导出与重放
 

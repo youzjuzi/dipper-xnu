@@ -10,7 +10,10 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import sys
 import time
+
+sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -49,6 +52,8 @@ def main():
     parser.add_argument('--bluetooth', action='store_true',
                         help='compatibility option: Bluetooth is enabled by default with --wifi')
     parser.add_argument('--no-audio', action='store_true', help='disable speaker audio for comparison or troubleshooting')
+    parser.add_argument('--link-inputs', action='store_true',
+                        help='hard-link read-only input files into output when on the same filesystem')
     args = parser.parse_args()
     if args.bluetooth and not args.wifi:
         # The chip shares its supplies with the Wi-Fi side and takes its address from wifi_mac.
@@ -146,8 +151,12 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     records = {}
     for name, path in inputs.items():
-        shutil.copy2(path, out / name)
-        actual = sha256(out / name)
+        dst = out / name
+        if args.link_inputs and path.stat().st_dev == out.stat().st_dev:
+            os.link(path, dst)
+        else:
+            shutil.copy2(path, dst)
+        actual = sha256(dst)
         if actual != sha256(path):
             raise SystemExit('Copy changed: ' + name)
         records[name] = actual
