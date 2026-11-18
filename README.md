@@ -1,135 +1,157 @@
 # dipper-xnu
 
+**English** | [简体中文](README.zh-CN.md)
+
 **Experimental / Work in Progress**
 
-面向 `dipper`（SDM845）的 XNU 与移动用户空间实验性移植项目。
+Experimental XNU (`8796.121.2`, Darwin `22.5.0`) and iOS `16.5` (`20F66`) port for **Xiaomi Mi 8 (`dipper`)**, Qualcomm Snapdragon 845 (`SDM845`).
 
-基于 [HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) 的工作，为 `dipper` 适配启动、显示、触摸、A630 GPU、WCN3990 Wi-Fi、蓝牙和扬声器音频。支持 SpringBoard 桌面、GPU 渲染、触摸、Wi-Fi 上网、蓝牙连接和扬声器声音。
+Built on the [HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) foundation, with `dipper`-specific bring-up for UEFI/loader boot, display, touch, Adreno 630 GPU, WCN3990 Wi-Fi & Bluetooth, and internal speaker audio. It boots to the SpringBoard home screen with GPU rendering, touch, Wi-Fi networking, Bluetooth pairing, and speaker output.
 
-项目仍在开发中，尚不适合作为日常使用系统。
+This project is still under active development and is **not** ready for daily use.
 
 <p align="center">
-  <img src="docs/images/mi8-ios-desktop.png" alt="小米 8 运行 iOS 16.5 SpringBoard 桌面的实机照片" width="320">
+  <img src="docs/images/mi8-ios-desktop.png" alt="Xiaomi Mi 8 running iOS 16.5 SpringBoard on real hardware" width="320">
   <br>
-  <sub>小米 8 · iOS 16.5 · 实机运行照片</sub>
+  <sub>Xiaomi Mi 8 · iOS 16.5 · Running on real hardware</sub>
 </p>
 
-## 近期更新 · 2026-11-12
+## Recent Updates · 2026-11-12
 
-- **扬声器有声音了**：iOS 的铃声、键盘音、视频等声音从小米 8 的扬声器播放出来，音量由 iOS 音量条调节。点击后约 40 ms 出声，开头渐入、结尾渐出，没有“啪”声。0 dB 连续播放 10 分钟，功放健康检查全过，CPU 41–43 °C。
-- **怎么做到的**：内核接住 iOS 音频服务送来的 PCM，经高通音频 DSP（ADSP）的 ASM/ADM/AFE 通路从 QUAT MI2S 输出，再由内核直接驱动 TAS2557 功放（下载厂商固件、上电、健康检查、静音与软关断）；没有声音时功放自动断电，死机时功放立即断电。
-- **蓝牙、扬声器、电量、震动、手电缺省开启**：打包只需 `--wifi`，不再需要 `--bluetooth`、`--peripherals` 或音频参数；需要关闭时追加 `bt=0`、`audio=0` 等。持有人无参数试用，这些功能都正常，开机不会自动播放。
-- **还不行的**：开机约 1 分钟、Wi-Fi 就绪后才有声音；音质未调校；蓝牙耳机声音、麦克风和通话没有；音量键提示显示“声音关闭”；浏览器有时打不开网页（含刚开机时），原因未定；长时间运行的功耗未测。
-- **需要自备**：TAS2557 功放固件需从自己的手机取出（ADSP 固件由内核直接从手机分区读取），见[配置、重建与启动](docs/install/STARTUP.md#扬声器电量震动与手电缺省开启)。
-- 以上设备结果来自持有人的手动使用和设备日志，不是完整回归；细节见[更新日志](CHANGELOG.md)和[验证记录](docs/validation/VALIDATION.md)。
+- **Internal speaker audio works**: iOS ringtones, keyboard clicks, and media audio play from the Mi 8 speaker and respond to the iOS volume slider. Audio wakes in ~40 ms with fade-in/fade-out and pop-free idle shutdown; verified in a 10-minute 0 dB continuous playback run with amp health checks passing and CPU at 41–43 °C.
+- **How it works**: The kernel consumes PCM from iOS audio services and routes it through the Qualcomm ADSP (`GLINK`/`APR` -> `ASM`/`ADM`/`AFE` over Quaternary MI2S) to a native `TAS2557` SmartAmp driver (firmware loading, power-up, health verification, soft mute/shutdown when idle, and emergency reset on kernel panic).
+- **Bluetooth, audio, battery, haptics, and torch enabled by default**: Packaging with `--wifi` now turns them on without extra boot arguments (`--bluetooth` / `--peripherals` are no longer required; pass `bt=0`, `audio=0`, etc. to disable).
+- **Current audio & network limits**: Speaker output becomes ready ~1 minute after boot once Wi-Fi initializes; acoustic tuning is incomplete; Bluetooth audio, earpiece, microphone, and voice calls are not implemented; the volume button HUD shows a mute icon; intermittent browser/Wi-Fi RX stalls remain under investigation; long-term power consumption is untested.
+- **User-supplied amp firmware**: `TAS2557` firmware must be extracted from your own phone (ADSP firmware is read directly by the kernel from the phone's `modem` partition). See [Configuration, Rebuild & Boot](docs/install/STARTUP.md#扬声器电量震动与手电缺省开启).
+- Hardware results above are from maintainer testing and device logs rather than an automated full regression; details in [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](docs/validation/VALIDATION.md).
 
-更早的更新见[更新日志](CHANGELOG.md)。
+## Hardware & Boot Chain
 
-## 设备与系统
-
-| 项目 | 配置 |
+| Component | Target |
 | --- | --- |
-| 设备代号 | `dipper` |
-| SoC | SDM845 |
-| GPU | A630 |
-| Wi-Fi | WCN3990 |
-| 内核 | XNU 8796.121.2 |
-| 用户空间 | iOS 16.5 |
+| Device Codename | `dipper` (Xiaomi Mi 8) |
+| SoC | Qualcomm Snapdragon 845 (`SDM845`) |
+| GPU | Adreno 630 (`A630`) |
+| Wi-Fi & Bluetooth | Qualcomm WCN3990 |
+| Speaker Amp | TI TAS2557 (Quaternary MI2S + I2C) |
+| Kernel | XNU `8796.121.2` (Darwin `22.5.0`) |
+| Userspace | iOS `16.5` (Build `20F66`) |
 
-启动流程：
+Boot flow:
 
 ```text
-dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空间
+Stock dipper bootloaders -> edk2-sdm845 UEFI -> xnuloader -> XNU -> iOS 16.5 userspace
 ```
 
-## 功能状态
+## Feature Status (2026-11-12)
 
-当前状态（2026-11-12）。已有分区的短时外设测试与重新分区后的 iOS 启动均有记录；下表外设结果大多来自重新分区之前的测试，蓝牙、扬声器、降低分辨率等较新的项目单独在近期更新里说明；重新分区后的完整回归、退出收尾和长期稳定性仍待验。
+Most peripheral checks below were recorded on the pre-repartition test layout, with newer items (Bluetooth, speaker audio, optional render scaling, persistent `/private/var`) verified separately in recent boots; full post-repartition regression, teardown/exit recovery, and long-term stability remain to be tested.
 
-| 功能 | 状态 |
+| Feature | Status | Notes |
+| --- | --- | --- |
+| System boot | Works | Reaches iOS 16.5 SpringBoard home screen |
+| Display & GPU | Partly | Mesa / freedreno drives A630; UI stutter, power draw, and exit recovery need work |
+| Touch | Works | FTS touch input working |
+| Brightness & Lock/Wake | Works | Settings / Control Center brightness and lock/wake verified |
+| Volume buttons | Partly | Buttons and slider adjust volume; HUD overlay displays muted icon |
+| Torch & Haptics | Works | Torch toggle and haptics work; torch brightness steps are subtle |
+| Battery gauge | Partly | Battery percentage/status reported; full charge/discharge cycle unverified |
+| Wi-Fi | Partly | Joins networks and acquires IP (`en0`); status bar icon is placeholder; intermittent RX stalls |
+| Safari / Web | Partly | Loads and refreshes pages over Wi-Fi; sometimes stalls on `SYN_SENT` |
+| Bluetooth | Partly | Enabled by default; toggles, scans, pairs, and connects to headphones/phones; no BT audio; pairings do not persist across reboots |
+| Reduced render scale (`fbscale=2`) | Partly | Optional (`fbscale=2 fb_dpu=1`); smoother UI with status bar fix and static wallpaper; some apps crash |
+| Static wallpaper | Works | User-supplied image (`/redwood/etc/wallpaper.jpg`); changing wallpaper in Settings has no effect |
+| Internal speaker audio | Partly | Enabled by default; iOS audio plays via ADSP + TAS2557; uncalibrated EQ; long-term power untested |
+| Persistent `/private/var` (`--persist`) | Partly | First save/restore test verified under `--persist`; crash/periodic saving untested |
+| Cellular / Mobile data | Not tested | Not yet verified working |
+| Bluetooth audio / Mic / Calls | No | Not yet implemented |
+
+Detailed status and verification boundaries are tracked in [docs/STATUS.md](docs/STATUS.md).
+
+## Source-Only Policy & Compliance
+
+This repository publishes **source patches, file manifests, host build/test tools, and documentation only**:
+
+- **No prebuilt kernels or merged binaries** are hosted or distributed (see [GPU_LICENSE.md](docs/legal/GPU_LICENSE.md) regarding `mi8_a630_hw_init.inc` and APSL 2.0/GPL-2.0-only boundaries).
+- **No Apple binaries or IPSW contents** (no rootfs, dyld shared cache, system apps, fonts, or proprietary Apple keys/certificates) are committed.
+- **No proprietary vendor firmware** is committed; device firmware (`a630_*`, `crbtfw21.tlv`/`crnv21.bin`, `tas2557_uCDSP_goer.bin`) and device-unique GPT GUIDs/MAC addresses must be obtained from your own device. Public patches keep zero/placeholder identifiers (`loader.c`).
+
+## Building & Reproducing (Linux x86_64)
+
+Developed on **Ubuntu 26.04.1 LTS (`x86_64`)**. Rather than tracking a full XNU fork directly, this repository reproduces the port deterministically from pinned upstream commits ([upstream.lock.json](upstream.lock.json)), component patches (`patches/`), and file checksums ([source-manifest.json](source-manifest.json)).
+
+> **Note:** Detailed step-by-step guides under `docs/` are currently written in Chinese and contain full dependency tables, SHA-256 checksums, and verification notes. Use [README.zh-CN.md](README.zh-CN.md) or [docs/README.md](docs/README.md) for the complete walkthrough.
+
+1. **Verify repo files and prepare pinned sources**:
+   ```sh
+   git clone https://github.com/youzjuzi/dipper-xnu.git
+   cd dipper-xnu
+   sha256sum -c SHA256SUMS
+   python3 -B tools/prepare/prepare.py --prepare
+   ```
+2. **Stage external inputs & extract IPSW** ([docs/build/INPUTS.md](docs/build/INPUTS.md), [docs/build/USERLAND.md](docs/build/USERLAND.md)):
+   - Verify and place `THEOS`, `iPhoneOS16.5.sdk` (`tools/prepare/check-sdk.py`), `MacOSX13.3.sdk`, `linux-7.0.14`, `freebsd-15.1-src`, `mesa-25.0.7`, and the `iOS 16.5 (20F66)` IPSW (`tools/prepare/prepare-ios.py`).
+   - Extract required device firmware from your own Xiaomi Mi 8 ([docs/install/DEVICE_PREPARATION.md](docs/install/DEVICE_PREPARATION.md)) and match your device's `darwin` partition GUID in `loader.c`.
+3. **Build kernel, loader/UEFI, userspace & host images** ([docs/build/BUILD.md](docs/build/BUILD.md)):
+   ```sh
+   # First-time kernel dependencies & ath10k inside work/hackios:
+   #   bash xnu-deps/setup.sh && bash tools/mk-ath10k.sh
+   bash tools/build/build-kernel.sh
+   bash tools/build/build-loader-uefi.sh
+   bash tools/build/build-userland.sh
+   python3 -B tools/build/pack-darwin.py
+   python3 -B tools/build/build-payload.py --output work/runs/<run-id> --wifi --link-inputs
+   ```
+4. **Verify workspace status & host test suite** ([tools/README.md](tools/README.md)):
+   ```sh
+   PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py --deep
+   PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/run-tests.py --suite all --clean-replay --sanitize
+   ```
+
+**First-time device installation requires creating an independent `darwin` UFS partition, which wipes Android `userdata`.** The system image is written to UFS and booted via temporary RAM-loaded UEFI (`fastboot boot`), never flashing over stock Android boot permanently. Read [INSTALL.md](docs/install/INSTALL.md) and back up GPT/data before touching a phone.
+
+### Tool Layout
+
+| Directory | Purpose |
 | --- | --- |
-| 系统启动 | 已进入 SpringBoard 桌面 |
-| 显示与 GPU | Mesa / freedreno 驱动 A630；卡顿与功耗仍待改善 |
-| 触摸 | 已可用 |
-| 屏幕亮度与锁屏 | 设置及控制中心调光、锁屏与唤醒可用 |
-| 音量键 | 按键与音量条可用；按键提示显示“声音关闭”（待修） |
-| 手电筒与振动 | 手电筒开关和振动可用；手电筒分档亮度不明显 |
-| 电量显示 | 已可用 |
-| Wi-Fi | 已能在设置中入网并获取 IP；状态栏图标仍为临时实现 |
-| Safari | 已通过 Wi-Fi 打开并刷新网页；有时打不开网页，原因未定 |
-| 蓝牙 | 缺省开启；可开关、搜索、配对，已连上耳机和另一部手机；耳机没有声音，配对不跨重启保存 |
-| 降低渲染分辨率（可选） | 已能进桌面且更流畅；状态栏已修复，壁纸改为静态图；部分应用闪退，原因未定 |
-| 静态壁纸 | 可用（自备图片）；设置里换壁纸无效 |
-| 电话与移动数据 | 尚未验证可用 |
-| 扬声器声音 | 缺省开启，iOS 声音从扬声器播放；音质未调校，功耗未测 |
-| 蓝牙音频、麦克风、通话 | 尚未实现 |
+| `tools/prepare/` | Pinned source preparation, patch export/replay/privacy scan, workspace status & cleanup, SDK/IPSW checks |
+| `tools/build/` | Incremental kernel, loader/UEFI, and userspace builds; `darwin.img` & bounded payload packaging |
+| `tools/partition/` | Offline GPT partition / Android restore plan generation and readback verification |
+| `tools/tests/` | Unified host test runner, clean-replay validation, synthetic GPT, and audio/workflow self-tests |
 
-详细进度与限制见 [功能状态](docs/STATUS.md)。
+## Known Issues
 
-## 构建与安装
+- Home screen stutter remains under heavy load (reduced render scale helps, though some apps crash in that mode); dynamic CPU/GPU power management and long-term stability need tuning.
+- Bluetooth headphones receive no audio yet, pairings are not saved across reboots without `--persist`, and Bluetooth initializes ~70 s after boot.
+- Internal speaker activates ~1 minute after boot (after Wi-Fi setup); sound quality is uncalibrated; volume button HUD reports mute; long-term power draw is unmeasured.
+- Safari / networking occasionally stalls after boot or extended browsing (Wi-Fi stays associated, TCP stops at `SYN_SENT`).
+- GPU SMMU and modem teardown/exit recovery remain incomplete; devices generally need a full reboot between test runs.
+- Storage configuration targets an experimental layout (`darwin` partition) and does not yet ship as a generic one-click installer.
 
-构建使用 **Linux x86_64**，开发环境为 **Ubuntu 26.04.1 LTS**。本仓库通过固定上游版本和 dipper 适配补丁组织源码。
+## Contributing
 
-开始前先看[设备版本、TWRP 与固件准备](docs/install/DEVICE_PREPARATION.md)，确认本机版本和输入来源。
+Issues, source patches, and reproducible host/device reports are welcome. Please read [DEVELOPMENT.md](docs/development/DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md) first. Never include personal data, device-unique GUIDs/MACs/serials, device backups, Apple system images, or proprietary firmware in patches or issues.
 
-1. [构建教程](docs/build/BUILD.md)与[输入材料](docs/build/INPUTS.md)：固定来源、校验、编译内核和 UEFI。
-2. [用户空间与打包](docs/build/USERLAND.md)：提取 IPSW、编译适配程序、生成启动卷和系统镜像。
-3. [分区、写入与回退](docs/install/INSTALL.md)：备份、分区、格式化、系统镜像回读与恢复 Android。
-4. [配置、重建与启动](docs/install/STARTUP.md)：匹配新 GUID、重建 loader/UEFI、打包和日常 RAM 启动；[外设测试参考](docs/install/EXISTING_INSTALL.md)。
+## Acknowledgements
 
-工具入口按用途分类，命令均从仓库根目录执行：
+This port builds on the work of many open-source projects, especially:
 
-| 目录 | 用途 |
-| --- | --- |
-| `tools/prepare/` | 固定源码准备、SDK 校验、IPSW 提取 |
-| `tools/build/` | 编译加载器、UEFI、用户态，打包镜像与载荷 |
-| `tools/partition/` | 分区及 Android 恢复方案生成、回读核验 |
-| `tools/tests/` | 主机回归测试 |
+- **OOSEX GANG / HackiOS**: Core XNU port, `xnuloader`, userspace shims, and wireless compatibility layer.
+- **Apple Open Source**: XNU and related open-source packages.
+- **edk2-porting / Renegade Project, TianoCore, SimpleInit**: SDM845 UEFI and display/boot framework.
+- **UniXNU / DarwinBoot**: Early boot components and reference work.
+- **Linux, Mesa / freedreno, FreeBSD**: Hardware drivers, Adreno 630 graphics, and LinuxKPI base.
+- **[Team Win / TWRP & dipper maintainers](https://twrp.me/xiaomi/xiaomimi8.html)**: Recovery environment for partition maintenance and image verification.
+- **Theos, LLVM, and related toolchains**.
 
-完整脚本清单见[工具导航](tools/README.md)。旧实验记录保留当时路径，后续运行请使用当前教程的新路径。
+See [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
 
-**首次安装需要划出独立的 `darwin` 分区，会清空 Android 用户数据。** 系统持久写入该分区，之后通过临时加载 UEFI 启动。
+## License
 
-仓库仅提供源码、补丁和构建工具，**不提供预编译内核或系统镜像**：内核需在你自己的机器上编译（原因见 [GPU 许可说明](docs/legal/GPU_LICENSE.md#分发方式2026-10-31-起)）。系统镜像、专有 SDK、设备固件与备份需自行合法获取。构建及实机测试的详细依据见 [验证记录](docs/validation/VALIDATION.md)。
+This repository is **not** licensed under a single MIT license; each component retains its original license:
 
-## 已知问题
+- Original build scripts, documentation, standalone headers/configurations, and inventoried original modules: **MIT** ([LICENSES/MI8-packaging-MIT.txt](LICENSES/MI8-packaging-MIT.txt)).
+- XNU / HackiOS-derived kernel and loader modifications: **APSL 2.0** ([LICENSES/APSL-2.0.txt](LICENSES/APSL-2.0.txt)), keeping upstream notices.
+- Third-party derivatives (`edk2-sdm845`, `SimpleInit`, `UniXNU`, `FreeBSD`, `WLFW` / `ISC`, Linux-derived `mi8_a630_hw_init.inc` under `GPL-2.0-only`): see [LICENSE.md](LICENSE.md), [LICENSES/](LICENSES), [LICENSE_REVIEW.md](docs/legal/LICENSE_REVIEW.md), [GPU_LICENSE.md](docs/legal/GPU_LICENSE.md), and [license-inventory.json](license-inventory.json).
 
-- 桌面仍有卡顿（降低分辨率可缓解，但目前有应用闪退），动态调频、功耗和长期稳定性尚待完善。
-- 蓝牙耳机听不到声音，配对记录重启后丢失，开机约 70 秒后才就绪；只测过一副耳机和一部手机。
-- 扬声器开机约 1 分钟（Wi-Fi 就绪后）才有声音，音质未调校；音量键提示显示“声音关闭”；常驻音频的功耗与长时间运行未验收。
-- 浏览器有时打不开网页（含刚开机时）：Wi-Fi 已连接但网络连接无响应，原因未定。
-- 部分系统服务和应用功能不完整，不能将 Safari 可用理解为所有联网功能正常。
-- GPU SMMU 和基带的退出恢复仍有问题，实验之间可能需要完整重启设备。
-- 存储配置仍来自特定实验布局，不能直接套用到其他设备。本仓库已移除开发设备的分区唯一 GUID，尚不提供通用安装或一键刷机流程。
-
-设备操作前应准备可靠的备份和恢复方案。请先阅读安装教程中的设备配置限制，不要直接使用历史分区参数。
-
-## 参与开发
-
-欢迎提交问题、源码改进和可复现的测试结果。提交时请注明设备、源码版本和测试方法，并区分主机测试与实机结果。
-
-开发过程与 AI 接手入口见[开发流程与现场交接](docs/development/DEVELOPMENT.md)，每轮证据沿用 `work/runs/`，不另复制源码树。
-
-详见 [贡献指南](CONTRIBUTING.md)。请勿在 Issue 或补丁中附带个人数据、设备备份或专有固件。
-
-## 致谢
-
-本项目建立在多个开源项目的工作之上，特别感谢：
-
-- **OOSEX GANG / HackiOS**：XNU 移植基础、加载器、用户空间适配及无线兼容层。
-- **Apple 开源项目**：XNU 与相关开放源码。
-- **edk2-porting / Renegade Project、TianoCore、SimpleInit**：SDM845 的 UEFI 与启动支持。
-- **UniXNU / DarwinBoot**：启动组件与早期移植参考。
-- **Linux、Mesa / freedreno、FreeBSD**：硬件驱动、图形与兼容层基础。
-- **[Team Win / TWRP 与 dipper 维护者](https://twrp.me/xiaomi/xiaomimi8.html)**：提供分区维护、格式化与镜像回读所用的 Recovery 环境。
-- **Theos、LLVM 及相关工具链项目**：构建工具。
-
-完整说明见 [致谢](ACKNOWLEDGEMENTS.md) 与 [第三方来源](THIRD_PARTY_NOTICES.md)。
-
-## 许可证
-
-各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围见 [许可说明](LICENSE.md) 和 [LICENSES](LICENSES)。其他文件的许可范围见 [许可证说明](docs/legal/LICENSE_REVIEW.md)。
-
-本项目为独立研究项目，与设备厂商、系统厂商及所参考项目不存在官方隶属关系。
-
-全部文档按用途分类，见 [文档导航](docs/README.md)。
+This is an independent research project with no affiliation with device or OS vendors. Documentation index: [docs/README.md](docs/README.md).
