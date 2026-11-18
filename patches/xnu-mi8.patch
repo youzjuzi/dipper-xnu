@@ -14766,10 +14766,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..02d3693b9e7a5fb5e9da3f004f9d102a935b197c
+index 0000000000000000000000000000000000000000..f9c9700a79ab99ce13375990bb121fa327e62b6f
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,5127 @@
+@@ -0,0 +1,5013 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -18128,6 +18128,10 @@ index 0000000000000000000000000000000000000000..02d3693b9e7a5fb5e9da3f004f9d102a
 +	static uint64_t at[4];
 +	unsigned k;
 +
++	if (!to_firmware && __atomic_load_n(&rproc_stopping, __ATOMIC_ACQUIRE)) {
++		say("mi8rp: wlfw: keeping msa %#llx +%#x secure=%d assigned across warm stop\n", phys, size, secure);
++		return 0;
++	}
 +	for (k = 0; k < 4 && at[k] != 0 && at[k] != phys; k++) {
 +	}
 +	if (k == 4 || phys >= 0x100000000ull) {
@@ -19688,119 +19692,10 @@ index 0000000000000000000000000000000000000000..02d3693b9e7a5fb5e9da3f004f9d102a
 +	if (audio_smmu_serial) lck_mtx_unlock(&wsmmu_lock);
 +}
 +
-+#define QMI_SSCTL_SERVICE_ID            43u
-+#define QMI_SSCTL_MODEM_INSTANCE        0x12u
-+#define QMI_SSCTL_SHUTDOWN_REQ_V02      0x0021u
-+#define QMI_SSCTL_SHUTDOWN_READY_IND    0x0021u
-+#define DSP_SHUTDOWN_ACK                (1u << 4)
-+
-+static bool ssctl_resp_ok, ssctl_ind_ready;
-+
-+static void
-+ssctl_receive(__unused void *ctx, __unused uint32_t node, __unused uint32_t port, const void *data, size_t length)
-+{
-+	const uint8_t *d = data;
-+	uint16_t msg, total;
-+
-+	if (length < 7) {
-+		return;
-+	}
-+	msg = (uint16_t)(d[3] | d[4] << 8);
-+	total = (uint16_t)(d[5] | d[6] << 8);
-+	if (7u + total > length) {
-+		total = (uint16_t)(length - 7);
-+	}
-+	if (d[0] == 2 && msg == QMI_SSCTL_SHUTDOWN_REQ_V02) {
-+		uint16_t result = 0xffff, error = 0xffff;
-+		unsigned at = 7;
-+
-+		while (at + 3 <= 7u + total) {
-+			uint16_t l = (uint16_t)(d[at + 1] | d[at + 2] << 8);
-+			const uint8_t *v = d + at + 3;
-+
-+			if (at + 3 + l > 7u + total) {
-+				break;
-+			}
-+			if (d[at] == 0x02 && l >= 4) {
-+				result = (uint16_t)(v[0] | v[1] << 8);
-+				error = (uint16_t)(v[2] | v[3] << 8);
-+			}
-+			at += 3 + l;
-+		}
-+		say("mi8rp: ssctl: shutdown resp result=%u error=%u\n", result, error);
-+		if (result == 0) {
-+			__atomic_store_n(&ssctl_resp_ok, true, __ATOMIC_RELEASE);
-+		}
-+	} else if (d[0] == 4 && msg == QMI_SSCTL_SHUTDOWN_READY_IND) {
-+		say("mi8rp: ssctl: shutdown_ready indication\n");
-+		__atomic_store_n(&ssctl_ind_ready, true, __ATOMIC_RELEASE);
-+	}
-+}
-+
-+/* Linux drivers/remoteproc/qcom_sysmon.c ssctl_request_shutdown(): must run while modem_gl + modem_hs (rmtfs) are still polled. */
-+static bool __attribute__((noinline))
-+modem_ssctl_shutdown(void)
-+{
-+	static struct mi8_qrtr_server servers[64];
-+	static const uint8_t pkt[7] = { 0x00, 0x01, 0x00, 0x21, 0x00, 0x00, 0x00 };
-+	const struct redwood_qrtr_ops *ops;
-+	struct redwood_qrtr_port *port;
-+	struct smp2p words;
-+	int count, chosen = -1, rc;
-+	bool smp2p_acked = false;
-+
-+	if (modem_gl == NULL || !modem_glink_up) {
-+		return false;
-+	}
-+	count = mi8_glink_qrtr_servers(modem_gl, servers, 64);
-+	for (int i = 0; i < count; i++) {
-+		if (servers[i].service == QMI_SSCTL_SERVICE_ID) {
-+			say("mi8rp: ssctl: candidate v=%u inst=%#x at %u:%u\n",
-+			    servers[i].version, servers[i].instance, servers[i].node, servers[i].port);
-+			if (chosen < 0 || (servers[i].version == 2 && servers[i].instance == QMI_SSCTL_MODEM_INSTANCE) ||
-+			    (servers[chosen].version != 2 && servers[i].version == 2)) {
-+				chosen = i;
-+			}
-+		}
-+	}
-+	if (chosen < 0) {
-+		say("mi8rp: ssctl: service %u not found among %d servers\n", QMI_SSCTL_SERVICE_ID, count);
-+		return false;
-+	}
-+	ops = mi8_glink_qrtr_ops(modem_gl);
-+	if (ops == NULL || (port = ops->open(ssctl_receive, NULL, NULL)) == NULL) {
-+		say("mi8rp: ssctl: failed to open QRTR port\n");
-+		return false;
-+	}
-+	__atomic_store_n(&ssctl_resp_ok, false, __ATOMIC_RELEASE);
-+	__atomic_store_n(&ssctl_ind_ready, false, __ATOMIC_RELEASE);
-+	rc = ops->send(port, servers[chosen].node, servers[chosen].port, pkt, sizeof(pkt));
-+	say("mi8rp: ssctl: sent shutdown_req to %u:%u rc=%d\n", servers[chosen].node, servers[chosen].port, rc);
-+	if (rc == 0) {
-+		for (unsigned ms = 0; ms < 5000; ms += 10) {
-+			if (remote_words(&modem_remote, &words) && (dsp_state(&words) & DSP_SHUTDOWN_ACK)) {
-+				smp2p_acked = true;
-+			}
-+			if (__atomic_load_n(&ssctl_ind_ready, __ATOMIC_ACQUIRE) && smp2p_acked) {
-+				break;
-+			}
-+			delay_for_interval(10, NSEC_PER_MSEC);
-+		}
-+	}
-+	ops->close(port);
-+	{
-+		uint32_t st = remote_words(&modem_remote, &words) ? dsp_state(&words) : 0;
-+		say("mi8rp: ssctl: done resp=%d ind=%d smp2p_shutdown_ack=%d state=%#x\n",
-+		    __atomic_load_n(&ssctl_resp_ok, __ATOMIC_ACQUIRE),
-+		    __atomic_load_n(&ssctl_ind_ready, __ATOMIC_ACQUIRE), smp2p_acked, st);
-+	}
-+	return smp2p_acked;
-+}
-+
 +static void __attribute__((noinline))
 +rproc_stop_mss_and_wlan(void)
 +{
-+	bool halted = true, ssctl_acked = false, wl_done, threads_done;
++	bool halted = true, wl_done, threads_done;
 +
 +	__atomic_store_n(&rproc_stopping, true, __ATOMIC_RELEASE);
 +	wl_run = false;
@@ -19812,33 +19707,13 @@ index 0000000000000000000000000000000000000000..02d3693b9e7a5fb5e9da3f004f9d102a
 +	wl_done = !__atomic_load_n(&wl_thread_alive, __ATOMIC_ACQUIRE) &&
 +	    !__atomic_load_n(&mss_thread_alive, __ATOMIC_ACQUIRE);
 +
-+	/* Reclaim WLFW MSA while MSS and WCN3990 supplies are still up (proven safe in EXP-0203j, after ath10k mode OFF). */
 +	if (wl_done && modem_wl != NULL) {
-+		say("mi8rp: wlfw: reclaiming MSA before radio power-off\n");
-+		delay_for_interval(600, NSEC_PER_MSEC);
++		say("mi8rp: wlfw: closing WLFW client before stop\n");
 +		(void)mi8_wlfw_destroy(modem_wl);
 +		modem_wl = NULL;
 +	}
 +
 +	mi8_bt_stop();
-+
-+	if (wl_powered) {
-+		if (wl_level == 5) {
-+			uint32_t address = 0;
-+
-+			if (rail_position("rfclka2", 0, &address, false) == 0 || address != 0) {
-+				(void)rpmh_write("rfclka2", address + 4, 0);
-+			}
-+		}
-+		say("mi8rp: wlfw: switching the radio's supplies off: %s\n", wlan_power(false) ? "off" : "not all off");
-+		wl_powered = false;
-+	}
-+	rproc_stop_wsmmu();
-+
-+	/* Ask MPSS sysmon (SSCTL) for graceful shutdown while modem_svc_thread still pumps GLINK + RMTFS. */
-+	if (mss_kept.active) {
-+		ssctl_acked = modem_ssctl_shutdown();
-+	}
 +
 +	modem_svc_run = false;
 +	for (unsigned ms = 0; ms < 500 && __atomic_load_n(&modem_svc_thread_alive, __ATOMIC_ACQUIRE); ms += 10) {
@@ -19865,16 +19740,26 @@ index 0000000000000000000000000000000000000000..02d3693b9e7a5fb5e9da3f004f9d102a
 +	}
 +
 +	if (mss_kept.active) {
-+		if (!ssctl_acked) {
-+			(void)remote_ask_to_stop(&modem_remote, "the modem", 3000);
-+		}
++		(void)remote_ask_to_stop(&modem_remote, "the modem", 3000);
 +		halted = mss_halt_and_clocks_off(&mss_kept);
-+		if (halted) {
-+			if (threads_done && rmtfs_owners != (1ull << VMID_HLOS)) {
-+				say("mi8rp: mss: reclaiming rmtfs memory\n");
-+				delay_for_interval(600, NSEC_PER_MSEC);
-+				assign_mem("rmtfs", RMTFS_MEMORY, RMTFS_SIZE, &rmtfs_owners, true, false);
++		remote_clear_theirs_state(&modem_remote);
++	}
++
++	if (wl_powered) {
++		if (wl_level == 5) {
++			uint32_t address = 0;
++
++			if (rail_position("rfclka2", 0, &address, false) == 0 || address != 0) {
++				(void)rpmh_write("rfclka2", address + 4, 0);
 +			}
++		}
++		say("mi8rp: wlfw: switching the radio's supplies off: %s\n", wlan_power(false) ? "off" : "not all off");
++		wl_powered = false;
++	}
++	rproc_stop_wsmmu();
++
++	if (mss_kept.active) {
++		if (halted) {
 +			mss_finish_reclaim(&mss_kept, 7, false);
 +			say("mi8rp: mss: orderly stop complete\n");
 +		} else {
@@ -19894,6 +19779,7 @@ index 0000000000000000000000000000000000000000..02d3693b9e7a5fb5e9da3f004f9d102a
 +		return;
 +	}
 +	stopped = true;
++	pause_ms = 0;
 +	rproc_stop_audio();
 +	rproc_stop_mss_and_wlan();
 +}

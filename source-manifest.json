@@ -105,7 +105,7 @@
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "221c87440bfad5ff55854fc0d5de84041a11616891d8b034b4fb1c38a58fe0c9",
+        "sha256": "aa42fc6f9a0a5c65fe36e27e22ca12879b2617ef82096e5e0252cfa27a00ae7c",
         "mode": "0o664"
       },
       {
