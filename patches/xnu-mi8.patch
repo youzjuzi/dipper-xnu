@@ -27337,7 +27337,7 @@ index 8076cf00b4acad69bdcca7e4ce93c6a00496e81f..1228fa5f73b6c09d645d355d0540ca36
  	redwood_ufs_init();
  	redwood_net_init();
 diff --git a/bsd/dev/redwood_lx.c b/bsd/dev/redwood_lx.c
-index a6786fa59d4895e9d9988e6558f87ae40fae7d59..2235ae022dad65c6ef3c4a623bf7c8d2dea91caa 100644
+index a6786fa59d4895e9d9988e6558f87ae40fae7d59..55eab8bec00836865aa62f541a2928310e443c7e 100644
 --- a/bsd/dev/redwood_lx.c
 +++ b/bsd/dev/redwood_lx.c
 @@ -26,6 +26,7 @@
@@ -27453,6 +27453,18 @@ index a6786fa59d4895e9d9988e6558f87ae40fae7d59..2235ae022dad65c6ef3c4a623bf7c8d2
  		lck_mtx_lock(&lx_irq_lock);
  		lx_vector[vector].attached = false;
  		lck_mtx_unlock(&lx_irq_lock);
+@@ -580,3 +624,11 @@ redwood_lx_prepare(void)
+ {
+ 	return lx_prepare();
+ }
++
++void
++mi8_wifi_stop(void)
++{
++	if (mi8_lx_on) {
++		redwood_lx_stop();
++	}
++}
 diff --git a/bsd/dev/redwood_net.c b/bsd/dev/redwood_net.c
 index 27a8e038a44586e4e6562eb67bdea6fb75fe8d68..a480d2eb240ee1a61d31a988f4817fcc4f32182a 100644
 --- a/bsd/dev/redwood_net.c
@@ -27859,10 +27871,10 @@ index 9ba4ffbfef033532d8d3627f1c83f4bdf01403c4..215e4038fcc01ad7a0b77ddf0f200b04
  
 diff --git a/bsd/sys/mi8_lx.h b/bsd/sys/mi8_lx.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ab5f8a1131075ce2afd6013fc2518c71564c94d7
+index 0000000000000000000000000000000000000000..559aed46289d6482c3681fccc00b7a8761d873da
 --- /dev/null
 +++ b/bsd/sys/mi8_lx.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,31 @@
 +/*
 + * Mi 8 (WCN3990): what the ath10k object on the lx layer asks of the kernel beyond sys/redwood_lx.h
 + * (docs/tasks/TASK-006: wifi/lx/include/lx_wlfw.h is the driver's copy and must stay the same).
@@ -27892,6 +27904,7 @@ index 0000000000000000000000000000000000000000..ab5f8a1131075ce2afd6013fc2518c71
 +bool mi8_lx_fw_ready(void);
 +bool mi8_wsmmu_map(uint64_t physical, uint64_t size);                    /* identity entry for the radio (mi8rp_wsmmu=3) */
 +bool mi8_lx_irq_lines(uint32_t *first);                                 /* the GIC number of CE0's SPI, when interrupts are wanted */
++void mi8_wifi_stop(void);                                               /* orderly ath10k teardown and summary on exit */
 +#endif
 diff --git a/bsd/sys/redwood_audio.h b/bsd/sys/redwood_audio.h
 index eb549c3f27629257b5ff88e3954c64a868687413..558632e256cec058f8081f26b7adce88c32872be 100644
@@ -27962,6 +27975,51 @@ index ef79d87b9f76879ecf49ccc4035241306681caef..9b94e1d51739019c2c9c00fdfc1805f7
  void	*lx_os_alloc(unsigned long size);			/* zeroed; NULL when there is none */
  void	 lx_os_free(void *memory, unsigned long size);
  /*
+diff --git a/bsd/vfs/vfs_attrlist.c b/bsd/vfs/vfs_attrlist.c
+index 78315a2d54cf0d9fe3dd0cf95178e835bd8e9304..fbe249244b0b9ef668c2fa9c9d6a73315bff6cae 100644
+--- a/bsd/vfs/vfs_attrlist.c
++++ b/bsd/vfs/vfs_attrlist.c
+@@ -4158,6 +4158,9 @@ getattrlistbulk(proc_t p, struct getattrlistbulk_args *uap, int32_t *retval)
+ 
+ 	FV_LOCK(fvdata);
+ 
++#if CONFIG_UNION_MOUNTS
++unionread:
++#endif /* CONFIG_UNION_MOUNTS */
+ 	/*
+ 	 * getattrlistbulk(2) maintains its offset in fv_offset. However
+ 	 * if the offset in the file glob is set (or reset) to 0, the directory
+@@ -4263,6 +4266,30 @@ getattrlistbulk(proc_t p, struct getattrlistbulk_args *uap, int32_t *retval)
+ 		error = ERANGE;
+ 	}
+ 
++#if CONFIG_UNION_MOUNTS
++	/*
++	 * A union directory whose top layer has been read to its end: go on in the
++	 * directory it covers, in the same descriptor, as getdirentries(2) does.
++	 * Without this a program that lists a directory this way sees the top
++	 * layer alone. Offset 0 makes the code above start the traversal afresh.
++	 */
++	if (!count && !error && eofflag && (dvp->v_mount->mnt_flag & MNT_UNION)) {
++		vnode_t uvp;
++
++		if (lookup_traverse_union(dvp, &uvp, ctx) == 0) {
++			if (vnode_ref_ext(uvp, fp->fp_glob->fg_flag & O_EVTONLY, 0) == 0) {
++				fp_set_data(fp, uvp);
++				fp->fp_glob->fg_offset = 0;
++				vnode_rele_internal(dvp, fp->fp_glob->fg_flag & O_EVTONLY, 0, 0);
++				vnode_put(dvp);
++				dvp = uvp;
++				goto unionread;
++			}
++			vnode_put(uvp);
++		}
++	}
++#endif /* CONFIG_UNION_MOUNTS */
++
+ 	FV_UNLOCK(fvdata);
+ out:
+ 	if (dvp) {
 diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
 index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8aded362e6 100644
 --- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
@@ -31264,10 +31322,10 @@ index 63ffd4b9906f83f92e3f1ae765f5681f2654dc38..3fa60bb45cee869d7853c6dad857427b
  	if (gicd_base == 0) {
  		DTEntry entry;
 diff --git a/osfmk/arm64/loader_return.c b/osfmk/arm64/loader_return.c
-index a058bb5263934bb489894fc933ba340690f590db..9779dee1990426ea3a5a526d53dffce7c67c897b 100644
+index a058bb5263934bb489894fc933ba340690f590db..a798ba4f823a38e1dd5cc67f27693c14b671ab88 100644
 --- a/osfmk/arm64/loader_return.c
 +++ b/osfmk/arm64/loader_return.c
-@@ -45,7 +45,12 @@ extern void gic_v3_irq_cpu_shutdown(void);
+@@ -45,9 +45,15 @@ extern void gic_v3_irq_cpu_shutdown(void);
  void loader_log_putc(char c);
  void loader_return(void);
  extern void redwood_adreno_quiesce(void);
@@ -31279,8 +31337,11 @@ index a058bb5263934bb489894fc933ba340690f590db..9779dee1990426ea3a5a526d53dffce7
 +extern const char *mi8_rproc_audio_tail(unsigned *length);
  extern void redwood_adreno_minute(void);
  extern void redwood_wifi_stop(void);
++extern void mi8_wifi_stop(void);
  extern void redwood_wifi_quiesce(void);
-@@ -358,9 +363,41 @@ loader_log_append_msgbuf(void)
+ extern void redwood_adsp_stop(void);
+ extern void redwood_adsp_quiesce(void);
+@@ -358,9 +364,41 @@ loader_log_append_msgbuf(void)
  	}
  }
  
@@ -31322,7 +31383,7 @@ index a058bb5263934bb489894fc933ba340690f590db..9779dee1990426ea3a5a526d53dffce7
  #if defined(GENERIC_PSCI_SMP)
  	/*
  	 * With more than one processor: the others switch themselves off first, and the rest of
-@@ -371,6 +408,11 @@ loader_return(void)
+@@ -371,6 +409,11 @@ loader_return(void)
  #endif
  	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
  	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
@@ -31334,7 +31395,7 @@ index a058bb5263934bb489894fc933ba340690f590db..9779dee1990426ea3a5a526d53dffce7
  	redwood_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
  	redwood_adsp_quiesce();         /* nor the audio DSP */
  	redwood_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
-@@ -378,6 +420,7 @@ loader_return(void)
+@@ -378,6 +421,7 @@ loader_return(void)
  	redwood_torch_quiesce();        /* the flashlight off, if it was lit */
  	redwood_camera_quiesce();       /* the camera powered down, if it was powered up */
  	redwood_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
@@ -31342,7 +31403,7 @@ index a058bb5263934bb489894fc933ba340690f590db..9779dee1990426ea3a5a526d53dffce7
  	/*
  	 * A panic's text is first collected in the panic buffer and only later
  	 * flushed to the console; if the console itself is what failed, that
-@@ -394,7 +437,14 @@ loader_return(void)
+@@ -394,7 +438,14 @@ loader_return(void)
  			loader_log_putc(*c);
  		}
  	}
@@ -31358,6 +31419,22 @@ index a058bb5263934bb489894fc933ba340690f590db..9779dee1990426ea3a5a526d53dffce7
  }
  
  /* Bring-up aid: stop here if the loader asked for checkpoint n. */
+@@ -438,6 +489,7 @@ loader_return_timer(__unused thread_call_param_t p0, __unused thread_call_param_
+ 	if (!as_panic) {
+ 		redwood_var_save_on_return();   /* the data volume kept, while the system is still whole */
+ 		redwood_adreno_stop();          /* a GPU kept for the system is given back while there is a thread to wait in */
++		mi8_wifi_stop();                /* Mi 8 Wi-Fi driver stopped and summarized before teardown */
+ 		redwood_wifi_stop();            /* and the Wi-Fi DSP, if it runs, shut down */
+ 		redwood_adsp_stop();            /* and the audio DSP */
+ 	}
+@@ -484,6 +536,7 @@ loader_stop_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p
+ 		}
+ 		redwood_var_save_on_return();
+ 		redwood_adreno_stop();
++		mi8_wifi_stop();
+ 		redwood_wifi_stop();
+ 		redwood_adsp_stop();
+ 		loader_return();
 diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
 index 0a7de6fc4be75dc19dc7626d406a251299d22fb0..2ec713e2ede72c86d0c135ab4ae99c4d5da7b0e7 100644
 --- a/osfmk/kern/sched_prim.c

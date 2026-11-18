@@ -2,7 +2,7 @@
 
 [English](../../STATUS.md) | **简体中文**
 
-更新日期：2026-11-12。蓝牙、扬声器、电量、震动与手电改为缺省开启并完成一次设备试用；不表示重新执行全部设备测试。
+更新日期：2026-11-18。蓝牙、扬声器、电量、震动与手电已缺省开启并完成一次设备试用；新增稳定与调试改进（Wi-Fi DMA 屏障与 `rx_confused` 诊断恢复及退出汇总、标准 HID Telephony 振铃开关修复音量键“声音关闭”HUD、`/apps` 联合挂载侧载收敛及实时日志流工具 `tools/tests/device-log.py`）已通过主机构建与干净重放测试，**尚待小米 8 实机验证**。这不表示重新执行全部既有设备测试。
 
 ## 当前阶段
 
@@ -50,6 +50,8 @@ Android 布局恢复、重新划出约 24 GiB darwin、两次 Format Data 与 An
 [恢复工具](install/INSTALL.md#7-回退恢复-android-布局)及[分区工具](install/PARTITION_DARWIN.md)通过合成测试与真实 GPT 离线回放；增加保护条件后的通用生成脚本尚未单独实机执行。已验证的设备操作流程不能代替通用脚本的独立实测。
 
 ## 工具维护
+
+2026-11-18：完成稳定性与调试工具包（主机构建与干净重放通过，实机验证待补）：收敛 `/apps` 联合挂载侧载（`bsd/vfs/vfs_attrlist.c` `MNT_UNION` 遍历与 `APPS=1` 控制）、在 `Redwood buttons` 上标准上报 HID Telephony 振铃开关（`0x0b`/`0x2e` 响铃状态）以消除音量条误显静音、为 Wi-Fi `lx` 补充 `VM_WIMG_WCOMB` DMA `dsb sy` 屏障与回收槽前 512 字节清零并加入 `rx_confused` 有界诊断/恢复（可用 `wifi_no_recover=1` 关闭恢复）、周期健康日志与 `mi8_wifi_stop()` 退出汇总、修复 `build-payload.py --link-inputs` 缺失 `import os`，并新增只读实时抓日志脚本 `tools/tests/device-log.py`。
 
 2026-11-11：AFE 诊断的 TLMM 永久映射改为静态缓存，避免结束后解除映射触发内核断言。修复源码沿用已验证版本，本轮仅做主机回归、构建和打包；不新增音频输出可用性结论，见[验证记录](validation/VALIDATION.md#afe-引脚映射收尾2026-11-11)。
 

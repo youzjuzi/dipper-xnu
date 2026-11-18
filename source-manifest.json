@@ -185,7 +185,7 @@
       },
       {
         "path": "bsd/dev/redwood_lx.c",
-        "sha256": "41b02f616aba22c6257caad8206e543fb00c56fcd8ba82db27a5c49c5e399749",
+        "sha256": "daee57b7fadea0246203bda5def7a445f599077713169e33e4156636de6eb298",
         "mode": "0o664"
       },
       {
@@ -210,7 +210,7 @@
       },
       {
         "path": "bsd/sys/mi8_lx.h",
-        "sha256": "a47ea5fcd10cefb4cc1ddd08409af6058914f8a93c349cc5720423a5b5b3bc33",
+        "sha256": "71cca9cb0ae79f6b8081c9c740e01e21be298966cfaa7ae01d85b7766a43c77f",
         "mode": "0o664"
       },
       {
@@ -226,6 +226,11 @@
       {
         "path": "bsd/sys/redwood_lx.h",
         "sha256": "ea95d98a326dead7651d386e0495186fcb195ec82ff4e966e2172aaa8caee391",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/vfs/vfs_attrlist.c",
+        "sha256": "aa41cad2b67a0ca2986092906f1650e7862ee805a7dfde9ac5b388a7f25f6da5",
         "mode": "0o664"
       },
       {
@@ -270,7 +275,7 @@
       },
       {
         "path": "osfmk/arm64/loader_return.c",
-        "sha256": "f8b541132f807fa66bbab6237e4786fde5f72c89c143fa7b4b640711a3518445",
+        "sha256": "92a5fcd69ade8359314847019ffccd535977aa9b05d4faf07801d04343b54ee6",
         "mode": "0o664"
       },
       {
@@ -386,7 +391,7 @@
       },
       {
         "path": "wifi/lx/src-ath10k/lx_ath10k_bus.c",
-        "sha256": "5c41ba07216f41b345d24ae578aec20021231697c9994e30ec66a82a77358344",
+        "sha256": "e6caaec100bbf4e6f3b1d3610f2c28ac400fdf941a974ea2b4c313a973ca27df",
         "mode": "0o664"
       },
       {
@@ -401,7 +406,7 @@
       },
       {
         "path": "wifi/lx/src/lx_base.c",
-        "sha256": "7dc8c996c5e684af4435831eb553274e85294668a5651c73a6993153a1073aca",
+        "sha256": "a433f47321678e25282f15a6ceb948e347f2e6bd80a7ea16795f60c04ac2ce06",
         "mode": "0o664"
       },
       {
@@ -437,7 +442,7 @@
       },
       {
         "path": "userland/build.sh",
-        "sha256": "2289caa6a3a0f9eaab1fcb8909604f93c74199d17d94baaf2b62ed8477be73ac",
+        "sha256": "c508396d4da624450f3b097e22a6b7cf2a2133272ae51b1da3fe31925c0c2f73",
         "mode": "0o755"
       },
       {
@@ -457,12 +462,12 @@
       },
       {
         "path": "userland/src/init.c",
-        "sha256": "04b40b62dbcb7a0538e50967011473ab0685fb5a65c0895bf74f32176ff30516",
+        "sha256": "3d93751c3d2f35aeed21af79f8dc7c1f33c18562e3230447f08482f2614293be",
         "mode": "0o664"
       },
       {
         "path": "userland/src/inject.c",
-        "sha256": "2ccf00fa21017bacfc24868990cf6eaffd2ff6a23a3d65374f00be116d98b565",
+        "sha256": "378fe8ccdfbd72804109864242e099a7fa9bf969a62e6473ff8fb3a8310ccd4f",
         "mode": "0o644"
       },
       {

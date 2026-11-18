@@ -2,7 +2,7 @@
 
 **English** | [简体中文](zh-CN/docs/STATUS.md)
 
-Updated: 2026-11-12. Bluetooth, speaker audio, battery, haptics, and torch are now enabled by default and verified in an initial hardware trial; this does not imply re-running all historical device tests.
+Updated: 2026-11-18. Bluetooth, speaker audio, battery, haptics, and torch are enabled by default and verified in an initial hardware trial; recent stability and tooling fixes (Wi-Fi DMA barriers + `rx_confused` recovery/health + Mi 8 stop summary, Telephony Ring Switch mute-HUD fix, `/apps` `MNT_UNION` sideload settling, and live log streaming helper `tools/tests/device-log.py`) are host-built and tested, **awaiting Xiaomi Mi 8 device verification**. This does not imply re-running all historical device tests.
 
 ## Current Stage
 
@@ -49,6 +49,7 @@ Android layout restoration, ~24 GiB `darwin` creation, two `Format Data` cycles,
 
 ## Tool Maintenance
 
+- **2026-11-18**: Stability & tooling updates (host-built and clean-replay tested; device verification pending): settled `/apps` `MNT_UNION` sideload support (`bsd/vfs/vfs_attrlist.c`, `userland/build.sh` with `APPS=1`, `userland/src/init.c`), reported standard HID Telephony Ring Switch (`0x0b`/`0x2e`, unmuted) on `Redwood buttons` (`userland/src/inject.c`) to fix muted volume HUD reporting, added `dsb sy` DMA barriers + 512-byte recycled slot zeroing + bounded `rx_confused` recovery (`wifi_no_recover=1` to disable) + active health lines + `mi8_wifi_stop()` teardown summary (`wifi/lx/`, `bsd/dev/redwood_lx.c`, `osfmk/arm64/loader_return.c`), fixed missing `import os` in `build-payload.py --link-inputs`, and added read-only `tools/tests/device-log.py`.
 - **2026-11-11**: Cached permanent TLMM mappings statically in AFE diagnostics to avoid `ml_io_unmap` assertions ([AFE Cleanup](validation/VALIDATION.md#afe-pin-mapping-cleanup)).
 - **2026-11-05**: Fixed `patchtool.py` nested-component unowned reporting bug (33/33 host tests).
 - **2026-10-31**: Categorized tools under `prepare/`, `build/`, `partition/`, and `tests/` ([Tools Index](../tools/README.md)).

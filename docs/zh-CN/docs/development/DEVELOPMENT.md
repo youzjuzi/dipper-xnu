@@ -130,12 +130,10 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 ### 当前开发现场交接（2026-11-18，接手时重新核对）
 
-- 主线状态：`main` 已合入扬声器音频与缺省外设（bt=7、audio=5 常驻、battery=1、torch=3、haptic=3）；当前分支 `feat/sideload-apps`（与 `main`、`fix/wifi-stall` 同基线，后续工作树具工具增强提交将同步对齐）。
-- `work/` 源码与未导出修改：`xnuloader/loader.c` 仅含本机配置差异（经占位归一化后与清单一致）。另有 **4 处未导出实验修改**（已于 `local/backups/20261118-sideload-work-01/` 完整留存快照与差异补丁）：
-  - `xnu-mi8`（未登记清单）：`bsd/vfs/vfs_attrlist.c`（`UIO_SIZEOF` 栈缓冲对齐）。
-  - `hackios-userland`（清单内差异）：`userland/build.sh`、`userland/src/init.c`、`userland/src/inject_sb.c`（用于启动卷 `/apps` 联合挂载、`RedwoodMetal.bundle` 绑定与 SpringBoard Metal 隔离，配合 `work/hackios/apps/Via.app` 与 `apps-off/bili-overseas.app` 测试）。
-- 构建与验证现场：标准内核增量 `BUILD` 目录已预热对齐（`tools/build/build-kernel.sh`）；干净重放与全套主机回归（含 ASan/UBSan）通过，可复现树自动清理不占位。设备端 P28（`work/runs/20261112-audio-default-01/`）无参数试用正常。
-- 未决与下一步：若切换去排查 Wi-Fi 接收停滞（`fix/wifi-stall`，TCP SYN_SENT / `ath10k rx_confused`）或其他任务，先决定上述 4 处未导出改动是导出合入还是按备份还原，切勿混入无关分支提交；其余未决项仍含音量键 HUD“声音关闭”、Safari 视频发绿及常驻音质/功耗长测。
+- 主线与分支状态：`main` 已合入扬声器音频与缺省外设（`bt=7`、`audio=5` 常驻、`battery=1`、`torch=3`、`haptic=3`）、工具链入口（`status.py`、`build-kernel.sh`、`run-tests.py`）与双语文档架构。当前分支 `feat/route1-stability`（自 `2854c1e` 拉出）已收敛 `/apps` 联合挂载侧载，完成音量键标准 HID Telephony 振铃开关修复、Wi-Fi DMA `dsb sy` 屏障 + 回收槽头部清零 + `rx_confused` 有界诊断恢复与退出汇总、实时日志脚本 `tools/tests/device-log.py` 及 `build-payload.py --link-inputs` 修复。
+- `work/` 源码状态：`xnuloader/loader.c` 仅含本机配置差异（经占位归一化后与 `source-manifest.json` 一致）；**`work/` 现已实现 0 清单差异、0 清单外改动**（`bsd/vfs/vfs_attrlist.c` 的 `MNT_UNION` `getattrlistbulk` 目录穿透修复已纳入 `xnu-mi8` 跟踪）。实验性 `inject_sb.c` Metal 清除与 `init.c` `RedwoodMetal.bundle` 绑定已按干净基线剥离（快照留存于 `local/backups/20261118-sideload-work-01/`）。
+- 构建与验证现场：已重编 `ath10k.o`、XNU 内核、用户态镜像，并在 `work/runs/20261118-route1a-01/candidate/` 生成就绪候选载荷（`--wifi --seconds 1080 --link-inputs`）。干净重放（`--clean-replay`）、全套主机回归（`--suite all --sanitize`）与仓库检查通过；**`20261118-route1a-01` 候选包尚待小米 8 实机验证**（含音量 HUD 静音指示、Wi-Fi 在 `device-log.py watch`/`stop` 下的稳定性与 `Via.app` `/apps` 侧载）。
+- 下一步：在小米 8 上 RAM 启动 `work/runs/20261118-route1a-01/candidate/` 并配合 `device-log.py` 取回全量日志；实机确认后按规划推进常驻 `audio=5` 退出关停钩子、GPU SMMU / 基带跨轮退出恢复，以及底层零拷贝显示、麦克风 `SLIMbus/WCD9340`、移动数据（`QMI + IPA`）或真 Metal 适配 Adreno 630 等后续路线。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 

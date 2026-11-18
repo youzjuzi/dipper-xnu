@@ -4,6 +4,15 @@
 
 Tracks changes affecting usage and builds. See [Reproduction Report](docs/validation/REPRODUCTION.md) for detailed bring-up records and [Feature Status](docs/STATUS.md) for current boundaries.
 
+## 2026-11-18
+
+*(Host-verified via incremental builds, clean patch replay, privacy scan, and host regression suites; Xiaomi Mi 8 device verification pending.)*
+
+- **Wi-Fi DMA hardening, `rx_confused` recovery, and Mi 8 stop summary**: Added `dsb sy` barriers in `lkpi_dma_map_phys` / `lkpi_dma_unmap` / `linuxkpi_dma_sync` and 512-byte head zeroing of recycled RX pool slots in `wifi/lx/src/lx_base.c`; added bounded `rx_confused` diagnostics + timer-assisted refill recovery (disable via boot-arg `wifi_no_recover=1`), 30 s active-change health telemetry, race-safe start/stop ordering, and `lx_station_say()` / `lx_memory_say()` stop summaries in `wifi/lx/src-ath10k/lx_ath10k_bus.c`; wired `mi8_wifi_stop()` (`bsd/dev/redwood_lx.c`) into `osfmk/arm64/loader_return.c` for `loader_return_after` and `oem stop`.
+- **Standard HID ringer switch for Volume HUD**: Declared Telephony Ring Switch (`0x0b` / `0x2e`) on `Redwood buttons` (`userland/src/inject.c`) with `.copyEvent` and initial `down=true` dispatch so `backboardd` leaves silent mode without SpringBoard hooks or private offsets.
+- **Sideload union mount settled**: Exported `bsd/vfs/vfs_attrlist.c` (`getattrlistbulk` `MNT_UNION` fall-through traversal), `userland/build.sh` (`APPS=1` default for boot-volume `/apps`), and clean `/apps` union mount in `userland/src/init.c` while dropping experimental SpringBoard Metal hacks.
+- **Live device log helper and packager fix**: Added read-only `tools/tests/device-log.py` (`snapshot`, `watch`, `stop`) with offline tests in `tools/tests/test-workflow-tools.py`, and fixed missing `import os` in `tools/build/build-payload.py --link-inputs`.
+
 ## 2026-11-12
 
 - **Internal speaker audio working and enabled by default**: iOS ringtones, keyboard clicks, and media audio play through the Qualcomm ADSP and TI `TAS2557` speaker amp; Bluetooth, battery gauge, haptics, and torch are also enabled by default without extra boot flags. Verified in an initial hardware trial; acoustic tuning, power draw, and extended runtime remain to be tested. Chronological details follow below.

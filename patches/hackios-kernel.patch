@@ -460,15 +460,16 @@ index 0000000000000000000000000000000000000000..cb48668ee1eca942b72bff755ba4e30a
 +#endif
 diff --git a/wifi/lx/src-ath10k/lx_ath10k_bus.c b/wifi/lx/src-ath10k/lx_ath10k_bus.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c02b66a1ae
+index 0000000000000000000000000000000000000000..5b9719d505bef6023b624aabd82ff1040a5caf6c
 --- /dev/null
 +++ b/wifi/lx/src-ath10k/lx_ath10k_bus.c
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,532 @@
 +#include <linux/platform_device.h>
 +#include <linux/of.h>
 +#include <linux/of_reserved_mem.h>
 +#include <linux/clk.h>
 +#include <linux/regulator/consumer.h>
++#include <linux/timer.h>
 +#include "core.h"
 +#include "snoc.h"
 +#include "debug.h"
@@ -477,12 +478,13 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +
 +void lx_ath10k_qmi_arm(struct ath10k *);
 +void lx_ath10k_qmi_cancel(struct ath10k *);
++uint32_t lx_pool_free_slots(void);
 +
 +static struct {
 +	struct platform_device pdev;
 +	struct platform_driver *drv;
 +	struct mutex service;
-+	bool initialized, up, mission, fallback, worker, run;
++	bool initialized, up, starting, stopping, stop_requested, mission, fallback, worker, run;
 +	struct napi_struct *napi;
 +	bool napi_enabled, pending;
 +	struct {
@@ -491,6 +493,10 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +		unsigned vector;
 +		bool attached, enabled;
 +	} irq[12];
++	uint64_t irq_dispatches, napi_polls, napi_exhausted, prev_polls;
++	uint32_t prev_pending_tx, prev_confused;
++	unsigned confused_seen, confused_recovered, health_lines;
++	unsigned long long last_health_ns;
 +} bus;
 +
 +/* sdm845.dtsi wifi@18800000; vector n is wired to SPI 414+n by the kernel. */
@@ -581,8 +587,10 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +{
 +	unsigned v = *(unsigned *)arg;
 +	mutex_lock(&bus.service);
-+	if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE) && __atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].fn)
++	if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE) && __atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].fn) {
++		bus.irq_dispatches++;
 +		bus.irq[v].fn(v, bus.irq[v].arg);
++	}
 +	if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE) && __atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].attached)
 +		lx_os_irq_enable(v);
 +	mutex_unlock(&bus.service);
@@ -650,6 +658,70 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +		}
 +}
 +
++static void bus_rx_health(struct ath10k *ar)
++{
++	bool confused, need_refill = false, recovered = false, changed;
++	int fill_cnt, fill_level, mpdus, pending_tx;
++	uint32_t sw_rd, fw_idx, free_slots, tx_cur;
++	unsigned long long now;
++
++	if (ar == NULL || !test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags))
++		return;
++
++	spin_lock_bh(&ar->htt.rx_ring.lock);
++	confused = ar->htt.rx_confused;
++	fill_cnt = ar->htt.rx_ring.fill_cnt;
++	fill_level = ar->htt.rx_ring.fill_level;
++	sw_rd = ar->htt.rx_ring.sw_rd_idx.msdu_payld;
++	fw_idx = ar->htt.rx_ring.alloc_idx.vaddr != NULL ?
++	    __le32_to_cpu(*ar->htt.rx_ring.alloc_idx.vaddr) : 0;
++	if (confused) {
++		bus.confused_seen++;
++		if (lx_os_option("wifi_no_recover") == 0) {
++			ar->htt.rx_confused = false;
++			recovered = true;
++			bus.confused_recovered++;
++			need_refill = fill_cnt < fill_level;
++		}
++	}
++	spin_unlock_bh(&ar->htt.rx_ring.lock);
++
++	if (need_refill)
++		mod_timer(&ar->htt.rx_ring.refill_retry_timer, jiffies);
++
++	free_slots = lx_pool_free_slots();
++	mpdus = atomic_read(&ar->htt.num_mpdus_ready);
++	pending_tx = ar->htt.num_pending_tx;
++	if (confused && bus.confused_seen <= 16) {
++		lx_tell("lx-ath10k: rx_confused#%u fill=%d/%d sw_rd=%u fw_idx=%u mpdus=%d free_slots=%u irqs=%llu polls=%llu recover=%u\n",
++		    bus.confused_seen, fill_cnt, fill_level, sw_rd, (unsigned)fw_idx, mpdus, (unsigned)free_slots,
++		    (unsigned long long)bus.irq_dispatches, (unsigned long long)bus.napi_polls,
++		    recovered ? 1u : 0u);
++	}
++
++	now = lx_os_nanoseconds();
++	if (bus.last_health_ns == 0) {
++		bus.last_health_ns = now;
++		return;
++	}
++	if (now - bus.last_health_ns < 30000000000ull || bus.health_lines >= 60)
++		return;
++	bus.last_health_ns = now;
++	tx_cur = pending_tx < 0 ? 0u : (uint32_t)pending_tx;
++	changed = bus.napi_polls != bus.prev_polls ||
++	    tx_cur != bus.prev_pending_tx ||
++	    bus.confused_seen != bus.prev_confused;
++	if (!changed)
++		return;
++	bus.prev_polls = bus.napi_polls;
++	bus.prev_pending_tx = tx_cur;
++	bus.prev_confused = bus.confused_seen;
++	bus.health_lines++;
++	lx_tell("lx-ath10k: health fill=%d/%d sw_rd=%u fw_idx=%u mpdus=%d ptx=%d free_slots=%u irqs=%llu polls=%llu rec=%u\n",
++	    fill_cnt, fill_level, sw_rd, (unsigned)fw_idx, mpdus, pending_tx, (unsigned)free_slots,
++	    (unsigned long long)bus.irq_dispatches, (unsigned long long)bus.napi_polls, bus.confused_recovered);
++}
++
 +static void rings(void *unused)
 +{
 +	for (;;) {
@@ -661,17 +733,25 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +		if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE)) {
 +			if (bus.fallback)
 +				for (unsigned v = 0; v < 12; v++)
-+					if (__atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].fn)
++					if (__atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].fn) {
++						bus.irq_dispatches++;
 +						bus.irq[v].fn(v, bus.irq[v].arg);
++					}
 +			lx_os_lock();
 +			bool poll = bus.napi_enabled && bus.pending;
 +			bus.pending = false;
 +			lx_os_unlock();
-+			if (poll && bus.napi && bus.napi->poll(bus.napi, 64) >= 64) {
-+				lx_os_lock();
-+				bus.pending = true;
-+				lx_os_unlock();
++			if (poll && bus.napi) {
++				int done = bus.napi->poll(bus.napi, 64);
++				bus.napi_polls++;
++				if (done >= 64) {
++					bus.napi_exhausted++;
++					lx_os_lock();
++					bus.pending = true;
++					lx_os_unlock();
++				}
 +			}
++			bus_rx_health(platform_get_drvdata(&bus.pdev));
 +		}
 +		mutex_unlock(&bus.service);
 +		lx_pause_ms(1);
@@ -775,12 +855,31 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +int lx_prepare(void) { return lx_base_init() || lx_pool_init() ? ENOMEM : 0; }
 +void lx_stop(void)
 +{
-+	if (!bus.initialized) return;
++	unsigned waited = 0;
++
++	__atomic_store_n(&bus.stop_requested, true, __ATOMIC_RELEASE);
++	while (waited < 15000) {
++		lx_os_lock();
++		bool starting = bus.starting;
++		lx_os_unlock();
++		if (!starting)
++			break;
++		lx_pause_ms(10);
++		waited += 10;
++	}
 +	lx_os_lock();
-+	bool active = bus.up || bus.worker;
++	bool active = bus.initialized && !bus.stopping && (bus.up || bus.worker);
++	if (active)
++		bus.stopping = true;
 +	lx_os_unlock();
 +	if (!active) return;
++
 +	if (bus.up) {
++		lx_station_say();
++		lx_memory_say();
++		lx_tell("lx-ath10k: stop summary irqs=%llu polls=%llu exhausted=%llu rx_confused=%u recovered=%u\n",
++		    (unsigned long long)bus.irq_dispatches, (unsigned long long)bus.napi_polls,
++		    (unsigned long long)bus.napi_exhausted, bus.confused_seen, bus.confused_recovered);
 +		lx_station_withdraw();
 +		lx_station_leave();
 +		lx_ath10k_platform_stop();
@@ -792,41 +891,70 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +		lx_pause_ms(1);
 +	}
 +	lx_os_irq_detach_all();
++	lx_os_lock();
++	bus.stopping = false;
++	bus.stop_requested = false;
++	lx_os_unlock();
 +}
 +int lx_start(void)
 +{
 +	int ret;
-+	if (bus.up) return EBUSY;
-+	if ((ret = lx_prepare())) return ret;
++
++	lx_os_lock();
++	if (bus.up || bus.starting || bus.stopping) {
++		lx_os_unlock();
++		return EBUSY;
++	}
++	bus.starting = true;
++	bus.stop_requested = false;
++	lx_os_unlock();
++
++	if ((ret = lx_prepare())) goto out_not_up;
 +	if (lx_os_option("wifi_lx") < 2) {
 +		lx_tell("lx-ath10k: FAIL snoc requires wifi_lx=2\n");
-+		return EINVAL;
++		ret = EINVAL;
++		goto out_not_up;
 +	}
 +	if (!bus.initialized) { mutex_init(&bus.service); bus.initialized = true; }
 +	memset(bus.irq, 0, sizeof(bus.irq));
 +	bus.fallback = false; bus.mission = false; bus.pending = false;
++	bus.irq_dispatches = bus.napi_polls = bus.napi_exhausted = bus.prev_polls = 0;
++	bus.prev_pending_tx = bus.prev_confused = 0;
++	bus.confused_seen = bus.confused_recovered = bus.health_lines = 0;
++	bus.last_health_ns = 0;
 +	bus.run = bus.worker = true;
 +	ret = lx_os_thread("ath10k-rings", rings, NULL);
-+	if (ret) { bus.worker = bus.run = false; return ret; }
++	if (ret) { bus.worker = bus.run = false; goto out_not_up; }
 +	ath10k_debug_mask = lx_os_option("wifi_quiet") ? 0 : ATH10K_DBG_BOOT | ATH10K_DBG_QMI | ATH10K_DBG_SNOC;
 +	ret = lx_ath10k_platform_start();
-+	if (ret) { lx_tell("lx-ath10k: FAIL probe %d\n", ret); lx_stop(); return -ret; }
++	if (ret) { lx_tell("lx-ath10k: FAIL probe %d\n", ret); ret = -ret; goto fail; }
 +	struct ath10k *ar = platform_get_drvdata(&bus.pdev);
 +	unsigned long long began = lx_os_nanoseconds();
-+	while (!test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags) && lx_os_nanoseconds() - began < 60000000000ull)
++	while (!__atomic_load_n(&bus.stop_requested, __ATOMIC_ACQUIRE) &&
++	    !test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags) &&
++	    lx_os_nanoseconds() - began < 60000000000ull)
 +		lx_pause_ms(10);
++	if (__atomic_load_n(&bus.stop_requested, __ATOMIC_ACQUIRE)) { ret = EINTR; goto fail; }
 +	if (!test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags)) { ret = ETIMEDOUT; goto fail; }
 +	if (lx_os_option("wifi_station")) ret = lx_station_offer();
 +	else if (lx_os_option("wifi_join")) ret = lx_station_join();
 +	else {
 +		ret = lx_os_option("wifi_scan") ? lx_station_scan() : 0;
++		lx_os_lock(); bus.starting = false; lx_os_unlock();
 +		lx_stop();
 +		return ret;
 +	}
-+	if (!ret) return 0;
++	if (!ret) {
++		lx_os_lock(); bus.starting = false; lx_os_unlock();
++		return 0;
++	}
 +fail:
 +	lx_tell("lx-ath10k: FAIL start %d\n", ret);
++	lx_os_lock(); bus.starting = false; lx_os_unlock();
 +	lx_stop();
++	return ret;
++out_not_up:
++	lx_os_lock(); bus.starting = false; lx_os_unlock();
 +	return ret;
 +}
 +int lx_transmit(const unsigned char *frame, unsigned long size) { return bus.up ? lx_station_send(frame, size) : ENETDOWN; }
@@ -1102,7 +1230,7 @@ index 0000000000000000000000000000000000000000..eefefc0fb1ae86b8551d4adc096fabf2
 +}
 +#endif
 diff --git a/wifi/lx/src/lx_base.c b/wifi/lx/src/lx_base.c
-index df4daeea097697f1ceb0957f48128fc5abdc49c9..01af3111fafa6c4a6fffda724286707c6f184171 100644
+index df4daeea097697f1ceb0957f48128fc5abdc49c9..924b62669fbb7550971e80fca487a5b008bd7972 100644
 --- a/wifi/lx/src/lx_base.c
 +++ b/wifi/lx/src/lx_base.c
 @@ -755,7 +755,7 @@ iounmap(void *address)
@@ -1114,6 +1242,56 @@ index df4daeea097697f1ceb0957f48128fc5abdc49c9..01af3111fafa6c4a6fffda724286707c
  #define POOL_RINGS	(12u << 20)		/* (the data path's rings and link descriptors come to about 6 MB) */
  #define POOL_SLOT	4096u
  #define POOL_SLOTS	((POOL_SIZE - POOL_RINGS) / POOL_SLOT)
+@@ -852,17 +852,22 @@ lkpi_dma_map_phys(struct device *dev, vm_paddr_t address, size_t length, enum dm
+ 		printf("lx: memory is given to the radio that it cannot reach (%zu bytes)\n", length);
+ 		return (DMA_MAPPING_ERROR);
+ 	}
++	/* Order CPU writes to VM_WIMG_WCOMB pool memory before descriptor/doorbell publication. */
++	__asm__ volatile ("dsb sy" ::: "memory");
+ 	return (address);
+ }
+ 
+ void
+ lkpi_dma_unmap(struct device *dev, dma_addr_t address, size_t length, enum dma_data_direction direction, unsigned long attributes)
+ {
++	/* Order device DMA writes to VM_WIMG_WCOMB pool memory before CPU reads. */
++	__asm__ volatile ("dsb sy" ::: "memory");
+ }
+ 
+ void
+ linuxkpi_dma_sync(struct device *dev, dma_addr_t address, size_t length, bus_dmasync_op_t op)
+ {
++	__asm__ volatile ("dsb sy" ::: "memory");
+ }
+ 
+ /* ---- socket buffers --------------------------------------------------------------------------- */
+@@ -899,6 +904,8 @@ linuxkpi_dev_alloc_skb(size_t size, gfp_t gfp)
+ 	skb->shinfo = (struct skb_shared_info *)((uint8_t *)skb + roundup2(sizeof(struct sk_buff), 64));
+ 	skb->truesize = size + NET_SKB_PAD;
+ 	skb->head = skb->data = pool.memory + POOL_RINGS + (size_t)slot * POOL_SLOT;
++	/* Recycled slots may hold stale RX descriptors (e.g. LAST_MSDU) from prior use. */
++	bzero(skb->head, 512 < POOL_SLOT ? 512 : POOL_SLOT);
+ 	skb_reset_tail_pointer(skb);
+ 	skb->end = skb->head + size + NET_SKB_PAD;
+ 	skb_reserve(skb, NET_SKB_PAD);
+@@ -1222,6 +1229,17 @@ lx_memory_say(void)
+ 	    allocations, allocated >> 10, POOL_SIZE >> 20, pool.rings_used >> 10, POOL_SLOTS - pool.free_count, POOL_SLOTS);
+ }
+ 
++uint32_t
++lx_pool_free_slots(void)
++{
++	uint32_t count;
++
++	lx_os_lock();
++	count = pool.free_count;
++	lx_os_unlock();
++	return (count);
++}
++
+ int
+ lx_base_init(void)
+ {
 diff --git a/xnu-build.sh b/xnu-build.sh
 index 8f851bbb22e20eea041bcd34d4cd3c297b87f2d4..9d1337f6e346764939c3e678305fd87aba13b30a 100755
 --- a/xnu-build.sh

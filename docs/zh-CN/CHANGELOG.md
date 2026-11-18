@@ -4,6 +4,15 @@
 
 记录影响使用和构建的变化。详细测试过程见 [复现记录](docs/validation/REPRODUCTION.md)，当前支持范围见 [功能状态](docs/STATUS.md)。
 
+## 2026-11-18
+
+*（本节各项均已在主机完成增量构建、干净补丁重放、隐私扫描与回归测试；**小米 8 实机验证尚待进行**。）*
+
+- **Wi-Fi DMA 屏障、`rx_confused` 恢复与退出汇总**：在 `wifi/lx/src/lx_base.c` 的 `lkpi_dma_map_phys` / `lkpi_dma_unmap` / `linuxkpi_dma_sync` 中加入 `dsb sy` 内存屏障，并在 `linuxkpi_dev_alloc_skb` 回收池槽时对前 512 字节清零；在 `wifi/lx/src-ath10k/lx_ath10k_bus.c` 加入有界 `rx_confused` 现场诊断与基于重补定时器的自动恢复（可通过 `wifi_no_recover=1` 关闭）、30 秒活跃健康日志、无竞态起停同步与 `lx_stop()` 统计汇总；在 `bsd/dev/redwood_lx.c` 与 `osfmk/arm64/loader_return.c` 接入 `mi8_wifi_stop()`，使限时退出与 `oem stop` 都能有序停网并输出收发/内存摘要。
+- **音量键“声音关闭”HUD 修复**：在 `userland/src/inject.c` 的 `Redwood buttons` 虚拟 HID 服务增加标准 Telephony Ring Switch（`0x0b` / `0x2e`）能力声明、`.copyEvent` 回调以及开启后主动派发一次 `down=true` 事件，从输入源消除静音误报且零 `SpringBoard` hook。
+- **用户应用联合挂载侧载收敛**：导出 `bsd/vfs/vfs_attrlist.c`（`getattrlistbulk` 支持 `MNT_UNION` 穿透底层目录）、`userland/build.sh`（默认 `APPS=1` 收纳 `../apps/*.app`）与 `userland/src/init.c`（干净保留 `/apps` 联合挂载），剥离实验性 SpringBoard Metal 隔离测试补丁。
+- **实时日志流脚本与打包修复**：新增只读 `tools/tests/device-log.py`（`snapshot` / `watch` / `stop`）及对应离线回归用例（`tools/tests/test-workflow-tools.py`），并修复 `tools/build/build-payload.py --link-inputs` 缺失 `import os`。
+
 ## 2026-11-12
 
 - **扬声器有声音了，且缺省开启**：iOS 的铃声、键盘音、视频等声音经音频 DSP 和 TAS2557 功放从扬声器播放；蓝牙、电量、震动与手电也改为缺省开启，载荷无需额外参数。一次设备试用全部正常；音质未调校，功耗与长时间运行未验收。下文按时间记录各步骤。

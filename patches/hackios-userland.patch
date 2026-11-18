@@ -101,7 +101,7 @@ index 4f0aa3944cc2b3fd647e6693f6fb605455e01333..027a28f9e83bcd08baf302f0d292d858
  	install_name_tool -id /redwood/lib/libredwoodair.dylib out/libredwoodair.dylib
  	echo "mk-mesa.sh: $B/out/libredwoodair.dylib ($(stat -c %s out/libredwoodair.dylib) bytes," \
 diff --git a/userland/build.sh b/userland/build.sh
-index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383399ca8f1 100755
+index 582866f82497f32c86226f6a095e0a8e0c9dc791..99afab1c299ece90971184230be39261a051da73 100755
 --- a/userland/build.sh
 +++ b/userland/build.sh
 @@ -17,6 +17,10 @@
@@ -266,7 +266,27 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  	# the package manager's prefix, when tools/mk-jb.sh has fetched one: /jb of the boot volume, which is
  	# /private/preboot/jb once the iOS volume is the root -- the volume where a rootless jailbreak keeps its
  	# Procursus on an iPhone as well; init grafts it onto /var/jb (src/init.c, mount_writable)
-@@ -708,7 +757,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+@@ -688,6 +737,19 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+ 		done
+ 		echo "  the package manager's prefix: $(du -sh flashboot/jb | cut -f1) as /jb of the boot volume"
+ 	fi
++	# Applications from outside this tree: every .app in ../apps goes into /apps of the boot volume, which init lays
++	# over the iOS volume's /Applications as a union (src/init.c, flash_root). The iOS volume is Apple's and is
++	# not written to. The boot volume is the resident RAM disk (fastboot oem ramdisk; up to the loader's memory
++	# window, not the payload's 64 MB), so what goes here costs RAM at every boot, hundreds of MB for a large one.
++	# cp -aL for the reason given at the system image below (a bundle of links is refused).
++	if [ "${APPS-1}" != 0 ] && [ -n "$SKIP_SYSTEM" ]; then
++		for app in ../apps/*.app; do
++			[ -d "$app" ] || continue
++			mkdir -p flashboot/apps
++			cp -aL "$app" flashboot/apps/
++			echo "  ${app##*/} in the boot volume's /apps ($(du -sm "$app" | cut -f1) MB from ../apps)"
++		done
++	fi
+ 	python3 ../tools/apfs/mkapfs.py -z --plain fw -o flashboot.boot.apfs Boot=flashboot | tail -1
+ 	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh flashboot.boot.apfs Boot=flashboot
+ 	# the third container: Apple's App cryptex as it is (10 MB; fetch.sh), for the boot volume's Cryptexes/App
+@@ -708,7 +770,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
  fi
  
  # --- the system image -----------------------------------------------------------------------------
@@ -1887,7 +1907,7 @@ index b7c280c147faeb151dc731626cbc2b32d178f781..272c24a16c98f227c9cdbfa48de3a497
 +	return good;
 +}
 diff --git a/userland/src/init.c b/userland/src/init.c
-index f21bca0250ffc17f3aabf6a66462a8b6c3db6121..a9b8c2e4018d4a1b058b656d24ea097980e20468 100644
+index f21bca0250ffc17f3aabf6a66462a8b6c3db6121..d85fb0d012b13c7d3109628b73a89b904202e95b 100644
 --- a/userland/src/init.c
 +++ b/userland/src/init.c
 @@ -202,6 +202,15 @@ flash_root(const char *dev)
@@ -1906,8 +1926,30 @@ index f21bca0250ffc17f3aabf6a66462a8b6c3db6121..a9b8c2e4018d4a1b058b656d24ea0979
  	if (stat("/jb-bin", &fw_st) == 0) {
  		/*
  		 * The package manager's prefix is in the boot volume (/jb), and Sileo runs mv, cp, rm, mkdir
+@@ -246,6 +255,21 @@ flash_root(const char *dev)
+ 	printf("  %d applications waiting to be installed, %d of them in /Applications\n", apps, bound);
+ 	check(apps > 0 && bound == apps, "the first boot's applications in /Applications");
+ 
++	if (stat("/apps", &fw_st) == 0) {
++		/*
++		 * Applications from outside, carried in the boot volume (userland/build.sh, ../apps): a union
++		 * mount of them over the volume's /Applications, after the aliases above -- a synthetic entry
++		 * needs its parent to be the volume's own directory. What the volume has stays visible through
++		 * it: lookup falls through to the covered directory, and getdirentries and getattrlistbulk
++		 * go on into it when the top layer is read to its end.
++		 */
++		ok = mount("bindfs", "/flash/Applications", MNT_RDONLY | MNT_UNION, (void *)"/apps") == 0;
++		if (!ok) {
++			printf("  bindfs /apps on /flash/Applications, union: %s\n", strerror(errno));
++		}
++		check(ok, "the boot volume's applications over the volume's /Applications, as a union");
++	}
++
+ 	ok = sysctlbyname("kern.redwood_switch_root", NULL, NULL, "/flash private/preboot", 22) == 0;
+ 	if (!ok) {
+ 		printf("  switching the root: %s\n", strerror(errno));
 diff --git a/userland/src/inject.c b/userland/src/inject.c
-index c5e9d9020cc05b698313e88984117c43df8d141e..37eaa73f23525deb7653ce944ad5585aec6ec32b 100644
+index c5e9d9020cc05b698313e88984117c43df8d141e..76ebd84c2f5e7db7142633b832b55cceab11cc3b 100644
 --- a/userland/src/inject.c
 +++ b/userland/src/inject.c
 @@ -30,6 +30,7 @@
@@ -2008,7 +2050,109 @@ index c5e9d9020cc05b698313e88984117c43df8d141e..37eaa73f23525deb7653ce944ad5585a
  /* ---- backboardd: the touch screen and the buttons ---------------------------------------------- */
  
  /* IOKit's HID event system, the part that has no public header on iOS (prototypes checked against 20F66) */
-@@ -1252,6 +1336,7 @@ redwood_init(void)
+@@ -739,6 +823,7 @@ extern IOHIDEventRef IOHIDEventCreateKeyboardEvent(CFAllocatorRef allocator, uin
+     Boolean down, uint32_t options);
+ extern void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, uint32_t options);
+ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, CFIndex value);
++extern CFIndex IOHIDEventGetIntegerValue(IOHIDEventRef event, uint32_t field);
+ 
+ #define HID_CLIENT_SIMPLE               4       /* a client that only sends */
+ #define HID_CLIENT_RATE_CONTROLLED      3       /* what IOHIDEventSystemClientCreate() makes */
+@@ -750,6 +835,11 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, CFInd
+ #define HID_USAGE_MENU                  0x40    /* the home button */
+ #define HID_USAGE_VOLUME_UP             0xe9
+ #define HID_USAGE_VOLUME_DOWN           0xea
++#define HID_PAGE_TELEPHONY              0x0b
++#define HID_USAGE_TFON_RING             0x2e    /* the ringer / silent switch (1 = ring, 0 = silent) */
++#define HID_EVENT_TYPE_KEYBOARD         3
++#define FIELD_KEYBOARD_USAGE_PAGE       0x30000
++#define FIELD_KEYBOARD_USAGE            0x30001
+ #define DIGITIZER_HAND                  3       /* kIOHIDDigitizerTransducerTypeHand */
+ #define DIGITIZER_RANGE                 0x1     /* event mask: what has changed */
+ #define DIGITIZER_TOUCH                 0x2
+@@ -785,6 +875,7 @@ number(int value)
+ /* A service of ours (the callbacks' refcon): what it says of itself, and whether the event server has taken it. */
+ struct service {
+ 	CFMutableDictionaryRef properties;
++	bool has_ringer;
+ 	volatile bool opened;
+ };
+ 
+@@ -864,9 +955,31 @@ service_notification(__unused void *target, __unused void *refcon, __unused IOHI
+ {
+ }
+ 
++static IOHIDEventRef
++service_copy_event(__unused void *target, void *refcon, __unused IOHIDServiceClientRef service, uint32_t type,
++    IOHIDEventRef matching, __unused uint32_t options)
++{
++	const struct service *s = refcon;
++	IOHIDEventRef event;
++
++	if (s == NULL || !s->has_ringer || type != HID_EVENT_TYPE_KEYBOARD) {
++		return NULL;
++	}
++	if (matching != NULL &&
++	    (IOHIDEventGetIntegerValue(matching, FIELD_KEYBOARD_USAGE_PAGE) != HID_PAGE_TELEPHONY ||
++	     IOHIDEventGetIntegerValue(matching, FIELD_KEYBOARD_USAGE) != HID_USAGE_TFON_RING)) {
++		return NULL;
++	}
++	event = IOHIDEventCreateKeyboardEvent(NULL, mach_absolute_time(), HID_PAGE_TELEPHONY, HID_USAGE_TFON_RING, true, 0);
++	if (event != NULL) {
++		IOHIDEventSetIntegerValue(event, FIELD_IS_BUILT_IN, 1);
++	}
++	return event;
++}
++
+ static const struct virtual_service_callbacks service_callbacks = {
+ 	.version = 2, .notification = service_notification, .setProperty = service_set_property,
+-	.copyProperty = service_copy_property,
++	.copyProperty = service_copy_property, .copyEvent = service_copy_event,
+ };
+ 
+ /*
+@@ -895,7 +1008,22 @@ make_service(IOHIDEventSystemClientRef client, const char *product, int page, in
+ 
+ 	CFDictionarySetValue(pair, CFSTR("DeviceUsagePage"), page_number);
+ 	CFDictionarySetValue(pair, CFSTR("DeviceUsage"), usage_number);
+-	pairs = CFArrayCreate(NULL, (const void **)&pair, 1, &kCFTypeArrayCallBacks);
++	if (page == HID_PAGE_CONSUMER && usage == HID_USAGE_CONSUMER_CONTROL) {
++		CFMutableDictionaryRef ringer_pair = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
++		    &kCFTypeDictionaryValueCallBacks);
++		CFNumberRef ringer_page = number(HID_PAGE_TELEPHONY), ringer_usage = number(HID_USAGE_TFON_RING);
++		const void *pair_list[2] = { pair, ringer_pair };
++
++		CFDictionarySetValue(ringer_pair, CFSTR("DeviceUsagePage"), ringer_page);
++		CFDictionarySetValue(ringer_pair, CFSTR("DeviceUsage"), ringer_usage);
++		pairs = CFArrayCreate(NULL, pair_list, 2, &kCFTypeArrayCallBacks);
++		made->has_ringer = true;
++		CFRelease(ringer_page);
++		CFRelease(ringer_usage);
++		CFRelease(ringer_pair);
++	} else {
++		pairs = CFArrayCreate(NULL, (const void **)&pair, 1, &kCFTypeArrayCallBacks);
++	}
+ 	CFDictionarySetValue(properties, CFSTR("PrimaryUsagePage"), page_number);
+ 	CFDictionarySetValue(properties, CFSTR("PrimaryUsage"), usage_number);
+ 	CFDictionarySetValue(properties, CFSTR("DeviceUsagePage"), page_number);
+@@ -1067,6 +1195,16 @@ input_thread(__unused void *arg)
+ 	if (screen != NULL) {
+ 		buttons = make_service(client, "Redwood buttons", HID_PAGE_CONSUMER, HID_USAGE_CONSUMER_CONTROL, false);
+ 	}
++	if (buttons != NULL) {
++		/* Report the unmuted ringer position once opened (Mi 8 has no hardware mute switch). */
++		IOHIDEventRef ringer = IOHIDEventCreateKeyboardEvent(NULL, mach_absolute_time(), HID_PAGE_TELEPHONY,
++		    HID_USAGE_TFON_RING, true, 0);
++		if (ringer != NULL) {
++			IOHIDEventSetIntegerValue(ringer, FIELD_IS_BUILT_IN, 1);
++			IOHIDVirtualServiceClientDispatchEvent(buttons, ringer);
++			CFRelease(ringer);
++		}
++	}
+ 	say("redwood: input: touch screen service %p, buttons %p\n", (void *)screen, (void *)buttons);
+ 	dispatch_semaphore_signal(input_services_made); /* see wait_for_als_arrival() */
+ 	if (screen == NULL) {
+@@ -1252,6 +1390,7 @@ redwood_init(void)
  		}
  		opengl_es();
  		window_server_fixes();

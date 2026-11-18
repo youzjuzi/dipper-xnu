@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 STATUS_PY = ROOT / 'tools/prepare/status.py'
 BUILD_KERNEL = ROOT / 'tools/build/build-kernel.sh'
 BUILD_PAYLOAD = ROOT / 'tools/build/build-payload.py'
+DEVICE_LOG = ROOT / 'tools/tests/device-log.py'
 
 
 def run_py(script, *args, cwd=ROOT):
@@ -98,6 +99,88 @@ class WorkflowToolsTests(unittest.TestCase):
 
         k_boot = subprocess.run(['bash', str(BUILD_KERNEL), '--boot'], cwd=ROOT, text=True, capture_output=True)
         self.assertNotEqual(k_boot.returncode, 0)
+
+    def _make_fake_fastboot(self, directory, product='xnuloader'):
+        state_file = directory / 'state.txt'
+        calls_file = directory / 'calls.log'
+        state_file.write_text('0\n', encoding='utf-8')
+        fb = directory / 'fake-fastboot'
+        fb.write_text(f"""#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+state_file = Path({str(state_file)!r})
+calls_file = Path({str(calls_file)!r})
+args = sys.argv[1:]
+if len(args) >= 2 and args[0] == '-s':
+    args = args[2:]
+with calls_file.open('a', encoding='utf-8') as f:
+    f.write(' '.join(args) + '\\n')
+
+n = int(state_file.read_text(encoding='utf-8').strip())
+if args[:2] == ['getvar', 'product']:
+    sys.stderr.write('product: {product}\\nFinished. Total time: 0.001s\\n')
+    raise SystemExit(0)
+if args[:2] == ['getvar', 'result']:
+    res = 'returned' if n >= 2 else 'running'
+    sys.stderr.write(f'result: {{res}}\\nFinished. Total time: 0.001s\\n')
+    raise SystemExit(0)
+if args[:2] == ['oem', 'stop']:
+    state_file.write_text('2\\n', encoding='utf-8')
+    sys.stderr.write('OKAY\\n')
+    raise SystemExit(0)
+if args[:2] == ['oem', 'log']:
+    state_file.write_text(str(n + 1) + '\\n', encoding='utf-8')
+    sys.stderr.write('OKAY\\n')
+    raise SystemExit(0)
+if len(args) >= 2 and args[0] == 'get_staged':
+    out = Path(args[1])
+    if n == 0:
+        out.write_text('HEAD\\nline-1\\n', encoding='utf-8')
+    elif n == 1:
+        out.write_text('HEAD\\nline-1\\nline-2\\n', encoding='utf-8')
+    else:
+        out.write_text('HEAD\\nline-2\\nline-3\\nreturned-ok\\n', encoding='utf-8')
+    raise SystemExit(0)
+sys.stderr.write('unexpected command\\n')
+raise SystemExit(1)
+""", encoding='utf-8')
+        fb.chmod(0o755)
+        return fb, calls_file
+
+    def test_device_log_refuses_non_xnuloader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tdir = Path(tmp)
+            fb, calls = self._make_fake_fastboot(tdir, product='dipper')
+            res = run_py(DEVICE_LOG, '--fastboot', str(fb), 'snapshot', '--out', str(tdir / 'out.log'))
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn('xnuloader', res.stderr)
+            self.assertEqual(calls.read_text(encoding='utf-8').splitlines(), ['getvar product'])
+
+    def test_device_log_watch_and_stop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tdir = Path(tmp)
+            fb, calls = self._make_fake_fastboot(tdir, product='xnuloader')
+            out_log = tdir / 'latest.log'
+            stream_log = tdir / 'stream.log'
+            res = run_py(
+                DEVICE_LOG, '--fastboot', str(fb),
+                'watch', '--interval', '0.01', '--out', str(out_log), '--stream', str(stream_log)
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertEqual(out_log.read_text(encoding='utf-8'), 'HEAD\nline-2\nline-3\nreturned-ok\n')
+            self.assertEqual(stream_log.read_text(encoding='utf-8'), 'HEAD\nline-1\nline-2\nline-3\nreturned-ok\n')
+
+            # Also test orderly stop subcommand starting from running state.
+            fb2, calls2 = self._make_fake_fastboot(tdir, product='xnuloader')
+            stop_out = tdir / 'stop.log'
+            stop_res = run_py(
+                DEVICE_LOG, '--fastboot', str(fb2),
+                'stop', '--poll-interval', '0.01', '--wait-timeout', '2', '--out', str(stop_out)
+            )
+            self.assertEqual(stop_res.returncode, 0, stop_res.stdout + stop_res.stderr)
+            self.assertIn('oem stop', calls2.read_text(encoding='utf-8'))
+            self.assertIn('returned-ok', stop_out.read_text(encoding='utf-8'))
 
 
 if __name__ == '__main__':
