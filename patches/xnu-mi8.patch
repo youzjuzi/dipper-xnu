@@ -494,10 +494,10 @@ index 0000000000000000000000000000000000000000..f571c1cc1ddd8f9708d4c7da3fc8841e
 +}
 diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789d65398c4
+index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d68b90c83
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,5080 @@
+@@ -0,0 +1,5184 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -610,7 +610,9 @@ index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789
 +	uint32_t votes;
 +	bool ahb_on = false;
 +
-+	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
++	if (gcc == 0) {
++		gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
++	}
 +	for (unsigned i = 0; i < sizeof(gcc_branches) / sizeof(gcc_branches[0]); i++) {
 +		uint32_t v = rd(gcc + gcc_branches[i].reg);
 +
@@ -736,7 +738,10 @@ index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789
 +		printf("mi8gpu: gcc_gpu_cfg_ahb_clk is off: GPUCC is not read (an access could hang the bus)\n");
 +		return false;
 +	}
-+	cc = gpucc = ml_io_map(GPUCC_PHYS, GPUCC_SIZE);
++	if (gpucc == 0) {
++		gpucc = ml_io_map(GPUCC_PHYS, GPUCC_SIZE);
++	}
++	cc = gpucc;
 +	for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
 +		uint32_t v = rd(cc + regs[i].reg);
 +
@@ -895,6 +900,8 @@ index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789
 +#define GMU_SIZE                0x30000UL
 +#define GMU_WORD(w)             ((w) * 4u)
 +
++static vm_offset_t gmu_base;
++
 +static bool
 +step_gmu_registers(void)
 +{
@@ -920,7 +927,10 @@ index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789
 +		printf("mi8gpu: the GMU's clock is not running (step 5): the GMU is not read\n");
 +		return false;
 +	}
-+	gmu = ml_io_map(GMU_PHYS, GMU_SIZE);
++	if (gmu_base == 0) {
++		gmu_base = ml_io_map(GMU_PHYS, GMU_SIZE);
++	}
++	gmu = gmu_base;
 +	for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
 +		printf("mi8gpu: GMU %-34s word %#06x (offset %#07x) = %#010x\n", regs[i].name, regs[i].word, GMU_WORD(regs[i].word),
 +		    rd(gmu + GMU_WORD(regs[i].word)));
@@ -982,7 +992,9 @@ index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789
 +		printf("mi8gpu: the CX switch or the GPU's memory clock is off (steps 4, 5): the SMMU is not touched\n");
 +		return false;
 +	}
-+	smmu = ml_io_map(SMMU_PHYS, SMMU_SIZE);
++	if (smmu == 0) {
++		smmu = ml_io_map(SMMU_PHYS, SMMU_SIZE);
++	}
 +	id0 = rd(smmu + SMMU_ID0);
 +	id1 = rd(smmu + SMMU_ID1);
 +	printf("mi8gpu: SMMU sCR0 %#010x sCR1 %#010x sCR2 %#010x sACR %#010x\n", rd(smmu + SMMU_SCR0), rd(smmu + SMMU_SCR1),
@@ -1051,8 +1063,6 @@ index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789
 +#define GMU_DTCM                GMU_WORD(0x1c00)        /* GMU_CM3_DTCM_START 0x1c400; 16 KB after the instruction memory's start */
 +#define GMU_TCM_SIZE            0x8000u                 /* legacy: one image of 32 KB, a6xx_gmu_fw_load() */
 +
-+static vm_offset_t gmu_base;
-+
 +static bool
 +step_gmu_tcm_test(void)
 +{
@@ -1065,7 +1075,9 @@ index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789
 +		printf("mi8gpu: the GMU's clock is not running (step 5): its memory is not touched\n");
 +		return false;
 +	}
-+	gmu_base = ml_io_map(GMU_PHYS, GMU_SIZE);
++	if (gmu_base == 0) {
++		gmu_base = ml_io_map(GMU_PHYS, GMU_SIZE);
++	}
 +	if (rd(gmu_base + GMU_WORD(0x5000)) != 1) {
 +		printf("mi8gpu: the GMU's processor is not held in reset (GMU_CM3_SYSRESET %#x): its memory is not touched\n",
 +		    rd(gmu_base + GMU_WORD(0x5000)));
@@ -5077,29 +5089,101 @@ index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789
 +	}
 +}
 +
++static void __attribute__((noinline))
++stale_scrub_hw(vm_offset_t g, vm_offset_t cc)
++{
++	if (!(rd(cc + GPUCC_CX_GMU_CBCR) & CBCR_OFF)) {
++		if (gmu_base == 0) {
++			gmu_base = ml_io_map(GMU_PHYS, GMU_SIZE);
++		}
++		if (rd(gmu_base + GMU_WORD(GMU_CM3_SYSRESET_W)) != 1) {
++			wr(gmu_base + GMU_WORD(GMU_CM3_SYSRESET_W), 1);
++			__asm__ volatile ("dsb sy" ::: "memory");
++			sleep_us(10);
++		}
++	}
++	if (rd(cc + GPUCC_GX_GDSCR) & GDSC_PWR_ON) {
++		wr(cc + GPUCC_GX_GDSCR, rd(cc + GPUCC_GX_GDSCR) | GDSCR_SW_COLLAPSE);
++		sleep_us(500);
++	}
++	if (!(rd(g + GCC_GPU_MEMNOC_GFX) & CBCR_OFF)) {
++		if (smmu == 0) {
++			smmu = ml_io_map(SMMU_PHYS, SMMU_SIZE);
++		}
++		uint32_t id0 = rd(smmu + SMMU_ID0), id1 = rd(smmu + SMMU_ID1);
++		uint32_t num_smr = id0 & 0xffu, num_cb = id1 & 0xffu;
++		uint32_t pg = (id1 & (1u << 31)) ? 0x10000u : 0x1000u;
++		uint32_t cb_base = (1u << (((id1 >> 28) & 7u) + 1u)) * pg;
++
++		for (uint32_t n = 0; n < num_smr && n < 64; n++) {
++			if (rd(smmu + SMMU_SMR(n)) != 0) {
++				wr(smmu + SMMU_SMR(n), 0);
++			}
++		}
++		wr(smmu + SMMU_S2CR(GMU_SMR_ENTRY), 0x200ffu);
++		wr(smmu + SMMU_S2CR(G3D_SMR_ENTRY), 0x200ffu);
++		if (cb_base + pg * num_cb <= SMMU_SIZE) {
++			static const uint32_t ctxs[2] = { GMU_CTX, G3D_CTX };
++
++			for (uint32_t k = 0; k < 2; k++) {
++				if (ctxs[k] >= num_cb) {
++					continue;
++				}
++				vm_offset_t cb = smmu + cb_base + pg * ctxs[k];
++				wr(cb + CB_SCTLR, 0);
++				__asm__ volatile ("dsb sy" ::: "memory");
++				wr(cb + CB_TLBIASID, ctxs[k]);
++				wr(cb + CB_TLBSYNC, 1);
++				for (int i = 0; i < 100 && (rd(cb + CB_TLBSTATUS) & 1); i++) {
++					sleep_us(10);
++				}
++				wr(cb + CB_TTBR0_LO, 0);
++				wr(cb + CB_TTBR0_HI, 0);
++				wr(cb + CB_TTBR1_LO, 0);
++				wr(cb + CB_TTBR1_HI, 0);
++				wr(cb + CB_TCR, 0);
++				wr(cb + CB_TCR2, 0);
++				wr(cb + CB_MAIR0, 0);
++				wr(cb + CB_MAIR1, 0);
++				wr(cb + CB_FSR, FSR_ALL);
++				wr(smmu + SMMU_CBAR(ctxs[k]), 0);
++				wr(smmu + SMMU_CBA2R(ctxs[k]), 0);
++			}
++		}
++	}
++}
++
 +/*
 + * What an earlier run may have left on. The GPU block is not reset when the loader takes the machine back, and a run
-+ * that did not end in order (EXP-0083: a thread that never came back from a read) never switched its clocks and its
++ * that did not end in order (a thread that never came back from a read or a panic) never switched its clocks and its
 + * CX switch off again: the next one found the CX switch on at step 4. So every run starts by putting the block back to
-+ * what the phone's own start leaves (EXP-0077): the branches of this file off, the GMU's clock source released, the CX
-+ * switch collapsed. Only what step 3 can read safely is looked at: with the register bus off, nothing is touched.
++ * what the phone's own start leaves: CM3 held, GX collapsed, SMMU tables cleared, branches off, the GMU's clock
++ * source released, the CX switch collapsed. Only what step 3 can read safely is looked at: with the register bus off,
++ * nothing is touched.
 + */
 +static void
 +stale_stop(void)
 +{
-+	vm_offset_t g = ml_io_map(GCC_PHYS, GCC_SIZE), cc;
++	if (gcc == 0) {
++		gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
++	}
++	vm_offset_t g = gcc, cc;
 +	uint32_t gdscr;
 +
 +	if (rd(g + GCC_GPU_CFG_AHB) & CBCR_OFF) {
 +		return;
 +	}
-+	cc = ml_io_map(GPUCC_PHYS, GPUCC_SIZE);
-+	gdscr = rd(cc + 0x106c);
++	if (gpucc == 0) {
++		gpucc = ml_io_map(GPUCC_PHYS, GPUCC_SIZE);
++	}
++	cc = gpucc;
++	gdscr = rd(cc + GPUCC_CX_GDSCR);
 +	if (!(gdscr & GDSC_PWR_ON)) {
 +		return;
 +	}
 +	printf("mi8gpu: an earlier run left the CX switch on (GDSCR %#010x, hw control %#010x, cx_gmu_clk %#010x): switching it off\n",
 +	    gdscr, rd(cc + 0x1540), rd(cc + 0x1098));
++	stale_scrub_hw(g, cc);
 +	wr(cc + 0x1098, rd(cc + 0x1098) & ~1u);
 +	wr(cc + 0x109c, rd(cc + 0x109c) & ~1u);
 +	wr(cc + 0x1120, rd(cc + 0x1120) & ~2u);
@@ -5408,6 +5492,26 @@ index 0000000000000000000000000000000000000000..31c8be4dd526f6589adb316b6e36d789
 +		printf("mi8gpu: the GPU is NOT back in its starting state (GX %#x, RSC %s): resources are retained\n", rd(gpucc + GPUCC_GX_GDSCR),
 +		    rsc_ok ? "awake" : "not awake");
 +	}
++}
++
++/* Panic-safe quiesce (IRQs off, no console/sleep/locks): halt CM3 and disable SMMU translations. */
++void
++mi8_gpu_quiesce(void)
++{
++	if (!mi8_keep || gcc == 0 || (rd(gcc + GCC_GPU_CFG_AHB) & CBCR_OFF) || gpucc == 0 ||
++	    !(rd(gpucc + GPUCC_CX_GDSCR) & GDSC_PWR_ON)) {
++		return;
++	}
++	if (gmu_base != 0 && !(rd(gpucc + GPUCC_CX_GMU_CBCR) & CBCR_OFF)) {
++		wr(gmu_base + GMU_WORD(GMU_CM3_SYSRESET_W), 1);
++	}
++	if (smmu != 0 && smmu_num_cb > GMU_CTX && !(rd(gcc + GCC_GPU_MEMNOC_GFX) & CBCR_OFF)) {
++		wr(smmu + SMMU_SMR(GMU_SMR_ENTRY), 0);
++		wr(smmu + SMMU_SMR(G3D_SMR_ENTRY), 0);
++		wr(smmu_cb(GMU_CTX) + CB_SCTLR, 0);
++		wr(smmu_cb(G3D_CTX) + CB_SCTLR, 0);
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
 +}
 +
 +extern void RedwoodGPUStart(void);
@@ -6470,10 +6574,10 @@ index 0000000000000000000000000000000000000000..3b401e70c9180a9bbb1eaecb706aa87a
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..fb230c4dbe32785484f3a9b571a2f84043fccb66
+index 0000000000000000000000000000000000000000..0c15cf6c0aa24a929842750c56f6bce9339b7059
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,858 @@
+@@ -0,0 +1,879 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
@@ -6498,6 +6602,7 @@ index 0000000000000000000000000000000000000000..fb230c4dbe32785484f3a9b571a2f840
 +static const uint32_t commands[] = {0,0x10db3,0x10d92,0x10326,0x10325,0x10d98,0x10daa,0x10bcd,0x10d94,0x10327};
 +static const char *const names[] = {"invalid","asm open write","asm map regions","adm device open","adm routing","asm media format","asm run","asm stream close","asm unmap regions","adm device close"};
 +static bool session_resident; /* Selected before either audio worker starts. */
++static unsigned session_stop_requested;
 +static void
 +pcm_log(struct mi8_pcm_state *s, const char *fmt, ...)
 +{
@@ -6564,6 +6669,7 @@ index 0000000000000000000000000000000000000000..fb230c4dbe32785484f3a9b571a2f840
 + if(seconds>900)return false;
 + session_resident=seconds==0;session_periods=seconds*50;return true;
 +}
++void mi8_pcm_session_stop_request(void){__atomic_store_n(&session_stop_requested,1,__ATOMIC_RELEASE);}
 +const struct mi8_pcm_session_stats *mi8_pcm_session_stats(void){return &session_stats;}
 +
 +bool
@@ -7208,6 +7314,7 @@ index 0000000000000000000000000000000000000000..fb230c4dbe32785484f3a9b571a2f840
 +{
 +	memset(s,0,sizeof(*s));s->io=io;s->deadline=end;s->token=0x13000000;s->copp=0xffff;s->zero=true;s->periods=session_periods;s->session=amp;
 + memset(&session_pcm,0,sizeof(session_pcm));memset(&session_stats,0,sizeof(session_stats));session_last_done=session_pending_flush=session_resume_seen=0;session_therm_live=false;
++ __atomic_store_n(&session_stop_requested,0,__ATOMIC_RELEASE);
 + if(!amp || !amp->snapshot || !amp->wake || !amp->mute || !amp->zero || !amp->count || !amp->stop || !amp->join || !amp->muted || !amp->held)return false;
 +	bool success=false,closed=false,unmapped=false,adm_closed=true;
 +	if (!io->begin(io->ctx,&s->memory)) { pcm_log(s,"smmu: begin failed; no PCM submitted");amp->stop();(void)amp->join();return false; }
@@ -7221,10 +7328,22 @@ index 0000000000000000000000000000000000000000..fb230c4dbe32785484f3a9b571a2f840
 +	uint64_t start=io->now(io->ctx);s->run_start=start;
 +	uint64_t count=session_resident?(s->deadline>start+500000?(s->deadline-start-500000)/20000:0):s->periods;
 + if(!count)goto cleanup;
++ uint64_t submitted_periods=count;
++ bool stop_now=false;
 + for (uint64_t n=0;n<count;n++) {
 +		unsigned slot=n%8;
 +		uint64_t wait=start+(uint64_t)n*20000;
-+		while (io->now(io->ctx)<wait || s->jobs[slot].active) if (poll_once(s,s->deadline)) goto cleanup;
++		if (session_resident && __atomic_load_n(&session_stop_requested,__ATOMIC_ACQUIRE)) {
++			submitted_periods=n;
++			break;
++		}
++		while (io->now(io->ctx)<wait || s->jobs[slot].active) {
++			if (session_resident && __atomic_load_n(&session_stop_requested,__ATOMIC_ACQUIRE) && !s->jobs[slot].active) {
++				submitted_periods=n;stop_now=true;break;
++			}
++			if (poll_once(s,s->deadline)) goto cleanup;
++		}
++		if (stop_now) break;
 +		if (s->result.errors || s->result.unsupported || io->now(io->ctx)>=s->deadline) goto cleanup;
 +		if (io->poll(io->ctx)) goto cleanup;
 +		struct mi8_smmu_fault f;
@@ -7250,8 +7369,14 @@ index 0000000000000000000000000000000000000000..fb230c4dbe32785484f3a9b571a2f840
 +		if (!submit(s,slot,MI8_PCM_ADDRESS+(uint64_t)slot*MI8_PCM_PERIOD,false,s->deadline)) goto cleanup;
 +  if(late>session_stats.late_us){session_stats.late_us=late;session_stats.late_period=(unsigned)(n+1);}
 +	}
-+	while (io->now(io->ctx)<start+count*20000) if (poll_once(s,s->deadline)) goto cleanup;
-+	if (!drain(s,s->deadline) || s->result.errors || s->result.done!=count) goto cleanup;
++	uint64_t drain_end=s->deadline;
++	if (session_resident && __atomic_load_n(&session_stop_requested,__ATOMIC_ACQUIRE)) {
++		uint64_t cap=io->now(io->ctx)+500000;
++		if (cap<drain_end) drain_end=cap;
++	} else {
++		while (io->now(io->ctx)<start+submitted_periods*20000) if (poll_once(s,s->deadline)) goto cleanup;
++	}
++	if (!drain(s,drain_end) || s->result.errors || s->result.done!=submitted_periods) goto cleanup;
 +	struct mi8_smmu_fault f;
 +	if (!io->fault(io->ctx,&f)) { pcm_log(s,"play: fault registers unreadable"); goto cleanup; }
 +		if (f.gfsr || (f.fsr&~IDLE)) {
@@ -7334,10 +7459,10 @@ index 0000000000000000000000000000000000000000..fb230c4dbe32785484f3a9b571a2f840
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..00bc0c17fc249a819b515a8eccf85a52b0cd5e04
+index 0000000000000000000000000000000000000000..4dab3305c3f06228e7c523ee204de67aabdc6b82
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,121 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
@@ -7407,6 +7532,7 @@ index 0000000000000000000000000000000000000000..00bc0c17fc249a819b515a8eccf85a52
 +struct mi8_pcm_session_stats { uint64_t done_gap_us,late_us,underflow_periods,zero_frames,saturated_samples,wake_flush_frames;unsigned late_period;
 + int cpu_max_mc;unsigned cpu_max_s,therm_lines;bool cpu_seen; };
 +bool mi8_pcm_session_seconds(unsigned seconds);
++void mi8_pcm_session_stop_request(void);
 +const struct mi8_pcm_session_stats *mi8_pcm_session_stats(void);
 +bool mi8_pcm_session_level(int);
 +unsigned mi8_pcm_session_limit(void);
@@ -7947,10 +8073,10 @@ index 0000000000000000000000000000000000000000..d4fd6315bb948b6f320e2a6e28944d51
 +#endif
 diff --git a/bsd/dev/mi8_audio_smmu.c b/bsd/dev/mi8_audio_smmu.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..af048b9810ee17654f977a1099ee288a77d130ae
+index 0000000000000000000000000000000000000000..daac5cd76f46f03920659b339fdb18645b48e88e
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_smmu.c
-@@ -0,0 +1,660 @@
+@@ -0,0 +1,677 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Independently written from SMMUv2 register/descriptor formats and the
 + * existing apps SMMU adapters. Software checks do not establish DMA reachability. */
@@ -8167,8 +8293,12 @@ index 0000000000000000000000000000000000000000..af048b9810ee17654f977a1099ee288a
 +		bool wide = (s->scr & 8) != 0;
 +		if (!as_read(s, AS_SMR(n), &smr) || !as_read(s, AS_S2CR(n), &s2cr)) return false;
 +		s->smr[n] = smr; s->s2cr[n] = s2cr;
-+		/* Even an invalid SMR with a translate S2CR reserves its context. */
-+		if (((s2cr >> 16) & 3) == 0) {
++		/* Even an invalid SMR with a translate S2CR reserves its context,
++		 * except our own inert sticky slot 8 -> bank 43 claim. */
++		bool own_sticky_s2cr8 = (n == 8 && !as_valid(smr, s2cr, wide) &&
++		    s->reuse_allowed && s->io->claim->owned && s->io->claim->bank == 43 &&
++		    s2cr == (43u | (wide ? 1u << 10 : 0)));
++		if (((s2cr >> 16) & 3) == 0 && !own_sticky_s2cr8) {
 +			if ((s2cr & 255) >= 45) { as_log(s, "Pending: invalid S2CR context"); return false; }
 +			s->used[s2cr & 255] = true;
 +		}
@@ -8179,7 +8309,7 @@ index 0000000000000000000000000000000000000000..af048b9810ee17654f977a1099ee288a
 +			if (mi8_smmu_overlap(smr, s2cr, wide, 0x1821)) {
 +				as_log(s, "stream 0x1821: matched by SMR %u", n); s->out->slot = -2;
 +			}
-+		} else if (s->out->slot == -1 && ((s2cr >> 16) & 3) == 2) s->out->slot = (int)n;
++		} else if (s->out->slot == -1 && (((s2cr >> 16) & 3) == 2 || own_sticky_s2cr8)) s->out->slot = (int)n;
 +	}
 +	if (s->out->slot != -2) as_log(s, "stream 0x1821: NOT MATCHED");
 +	for (unsigned n = 0; n < 45; n++) if (s->used[n]) {
@@ -8595,6 +8725,19 @@ index 0000000000000000000000000000000000000000..af048b9810ee17654f977a1099ee288a
 +	*native_problem = 0;
 +	if (native_result.retained || native_play_map.active) return NULL;
 +	if (!native_smmu) native_smmu = ml_io_map(0x15000000ul, AS_SIZE);
++	if (!native_claim.owned) {
++		uint32_t scr = 0, smr8 = 0, s2cr8 = 0, cbar43 = 0, cb43 = 0;
++		if (native_read(NULL, 0, &scr) && native_read(NULL, AS_SMR(8), &smr8) &&
++		    native_read(NULL, AS_S2CR(8), &s2cr8) && native_read(NULL, AS_CBAR(43), &cbar43) &&
++		    native_read(NULL, AS_CB(43), &cb43)) {
++			bool wide = (scr & 8) != 0;
++			if (!as_valid(smr8, s2cr8, wide) && s2cr8 == (43u | (wide ? 1u << 10 : 0)) &&
++			    (cbar43 & 0xff03f3ffu) == AS_CBAR_VALUE && !(cb43 & 1u)) {
++				native_claim.owned = true;
++				native_claim.bank = 43;
++			}
++		}
++	}
 +	return mi8_smmu_begin(&ops, &native_play_map, &native_result, true) ? &native_play_map : NULL;
 +}
 +bool mi8_audio_smmu_faults(struct mi8_smmu_fault *fault) { return mi8_smmu_faults(&native_play_map,fault); }
@@ -8709,10 +8852,10 @@ index 0000000000000000000000000000000000000000..e1e652481f2cf89070991764978f3aa0
 +#endif
 diff --git a/bsd/dev/mi8_bt.c b/bsd/dev/mi8_bt.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1b60608009a03c6ba1ea668bca49660270dcd921
+index 0000000000000000000000000000000000000000..d96959ed8216899d246b30a59378562d1f5efcd0
 --- /dev/null
 +++ b/bsd/dev/mi8_bt.c
-@@ -0,0 +1,1960 @@
+@@ -0,0 +1,1987 @@
 +/*
 + * The Bluetooth of the Xiaomi Mi 8 (dipper, SDM845): a Qualcomm WCN3990 -- the chip whose Wi-Fi half
 + * redwood_wifi.c / mi8_rproc.c already run -- spoken to over a UART: serial engine 6 of the first QUP
@@ -9476,6 +9619,8 @@ index 0000000000000000000000000000000000000000..1b60608009a03c6ba1ea668bca496602
 +static bool firmware_step(vm_offset_t se, uint32_t steps);
 +static void bridge_run(vm_offset_t se);
 +
++static volatile bool bt_running, bt_stopping;
++
 +static bool
 +chip_step(vm_offset_t se, uint32_t delay_s, uint32_t steps)
 +{
@@ -9486,8 +9631,11 @@ index 0000000000000000000000000000000000000000..1b60608009a03c6ba1ea668bca496602
 +	uint8_t got[16] = { 0 };
 +
 +	printf("bt: step 4: the chip. Waiting %u s for the Wi-Fi bring-up's RPMh requests to be done\n", delay_s);
-+	for (uint32_t i = 0; i < delay_s; i++) {
++	for (uint32_t i = 0; i < delay_s && !__atomic_load_n(&bt_stopping, __ATOMIC_ACQUIRE); i++) {
 +		delay_for_interval(1, NSEC_PER_SEC);
++	}
++	if (__atomic_load_n(&bt_stopping, __ATOMIC_ACQUIRE)) {
++		return false;
 +	}
 +	printf("bt: the supplies\n");
 +	if (!supplies_on()) {
@@ -10184,6 +10332,7 @@ index 0000000000000000000000000000000000000000..1b60608009a03c6ba1ea668bca496602
 +static uint32_t uart_out_length;
 +
 +int mi8_bt_hci_write(const uint8_t *packet, uint32_t length);
++void mi8_bt_hci_close(void);
 +
 +/* One byte of what the host writes: H4 packets are put together, anything else (the 0xaa that BlueTool sends to wake the line) dropped. */
 +static void
@@ -10383,11 +10532,13 @@ index 0000000000000000000000000000000000000000..1b60608009a03c6ba1ea668bca496602
 +	ibs_acked = false;
 +	bridge_ready = true;
 +	wakeup((caddr_t)&bridge_ready);
-+	for (;;) {
++	while (!__atomic_load_n(&bt_stopping, __ATOMIC_ACQUIRE)) {
 +		rx_pump(se);
 +		bridge_parse();
 +		sleep_us(500);
 +	}
++	bridge_ready = false;
++	mi8_bt_hci_close();
 +}
 +
 +/* ---- what the service calls ---- */
@@ -10590,6 +10741,9 @@ index 0000000000000000000000000000000000000000..1b60608009a03c6ba1ea668bca496602
 +	uint32_t steps = (uint32_t)(uintptr_t)parameter, votes;
 +	bool m_ahb, s_ahb, s6;
 +
++	__atomic_store_n(&bt_stopping, false, __ATOMIC_RELEASE);
++	__atomic_store_n(&bt_running, true, __ATOMIC_RELEASE);
++
 +	if (steps >= 7) {
 +		/* What iOS looks for, before the chip is up (see bridge_wait_ready) */
 +		bridge_address_init();
@@ -10650,7 +10804,23 @@ index 0000000000000000000000000000000000000000..1b60608009a03c6ba1ea668bca496602
 +	bridge_failed = true;
 +	wakeup((caddr_t)&bridge_ready);
 +	printf("bt: stopping here (bt=%u)\n", steps);
++	__atomic_store_n(&bt_running, false, __ATOMIC_RELEASE);
 +	thread_terminate(current_thread());
++}
++
++void
++mi8_bt_stop(void)
++{
++	if (!__atomic_load_n(&bt_running, __ATOMIC_ACQUIRE)) {
++		return;
++	}
++	__atomic_store_n(&bt_stopping, true, __ATOMIC_RELEASE);
++	mi8_bt_hci_close();
++	wakeup((caddr_t)&bridge_ready);
++	for (unsigned ms = 0; ms < 1500 && __atomic_load_n(&bt_running, __ATOMIC_ACQUIRE); ms += 10) {
++		delay_for_interval(10, NSEC_PER_MSEC);
++	}
++	printf("bt: orderly stop %s\n", __atomic_load_n(&bt_running, __ATOMIC_ACQUIRE) ? "TIMED OUT" : "complete");
 +}
 +
 +extern boolean_t PE_boot_arg_is_default(const char *);
@@ -14596,10 +14766,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c368461a798f01
+index 0000000000000000000000000000000000000000..02d3693b9e7a5fb5e9da3f004f9d102a935b197c
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,4724 @@
+@@ -0,0 +1,5127 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -14674,6 +14844,7 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +#include "mi8_audio_ring.h"
 +#include <sys/mi8_lx.h>
 +#include <sys/redwood_lx.h>
++#include <sys/redwood_input.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
@@ -16401,49 +16572,77 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +
 +static void remote_crash_reason(struct mi8_remote *r);
 +
++/* Clear stale slave-kernel bits after a remote is shut down or held in reset. */
++static void __attribute__((noinline))
++remote_clear_theirs_state(struct mi8_remote *r)
++{
++	struct smp2p theirs;
++	uint32_t cacheline = 0, psize = 0, size = 0, at;
++	uint32_t partition = smem_partition(SMEM_US, r->remote, &cacheline, &psize);
++	int entry;
++
++	if (partition == 0 || (at = item_find(partition, cacheline, r->theirs_item, &size)) == 0) {
++		return;
++	}
++	if (!smem_peek(at, &theirs, sizeof(theirs)) || theirs.magic != SMP2P_MAGIC) {
++		return;
++	}
++	entry = smp2p_entry(&theirs, "slave-kernel");
++	if (entry >= 0 && theirs.entry[entry].value != 0) {
++		smem_poke(at + SMP2P_AT_VALUE((uint32_t)entry), 0);
++		settle();
++	}
++}
++
 +/* Linux's qcom_q6v5_request_stop(): our bit "stop", the DSP's "stop ack" waited for, our bit taken back. */
-+static bool
-+dsp_ask_to_stop(uint32_t bound_ms)
++static bool __attribute__((noinline))
++remote_ask_to_stop(struct mi8_remote *r, const char *who, uint32_t bound_ms)
 +{
 +	struct smp2p ours, theirs;
 +	uint32_t state, value_at;
 +	uint64_t asked, now;
 +	int entry;
 +
-+	if (adsp_remote.our_item == 0 || !smem_peek(adsp_remote.our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC || (entry = smp2p_entry(&ours, "master-kernel")) < 0) {
-+		say("mi8rp: the DSP is not asked to stop: there is no item of ours to ask it with\n");
++	if (r->our_item == 0 || !smem_peek(r->our_item, &ours, sizeof(ours)) || ours.magic != SMP2P_MAGIC || (entry = smp2p_entry(&ours, "master-kernel")) < 0) {
++		say("mi8rp: %s is not asked to stop: there is no item of ours to ask it with\n", who);
 +		return false;
 +	}
-+	if (!remote_words(&adsp_remote, &theirs) || smp2p_entry(&theirs, "slave-kernel") < 0) {
-+		say("mi8rp: the DSP is not asked to stop: its item has no entry to answer in\n");
++	if (!remote_words(r, &theirs) || smp2p_entry(&theirs, "slave-kernel") < 0) {
++		say("mi8rp: %s is not asked to stop: its item has no entry to answer in\n", who);
 +		return false;
 +	}
 +	state = dsp_state(&theirs);
 +	if (!(state & DSP_READY) || (state & DSP_FATAL)) {
-+		say("mi8rp: the DSP is not asked to stop first: its entry says %#x, not \"up\"\n", state);
-+		if (state & DSP_FATAL) remote_crash_reason(&adsp_remote);
++		say("mi8rp: %s is not asked to stop first: its entry says %#x, not \"up\"\n", who, state);
++		if (state & DSP_FATAL) remote_crash_reason(r);
 +		return false;
 +	}
-+	value_at = adsp_remote.our_item + SMP2P_AT_VALUE((uint32_t)entry);
-+	say("mi8rp: asking the DSP to stop: bit 0 of our \"master-kernel\" at %#lx, and its doorbell\n", SMEM_PHYS + value_at);
++	value_at = r->our_item + SMP2P_AT_VALUE((uint32_t)entry);
++	say("mi8rp: asking %s to stop: bit 0 of our \"master-kernel\" at %#lx, and its doorbell\n", who, SMEM_PHYS + value_at);
 +	smem_poke(value_at, ours.entry[entry].value | DSP_STOP);
 +	settle();
-+	ring(adsp_remote.doorbell);
++	ring(r->doorbell);
 +	asked = now = now_us();
 +	while (now - asked < bound_ms * 1000ull) {
-+		if (remote_words(&adsp_remote, &theirs) && (dsp_state(&theirs) & (DSP_STOP_ACK | DSP_FATAL))) {
++		if (remote_words(r, &theirs) && (dsp_state(&theirs) & (DSP_STOP_ACK | DSP_FATAL))) {
 +			break;
 +		}
 +		delay_for_interval(200, NSEC_PER_USEC);
 +		now = now_us();
 +	}
-+	state = remote_words(&adsp_remote, &theirs) ? dsp_state(&theirs) : 0;
-+	say("mi8rp: %s after %llu.%03llu ms; its entry says %#x\n", state & DSP_STOP_ACK ? "THE AUDIO DSP ACKNOWLEDGES THE STOP" :
-+	    "THE AUDIO DSP DOES NOT ACKNOWLEDGE THE STOP", (now - asked) / 1000, (now - asked) % 1000, state);
++	state = remote_words(r, &theirs) ? dsp_state(&theirs) : 0;
++	say("mi8rp: %s %s after %llu.%03llu ms; its entry says %#x\n", who, state & DSP_STOP_ACK ? "ACKNOWLEDGES THE STOP" :
++	    "DOES NOT ACKNOWLEDGE THE STOP", (now - asked) / 1000, (now - asked) % 1000, state);
 +	smem_poke(value_at, ours.entry[entry].value & ~DSP_STOP);
 +	settle();
-+	ring(adsp_remote.doorbell);
++	ring(r->doorbell);
 +	return (state & DSP_STOP_ACK) != 0;
++}
++
++static bool
++dsp_ask_to_stop(uint32_t bound_ms)
++{
++	return remote_ask_to_stop(&adsp_remote, "the audio DSP", bound_ms);
 +}
 +
 +static void
@@ -16518,9 +16717,9 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +		say("mi8rp: 8: the image is not in place\n");
 +		return false;
 +	}
-+	if (remote_words(&adsp_remote, &words) && !again) {
-+		show_words("8: the DSP's item (443) is already there: a start before this one", &words);
-+		say("mi8rp: 8: NOT STARTED: mi8rp_again=1 to try after a start before this one\n");
++	if (remote_words(&adsp_remote, &words) && (dsp_state(&words) & DSP_READY) && !(dsp_state(&words) & DSP_STOP_ACK) && !again) {
++		show_words("8: the DSP's item (443) is already up: active from an unstopped run", &words);
++		say("mi8rp: 8: NOT STARTED: mi8rp_again=1 to try while active\n");
 +		return false;
 +	}
 +	/* our item: made in step 4 or now, and filled in afresh with the version last */
@@ -17024,6 +17223,8 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +static struct mi8_glink *modem_gl;
 +static struct mi8_hostsvc *modem_hs;
 +static volatile bool modem_svc_run;
++static uint64_t rmtfs_owners = 1ull << VMID_HLOS;
++static vm_offset_t rmtfs_map;
 +
 +static void
 +svc_log(__unused void *ctx, const char *format, ...)
@@ -17355,8 +17556,8 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +#define WSMMU_PTE               (3ull | 1ull << 6 | 2ull << 8 | 1ull << 10 | 1ull << 11)  /* page, EL0+, outer-shareable, AF, nG; MAIR 0 */
 +#define WSMMU_TABLES            64              /* 4K each: root, level 2s, level 3s (2 MB of addresses each) */
 +
-+static uint32_t wsmmu_level, wsmmu_last_sgfsr = ~0u, wsmmu_last_cbfsr, wsmmu_context = ~0u;
-+static vm_offset_t wsmmu, wsmmu_cb, wsmmu_tables;
++static uint32_t wsmmu_level, wsmmu_last_sgfsr = ~0u, wsmmu_last_cbfsr, wsmmu_context = ~0u, wsmmu_slot = ~0u, wsmmu_cbs_count;
++static vm_offset_t wsmmu, wsmmu_cb, wsmmu_cbs_map, wsmmu_tables;
 +static uint32_t wsmmu_table_count;
 +static bool wsmmu_translating;
 +static LCK_GRP_DECLARE(wsmmu_lock_group, "mi8-wsmmu");
@@ -17557,7 +17758,43 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +{
 +	bool used[256] = { false };
 +	uint32_t matches = rd(wsmmu + 0x020) & 0xff, contexts = rd(wsmmu + 0x024) & 0xff, n, slot = ~0u, s2cr, smr;
-+	vm_offset_t cbs;
++	vm_offset_t cbs = wsmmu_cbs_map;
++
++	/* Reclaim any stale stream 0x40 entry left by an earlier unclean exit before scanning slots. */
++	for (n = 0; n < matches && WSMMU_SMR(n) < 0xc00; n++) {
++		if (audio_smmu_serial && mi8_audio_smmu_reserved(n, ~0u)) continue;
++		smr = rd(wsmmu + WSMMU_SMR(n));
++		s2cr = rd(wsmmu + WSMMU_S2CR(n));
++		if ((smr >> 31) && (smr & 0x7fff) == 0x40 && audio_wifi_target(n, s2cr & 0xff)) {
++			uint32_t old_ctx = s2cr & 0xff;
++
++			say("mi8rp: wsmmu: reclaiming stale slot %u (smr %#x s2cr %#x)\n", n, smr, s2cr);
++			wr(wsmmu + WSMMU_SMR(n), 0);
++			wr(wsmmu + WSMMU_S2CR(n), 0);
++			if (((s2cr >> 16) & 3) == 0 && old_ctx < contexts) {
++				if (cbs == 0) {
++					cbs = ml_io_map(WSMMU_CONTEXTS, 0x1000ul * contexts);
++					wsmmu_cbs_map = cbs;
++					wsmmu_cbs_count = contexts;
++				}
++				vm_offset_t old_cb = cbs + 0x1000ul * old_ctx;
++				wr(old_cb + WSMMU_CB_SCTLR, 0);
++				__asm__ volatile ("dsb sy");
++				wr(old_cb + WSMMU_CB_TLBIASID, old_ctx);
++				wr(old_cb + WSMMU_CB_TLBSYNC, 1);
++				for (unsigned t = 0; (rd(old_cb + WSMMU_CB_TLBSTATUS) & 1) && t < 1000; t++) {
++					delay_for_interval(10, NSEC_PER_USEC);
++				}
++				wr(old_cb + WSMMU_CB_TTBR0, 0);
++				wr(old_cb + WSMMU_CB_TTBR0 + 4, 0);
++				wr(old_cb + WSMMU_CB_TCR, 0);
++				wr(old_cb + WSMMU_CB_TCR2, 0);
++				wr(old_cb + WSMMU_CB_FSR, 0xc00001feu);
++				wr(wsmmu + WSMMU_CBAR(old_ctx), 0);
++				wr(wsmmu + WSMMU_CBA2R(old_ctx), 0);
++			}
++		}
++	}
 +
 +	for (n = 0; n < matches && WSMMU_SMR(n) < 0xc00; n++) {
 +		if (audio_smmu_serial && mi8_audio_smmu_reserved(n, ~0u)) continue;
@@ -17583,7 +17820,11 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	}
 +	if (wsmmu_level >= 3 || (s2cr >> 16 & 3) != 1) {
 +		/* the hypervisor did not keep BYPASS: emulate it with a context that does not translate (Linux bypass_cbndx = the last free one) */
-+		cbs = ml_io_map(WSMMU_CONTEXTS, 0x1000ul * contexts);
++		if (cbs == 0) {
++			cbs = ml_io_map(WSMMU_CONTEXTS, 0x1000ul * contexts);
++			wsmmu_cbs_map = cbs;
++			wsmmu_cbs_count = contexts;
++		}
 +		for (n = contexts; n-- > 0;) {
 +			vm_offset_t cb = cbs + 0x1000ul * n;
 +
@@ -17610,6 +17851,7 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +		wr(wsmmu + WSMMU_S2CR(slot), wsmmu_context);
 +		s2cr = rd(wsmmu + WSMMU_S2CR(slot));
 +	}
++	wsmmu_slot = slot;
 +	wr(wsmmu + WSMMU_SMR(slot), 1u << 31 | 1u << 16 | 0x40);
 +	smr = rd(wsmmu + WSMMU_SMR(slot));
 +	say("mi8rp: wsmmu: read back smr %#x s2cr %#x%s: %s\n", smr, s2cr,
@@ -17647,6 +17889,7 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +
 +static struct mi8_wlfw *modem_wl;
 +static volatile bool modem_glink_up, wl_run, wl_fw_ready, wl_failed, wl_powered;
++static volatile bool wl_thread_alive, modem_svc_thread_alive, mss_thread_alive, rproc_stopping;
 +static uint32_t wl_level;
 +static volatile uint32_t wl_servreg;    /* mi8rp_servreg: 1 registers as a listener, 2 also holds WLFW back until wlan_pd is up */
 +
@@ -17930,9 +18173,12 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	static uint32_t slept;
 +	static bool powered;
 +
-+	delay_for_interval(ms, NSEC_PER_MSEC);
++	for (uint32_t waited = 0; waited < ms && !__atomic_load_n(&rproc_stopping, __ATOMIC_ACQUIRE); waited += 10) {
++		uint32_t chunk = ms - waited < 10 ? ms - waited : 10;
++		delay_for_interval(chunk, NSEC_PER_MSEC);
++	}
 +	slept += ms;
-+	if (wl_level == 3 && !powered && slept >= 3000) {
++	if (wl_level == 3 && !powered && slept >= 3000 && !__atomic_load_n(&rproc_stopping, __ATOMIC_ACQUIRE)) {
 +		powered = true;
 +		say("mi8rp: wlfw: %u ms of retries: switching the radio's supplies on now: %s\n", slept, wlan_power(true) ? "on" : "NOT ALL ON");
 +	}
@@ -17944,7 +18190,8 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	bool started = false, enabled = false;
 +	uint64_t began = now_us();
 +
-+	while (wl_run) {
++	__atomic_store_n(&wl_thread_alive, true, __ATOMIC_RELEASE);
++	while (wl_run && !__atomic_load_n(&rproc_stopping, __ATOMIC_ACQUIRE)) {
 +		if (!started && modem_glink_up && (wl_servreg != 2 || servreg_up || (now_us() - began) / 1000000 > 300)) {
 +			int r = mi8_wlfw_start(modem_wl);
 +
@@ -17972,6 +18219,7 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +		}
 +		delay_for_interval(20, NSEC_PER_MSEC);
 +	}
++	__atomic_store_n(&wl_thread_alive, false, __ATOMIC_RELEASE);
 +	thread_terminate(current_thread());
 +}
 +
@@ -18013,8 +18261,11 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	PE_parse_boot_argn("mi8rp_lxirq", &mi8_lx_irq, sizeof(mi8_lx_irq));
 +	mi8_lx_on = mi8_lx_level != 0;
 +	wl_run = true;
++	__atomic_store_n(&wl_thread_alive, true, __ATOMIC_RELEASE);
 +	if (kernel_thread_start(modem_wlfw_thread, NULL, &thread) == KERN_SUCCESS) {
 +		thread_deallocate(thread);
++	} else {
++		__atomic_store_n(&wl_thread_alive, false, __ATOMIC_RELEASE);
 +	}
 +}
 +
@@ -18025,6 +18276,7 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	bool glink_up = false, hs_up = false;
 +	unsigned hs_tries = 0;
 +
++	__atomic_store_n(&modem_svc_thread_alive, true, __ATOMIC_RELEASE);
 +	while (modem_svc_run) {
 +		if (!glink_up && mi8_glink_start(modem_gl) == 0) {
 +			glink_up = true;
@@ -18050,17 +18302,16 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +		}
 +		delay_for_interval(glink_up ? 200 : 100000, NSEC_PER_USEC);
 +	}
++	__atomic_store_n(&modem_svc_thread_alive, false, __ATOMIC_RELEASE);
 +	thread_terminate(current_thread());
 +}
 +
 +static bool
 +modem_services_start(void)
 +{
-+	static uint64_t rmtfs_owners = 1ull << VMID_HLOS;
 +	struct mi8_glink_cfg gc;
 +	struct mi8_hostsvc_cfg hc;
 +	thread_t thread;
-+	vm_offset_t rmtfs;
 +
 +	bzero(&gc, sizeof(gc));
 +	gc.name = "modem";
@@ -18077,8 +18328,10 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +		say("mi8rp: mss: mi8_glink_create failed\n");
 +		return false;
 +	}
-+	rmtfs = ml_io_map_unmappable(RMTFS_MEMORY, RMTFS_SIZE, VM_WIMG_WCOMB);
-+	memset((void *)rmtfs, 0, RMTFS_SIZE);
++	if (rmtfs_map == 0) {
++		rmtfs_map = ml_io_map_unmappable(RMTFS_MEMORY, RMTFS_SIZE, VM_WIMG_WCOMB);
++	}
++	memset((void *)rmtfs_map, 0, RMTFS_SIZE);
 +	settle();
 +	if (!assign_mem("rmtfs", RMTFS_MEMORY, RMTFS_SIZE, &rmtfs_owners, true, true)) {
 +		say("mi8rp: mss: the rmtfs memory could not be shared with the MSS\n");
@@ -18091,7 +18344,7 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	hc.part_read = svc_part_read;
 +	hc.file_size = svc_file_size;
 +	hc.file_read = svc_file_read;
-+	hc.rmtfs_virt = (void *)rmtfs;
++	hc.rmtfs_virt = (void *)rmtfs_map;
 +	hc.rmtfs_phys = RMTFS_MEMORY;
 +	hc.rmtfs_size = RMTFS_SIZE;
 +	hc.log = svc_log;
@@ -18112,7 +18365,9 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +			modem_wlfw_start(wlfw);
 +		}
 +	}
++	__atomic_store_n(&modem_svc_thread_alive, true, __ATOMIC_RELEASE);
 +	if (kernel_thread_start(modem_svc_thread, NULL, &thread) != KERN_SUCCESS) {
++		__atomic_store_n(&modem_svc_thread_alive, false, __ATOMIC_RELEASE);
 +		return false;
 +	}
 +	thread_deallocate(thread);
@@ -18162,6 +18417,7 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +			say("mi8rp: mss: GLINK item %u of the modem: %s (%u bytes)\n", glink[i].item, at ? "ours, zeroed" : "NOT MADE", at ? size : 0);
 +		}
 +	}
++	remote_clear_theirs_state(&modem_remote);
 +	return modem_remote.our_item != 0;
 +}
 +
@@ -18216,7 +18472,7 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	ring(modem_remote.doorbell);
 +	for (;;) {
 +		now = now_us();
-+		if (now >= limit) {
++		if (now >= limit || __atomic_load_n(&rproc_stopping, __ATOMIC_ACQUIRE)) {
 +			break;
 +		}
 +		if (ready_at != 0 && (now - ready_at) / 10000000ull >= beat + 1) {
@@ -18407,7 +18663,7 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +		    adsp_item(ITEM_GLINK_DESCRIPTOR, &size) ? "yes" : "no", adsp_item(ITEM_GLINK_FIFO, &size) ? "yes" : "no");
 +	}
 +	if (ok && !hold) {
-+		dsp_ask_to_stop(5000);
++		remote_ask_to_stop(&modem_remote, "the modem", 5000);
 +	}
 +done:
 +	kfree_data(mdt, mdt_size);
@@ -18417,18 +18673,80 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	return ok;
 +}
 +
++struct mss_runtime {
++	bool active, released, rails, turned[MSS_CLOCKS];
++	uint64_t mba_owners, mpss_owners;
++	vm_offset_t pdc, restart, tcsr;
++};
++static struct mss_runtime mss_kept;
++
++static bool __attribute__((noinline))
++mss_halt_and_clocks_off(struct mss_runtime *rt)
++{
++	bool halted = true;
++
++	if (rt->released) {
++		announce(5, "(W2e) back 1: halts the q6 AXI port (after half a second for the modem to settle after its stop-ack)");
++		delay_for_interval(500, NSEC_PER_MSEC);
++		halted &= halt_port("q6", rt->tcsr + 0x3000);
++		announce(5, "(W2e) back 2: halts the modem AXI port");
++		halted &= halt_port("modem", rt->tcsr + 0x5000);
++		announce(5, "(W2e) back 3: halts the nc AXI port");
++		halted &= halt_port("nc", rt->tcsr + 0x4000);
++		announce(5, "(W2e) back 4: puts the modem into reset");
++		mss_reset_assert(rt->pdc, rt->restart);
++		rt->released = false;
++	}
++	announce(5, "(W2e) back 5: turns the clocks off");
++	mss_clocks_off(1, 3, rt->turned);
++	mss_clocks_off(3, MSS_CLOCKS, rt->turned);
++	mss_clocks_off(0, 1, rt->turned);
++	return halted;
++}
++
++static void __attribute__((noinline))
++mss_finish_reclaim(struct mss_runtime *rt, uint32_t back, bool show_gcc)
++{
++	uint32_t address;
++
++	announce(5, "(W2e) back 6: gives the MBA and modem memory back to the kernel");
++	if (rt->mba_owners != (1ull << VMID_HLOS)) {
++		assign_mem("mba", MBA_MEMORY, MBA_SIZE, &rt->mba_owners, true, false);
++	}
++	if (rt->mpss_owners != (1ull << VMID_HLOS)) {
++		assign_mem("mpss", MPSS_MEMORY, MPSS_SIZE, &rt->mpss_owners, true, false);
++	}
++	announce(5, "(W2e) back 7: rails and QMP");
++	if (back < 7) {
++		say("mi8rp: mss: mi8rp_back=%u: stops before the rails and QMP\n", back);
++		return;
++	}
++	if (show_gcc) {
++		gcc_show();
++	}
++	if (rt->rails) {
++		rpmh_level_pos("mss.lvl", 0);
++		rail_position("mss.lvl", 0, &address, false);
++		rt->rails = false;
++	}
++	qmp_send("{class: image, res: load_state, name: modem, val: off}");
++	if (rt->mba_owners != (1ull << VMID_HLOS) || rt->mpss_owners != (1ull << VMID_HLOS)) {
++		say("mi8rp: mss: A REGION IS STILL THE MODEM'S: DO NOT TOUCH IT (mba %#llx, mpss %#llx)\n", rt->mba_owners, rt->mpss_owners);
++	}
++}
++
 +static void
 +mss_w2e(bool load)
 +{
-+	bool turned[MSS_CLOCKS] = { false };
-+	bool rails = false, qmp = false, released = false, ok = false;
-+	uint64_t mba_owners = 1ull << VMID_HLOS, mpss_owners = 1ull << VMID_HLOS;
++	bool qmp = false, ok = false;
 +	vm_offset_t rmb = 0, pdc = 0, restart = 0, q6 = 0, tcsr = 0, image;
 +	uint8_t *mba_file;
 +	uint32_t file_size = 0, value;
-+	uint32_t address, back = 7;
-+	bool halted = true;
++	uint32_t back = 7;
 +
++	memset(&mss_kept, 0, sizeof(mss_kept));
++	mss_kept.mba_owners = 1ull << VMID_HLOS;
++	mss_kept.mpss_owners = 1ull << VMID_HLOS;
 +	PE_parse_boot_argn("mi8rp_back", &back, sizeof(back));
 +	announce(5, "(W2e) writes mba.mbn into the MBA region, then brings the modem up as Linux q6v5_mba_load does and starts its Q6 (no modem image)");
 +	mba_file = fs_slurp("image/mba.mbn", &file_size);
@@ -18472,27 +18790,28 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	kfree_data(mba_file, file_size);
 +
 +	rmb = ml_io_map(RMB_PHYS, 0x1000);
-+	pdc = ml_io_map(PDC_PHYS, 0x1000);
-+	restart = ml_io_map(AOSS_CC_PHYS, 0x1000);
++	pdc = mss_kept.pdc = ml_io_map(PDC_PHYS, 0x1000);
++	restart = mss_kept.restart = ml_io_map(AOSS_CC_PHYS, 0x1000);
 +	q6 = ml_io_map(QDSP6SS_PHYS, 0x1000);
-+	tcsr = ml_io_map(TCSR_HALT_PHYS, 0x10000);
++	tcsr = mss_kept.tcsr = ml_io_map(TCSR_HALT_PHYS, 0x10000);
 +
 +	qmp = qmp_send("{class: image, res: load_state, name: modem, val: on}");
 +	if (!qmp) {
 +		return;
 +	}
-+	rails = rpmh_level_pos("cx.lvl", 0xffffffffu) && rpmh_level_pos("mx.lvl", 0xffffffffu) && rpmh_level_pos("mss.lvl", 0xffffffffu);
-+	if (!rails || !mss_clocks_on(0, 3, turned)) {
++	mss_kept.rails = rpmh_level_pos("cx.lvl", 0xffffffffu) && rpmh_level_pos("mx.lvl", 0xffffffffu) && rpmh_level_pos("mss.lvl", 0xffffffffu);
++	if (!mss_kept.rails || !mss_clocks_on(0, 3, mss_kept.turned)) {
 +		goto out;
 +	}
 +	announce(5, "(W2e) takes the modem out of reset");
 +	mss_reset_deassert(rmb, pdc, restart);
-+	released = true;
-+	if (!mss_clocks_on(3, MSS_CLOCKS, turned)) {
++	mss_kept.released = true;
++	if (!mss_clocks_on(3, MSS_CLOCKS, mss_kept.turned)) {
 +		goto out;
 +	}
 +	announce(5, "(W2e) hands the modem region and the MBA region to the MSS");
-+	if (!assign_mem("mpss", MPSS_MEMORY, MPSS_SIZE, &mpss_owners, false, true) || !assign_mem("mba", MBA_MEMORY, MBA_SIZE, &mba_owners, false, true)) {
++	if (!assign_mem("mpss", MPSS_MEMORY, MPSS_SIZE, &mss_kept.mpss_owners, false, true) ||
++	    !assign_mem("mba", MBA_MEMORY, MBA_SIZE, &mss_kept.mba_owners, false, true)) {
 +		goto out;
 +	}
 +	if (load && !modem_prepare_smp2p()) {
@@ -18537,9 +18856,10 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	if (ok) {
 +		say("mi8rp: mss: THE MBA RUNS ON THE MODEM'S Q6 AND SAYS IT UNLOCKED THE XPU\n");
 +		if (load) {
-+			ok = modem_load_and_run(rmb, &mpss_owners);
++			ok = modem_load_and_run(rmb, &mss_kept.mpss_owners);
 +			if (modem_kept) {
-+				say("mi8rp: mss: mi8rp_hold: the modem is LEFT RUNNING (no stop, nothing taken back); reset the phone to stop it\n");
++				mss_kept.active = true;
++				say("mi8rp: mss: mi8rp_hold: the modem is LEFT RUNNING until orderly stop\n");
 +				return;
 +			}
 +		} else {
@@ -18549,99 +18869,77 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +	}
 +out:
 +	announce(5, "(W2e) takes it all back as Linux q6v5_mba_reclaim does: halt the AXI ports, reset, clocks, memory, rails, QMP");
-+	if (released) {
-+		announce(5, "(W2e) back 1: halts the q6 AXI port (after half a second for the modem to settle after its stop-ack)");
-+		delay_for_interval(500, NSEC_PER_MSEC);
-+		halted &= halt_port("q6", tcsr + 0x3000);
-+		announce(5, "(W2e) back 2: halts the modem AXI port");
-+		halted &= halt_port("modem", tcsr + 0x5000);
-+		announce(5, "(W2e) back 3: halts the nc AXI port");
-+		halted &= halt_port("nc", tcsr + 0x4000);
-+		announce(5, "(W2e) back 4: puts the modem into reset");
-+		mss_reset_assert(pdc, restart);
-+	}
-+	announce(5, "(W2e) back 5: turns the clocks off");
-+	mss_clocks_off(1, 3, turned);
-+	mss_clocks_off(3, MSS_CLOCKS, turned);
-+	mss_clocks_off(0, 1, turned);
-+	if (!halted) {
-+		say("mi8rp: mss: A PORT DID NOT HALT: the memory is NOT given back (TrustZone took the phone down with it, EXP-0198); reset the phone before the next run\n");
++	if (!mss_halt_and_clocks_off(&mss_kept)) {
++		say("mi8rp: mss: A PORT DID NOT HALT: the memory is NOT given back; reset the phone before the next run\n");
 +		return;
 +	}
 +	if (back < 6) {
 +		say("mi8rp: mss: mi8rp_back=%u: stops before giving the memory back (the regions stay the modem's until the phone is reset)\n", back);
 +		return;
 +	}
-+	announce(5, "(W2e) back 6: gives the MBA and modem memory back to the kernel");
-+	if (mba_owners != (1ull << VMID_HLOS)) {
-+		assign_mem("mba", MBA_MEMORY, MBA_SIZE, &mba_owners, true, false);
++	mss_finish_reclaim(&mss_kept, back, true);
++	if (back >= 7) {
++		say("mi8rp: mss: W2%c done: %s\n", load ? 'f' : 'e', ok ? (load ? "the modem came up and everything was taken back" : "the MBA ran and everything was taken back") : "A STEP FAILED, everything was taken back");
 +	}
-+	if (mpss_owners != (1ull << VMID_HLOS)) {
-+		assign_mem("mpss", MPSS_MEMORY, MPSS_SIZE, &mpss_owners, true, false);
-+	}
-+	announce(5, "(W2e) back 7: rails and QMP");
-+	if (back < 7) {
-+		say("mi8rp: mss: mi8rp_back=%u: stops before the rails and QMP\n", back);
-+		return;
-+	}
-+	gcc_show();
-+	if (rails) {
-+		rpmh_level_pos("mss.lvl", 0);
-+		rail_position("mss.lvl", 0, &address, false);
-+	}
-+	qmp_send("{class: image, res: load_state, name: modem, val: off}");
-+	if (mba_owners != (1ull << VMID_HLOS) || mpss_owners != (1ull << VMID_HLOS)) {
-+		say("mi8rp: mss: A REGION IS STILL THE MODEM'S: DO NOT TOUCH IT (mba %#llx, mpss %#llx)\n", mba_owners, mpss_owners);
-+	}
-+	say("mi8rp: mss: W2%c done: %s\n", load ? 'f' : 'e', ok ? (load ? "the modem came up and everything was taken back" : "the MBA ran and everything was taken back") : "A STEP FAILED, everything was taken back");
 +}
 +
 +static void
 +mss_w2e_thread(void *parameter, __unused wait_result_t wr)
 +{
 +	uint8_t probe;
-+
 +	unsigned waited;
 +
-+	for (waited = 0; waited < 600; waited++) {
++	__atomic_store_n(&mss_thread_alive, true, __ATOMIC_RELEASE);
++	for (waited = 0; waited < 600 && !__atomic_load_n(&rproc_stopping, __ATOMIC_ACQUIRE); waited++) {
 +		if (redwood_ufs_read_named("modem", 0, &probe, 1) == 0) {
 +			break;
 +		}
 +		delay_for_interval(100, NSEC_PER_MSEC);
 +	}
 +	say("mi8rp: mss: the modem partition is %s after %u ms of waiting\n", waited < 600 ? "readable" : "STILL NOT readable", waited * 100);
-+	mss_w2e(parameter != NULL);
++	if (!__atomic_load_n(&rproc_stopping, __ATOMIC_ACQUIRE)) {
++		mss_w2e(parameter != NULL);
++	}
 + if(audio_session_stream && !modem_kept)__atomic_store_n(&audio_radio_state,2,__ATOMIC_RELEASE);
++	__atomic_store_n(&mss_thread_alive, false, __ATOMIC_RELEASE);
 +	thread_terminate(current_thread());
 +}
 +
-+/* Only a fresh ADSP edge is prepared: never reset a descriptor/FIFO that
-+ * another boot or peer may own. A complete reboot is the recovery path. */
++/* Prepare the ADSP GLINK edge when ADSP is stopped or inactive; refuse if active unless mi8rp_again=1. */
 +static bool
 +adsp_glink_prepare(void)
 +{
 +	static const struct { uint32_t item, size; } items[] = { { 478, 32 }, { 479, 16384 } };
-+	uint32_t cacheline = 0, psize = 0, partition, size = 0;
-+	bool ok = false;
++	struct smp2p words;
++	uint32_t cacheline = 0, psize = 0, partition, size = 0, again = 0;
++	bool active, ok = false;
++
++	PE_parse_boot_argn("mi8rp_again", &again, sizeof(again));
++	active = remote_words(&adsp_remote, &words) &&
++	    (dsp_state(&words) & DSP_READY) && !(dsp_state(&words) & DSP_STOP_ACK);
 +	partition = smem_partition(SMEM_US, SMEM_ADSP, &cacheline, &psize);
 +	if (!partition || !lock_take()) return false;
 +	for (unsigned i = 0; i < 2; i++) {
-+		if (item_find(partition, cacheline, items[i].item, &size)) {
-+			say("mi8rp: 9: existing GLINK item %u left untouched; reboot required\n", items[i].item);
-+			goto out;
++		uint32_t offset = item_find(partition, cacheline, items[i].item, &size);
++		if (offset) {
++			if ((active && !again) || size != items[i].size) {
++				say("mi8rp: 9: existing GLINK item %u active or size mismatch; reboot required\n", items[i].item);
++				goto out;
++			}
++		} else {
++			if (!item_make_locked(partition, items[i].item, items[i].size)) goto out;
++			offset = item_find(partition, cacheline, items[i].item, &size);
++			if (!offset || size != items[i].size) goto out;
 +		}
-+	}
-+	for (unsigned i = 0; i < 2; i++) {
-+		uint32_t offset;
-+		if (!item_make_locked(partition, items[i].item, items[i].size)) goto out;
-+		offset = item_find(partition, cacheline, items[i].item, &size);
-+		if (!offset || size != items[i].size) goto out;
 +		for (uint32_t n = 0; n < size; n += 4) smem_poke(offset + n, 0);
 +	}
 +	settle();
 +	ok = true;
 +out:
 +	lock_give();
++	if (ok) {
++		remote_clear_theirs_state(&adsp_remote);
++	}
 +	say("mi8rp: 9: ADSP GLINK descriptor/TX FIFO %s\n", ok ? "prepared" : "not prepared");
 +	return ok;
 +}
@@ -19225,7 +19523,8 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +		/* mi8rp_wlfw=4: the radio's supplies are on before the modem starts (EXP-0203: msa_info said INCOMPATIBLE_STATE for 20 s with the chip off, and with it switched on 3 s late) */
 +		if (PE_parse_boot_argn("mi8rp_wlfw", &pre, sizeof(pre)) && pre == 4) {
 +			announce(9, "(wlfw) switches the radio's four supplies on before the modem is started, and leaves them on");
-+			say("mi8rp: wlfw: supplies %s\n", wlan_power(true) ? "on" : "NOT ALL ON");
++			wl_powered = wlan_power(true);
++			say("mi8rp: wlfw: supplies %s\n", wl_powered ? "on" : "NOT ALL ON");
 +		}
 +	}
 +	{
@@ -19253,8 +19552,11 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +		if (mss == 5 || mss == 6) {
 +			thread_t thread;
 +
++			__atomic_store_n(&mss_thread_alive, true, __ATOMIC_RELEASE);
 +			if (kernel_thread_start(mss_w2e_thread, mss == 6 ? (void *)1 : NULL, &thread) == KERN_SUCCESS) {
 +				thread_deallocate(thread);
++			} else {
++				__atomic_store_n(&mss_thread_alive, false, __ATOMIC_RELEASE);
 +			}
 +		} else if (mss >= 4) {
 +			mss_w2d();
@@ -19323,6 +19625,277 @@ index 0000000000000000000000000000000000000000..9570044a34e49520d587654016c36846
 +			thread_deallocate(thread);
 +		}
 +	}
++}
++
++static void __attribute__((noinline))
++rproc_stop_audio(void)
++{
++	if (!audio_session_stream && __atomic_load_n(&audio_play_thread, __ATOMIC_ACQUIRE) == NULL) {
++		return;
++	}
++	mi8_pcm_session_stop_request();
++	if (__atomic_load_n(&audio_radio_state, __ATOMIC_ACQUIRE) == 0) {
++		__atomic_store_n(&audio_radio_state, 2, __ATOMIC_RELEASE);
++	}
++	for (unsigned ms = 0; ms < 8000 && __atomic_load_n(&audio_play_thread, __ATOMIC_ACQUIRE) != NULL; ms += 10) {
++		delay_for_interval(10, NSEC_PER_MSEC);
++	}
++	if (__atomic_load_n(&audio_play_thread, __ATOMIC_ACQUIRE) != NULL) {
++		say("mi8rp: audio=5: session worker still active at stop deadline; forcing amp reset low\n");
++		(void)mi8_tas_session_join();
++	}
++}
++
++static void __attribute__((noinline))
++rproc_stop_wsmmu(void)
++{
++	if (audio_smmu_serial) lck_mtx_lock(&wsmmu_lock);
++	if (wsmmu != 0) {
++		if (wsmmu_slot != ~0u) {
++			wr(wsmmu + WSMMU_SMR(wsmmu_slot), 0);
++			wr(wsmmu + WSMMU_S2CR(wsmmu_slot), 0);
++			wsmmu_slot = ~0u;
++		}
++		if (wsmmu_cb != 0 && wsmmu_context != ~0u) {
++			wr(wsmmu_cb + WSMMU_CB_SCTLR, 0);
++			__asm__ volatile ("dsb sy");
++			wr(wsmmu_cb + WSMMU_CB_TLBIASID, wsmmu_context);
++			wr(wsmmu_cb + WSMMU_CB_TLBSYNC, 1);
++			for (unsigned n = 0; (rd(wsmmu_cb + WSMMU_CB_TLBSTATUS) & 1) && n < 1000; n++) {
++				delay_for_interval(10, NSEC_PER_USEC);
++			}
++			wr(wsmmu_cb + WSMMU_CB_TTBR0, 0);
++			wr(wsmmu_cb + WSMMU_CB_TTBR0 + 4, 0);
++			wr(wsmmu_cb + WSMMU_CB_TTBR1, 0);
++			wr(wsmmu_cb + WSMMU_CB_TTBR1 + 4, 0);
++			wr(wsmmu_cb + WSMMU_CB_TCR, 0);
++			wr(wsmmu_cb + WSMMU_CB_TCR2, 0);
++			wr(wsmmu_cb + WSMMU_CB_MAIR0, 0);
++			wr(wsmmu_cb + WSMMU_CB_MAIR1, 0);
++			wr(wsmmu_cb + WSMMU_CB_FSR, 0xc00001feu);
++			wr(wsmmu + WSMMU_CBAR(wsmmu_context), 0);
++			wr(wsmmu + WSMMU_CBA2R(wsmmu_context), 0);
++		}
++		wsmmu_translating = false;
++		wsmmu_context = ~0u;
++		wsmmu_cb = 0;
++	}
++	if (wsmmu_tables != 0) {
++		kmem_free(kernel_map, wsmmu_tables, 4096ul * WSMMU_TABLES);
++		wsmmu_tables = 0;
++		wsmmu_table_count = 0;
++	}
++	if (audio_smmu_serial) lck_mtx_unlock(&wsmmu_lock);
++}
++
++#define QMI_SSCTL_SERVICE_ID            43u
++#define QMI_SSCTL_MODEM_INSTANCE        0x12u
++#define QMI_SSCTL_SHUTDOWN_REQ_V02      0x0021u
++#define QMI_SSCTL_SHUTDOWN_READY_IND    0x0021u
++#define DSP_SHUTDOWN_ACK                (1u << 4)
++
++static bool ssctl_resp_ok, ssctl_ind_ready;
++
++static void
++ssctl_receive(__unused void *ctx, __unused uint32_t node, __unused uint32_t port, const void *data, size_t length)
++{
++	const uint8_t *d = data;
++	uint16_t msg, total;
++
++	if (length < 7) {
++		return;
++	}
++	msg = (uint16_t)(d[3] | d[4] << 8);
++	total = (uint16_t)(d[5] | d[6] << 8);
++	if (7u + total > length) {
++		total = (uint16_t)(length - 7);
++	}
++	if (d[0] == 2 && msg == QMI_SSCTL_SHUTDOWN_REQ_V02) {
++		uint16_t result = 0xffff, error = 0xffff;
++		unsigned at = 7;
++
++		while (at + 3 <= 7u + total) {
++			uint16_t l = (uint16_t)(d[at + 1] | d[at + 2] << 8);
++			const uint8_t *v = d + at + 3;
++
++			if (at + 3 + l > 7u + total) {
++				break;
++			}
++			if (d[at] == 0x02 && l >= 4) {
++				result = (uint16_t)(v[0] | v[1] << 8);
++				error = (uint16_t)(v[2] | v[3] << 8);
++			}
++			at += 3 + l;
++		}
++		say("mi8rp: ssctl: shutdown resp result=%u error=%u\n", result, error);
++		if (result == 0) {
++			__atomic_store_n(&ssctl_resp_ok, true, __ATOMIC_RELEASE);
++		}
++	} else if (d[0] == 4 && msg == QMI_SSCTL_SHUTDOWN_READY_IND) {
++		say("mi8rp: ssctl: shutdown_ready indication\n");
++		__atomic_store_n(&ssctl_ind_ready, true, __ATOMIC_RELEASE);
++	}
++}
++
++/* Linux drivers/remoteproc/qcom_sysmon.c ssctl_request_shutdown(): must run while modem_gl + modem_hs (rmtfs) are still polled. */
++static bool __attribute__((noinline))
++modem_ssctl_shutdown(void)
++{
++	static struct mi8_qrtr_server servers[64];
++	static const uint8_t pkt[7] = { 0x00, 0x01, 0x00, 0x21, 0x00, 0x00, 0x00 };
++	const struct redwood_qrtr_ops *ops;
++	struct redwood_qrtr_port *port;
++	struct smp2p words;
++	int count, chosen = -1, rc;
++	bool smp2p_acked = false;
++
++	if (modem_gl == NULL || !modem_glink_up) {
++		return false;
++	}
++	count = mi8_glink_qrtr_servers(modem_gl, servers, 64);
++	for (int i = 0; i < count; i++) {
++		if (servers[i].service == QMI_SSCTL_SERVICE_ID) {
++			say("mi8rp: ssctl: candidate v=%u inst=%#x at %u:%u\n",
++			    servers[i].version, servers[i].instance, servers[i].node, servers[i].port);
++			if (chosen < 0 || (servers[i].version == 2 && servers[i].instance == QMI_SSCTL_MODEM_INSTANCE) ||
++			    (servers[chosen].version != 2 && servers[i].version == 2)) {
++				chosen = i;
++			}
++		}
++	}
++	if (chosen < 0) {
++		say("mi8rp: ssctl: service %u not found among %d servers\n", QMI_SSCTL_SERVICE_ID, count);
++		return false;
++	}
++	ops = mi8_glink_qrtr_ops(modem_gl);
++	if (ops == NULL || (port = ops->open(ssctl_receive, NULL, NULL)) == NULL) {
++		say("mi8rp: ssctl: failed to open QRTR port\n");
++		return false;
++	}
++	__atomic_store_n(&ssctl_resp_ok, false, __ATOMIC_RELEASE);
++	__atomic_store_n(&ssctl_ind_ready, false, __ATOMIC_RELEASE);
++	rc = ops->send(port, servers[chosen].node, servers[chosen].port, pkt, sizeof(pkt));
++	say("mi8rp: ssctl: sent shutdown_req to %u:%u rc=%d\n", servers[chosen].node, servers[chosen].port, rc);
++	if (rc == 0) {
++		for (unsigned ms = 0; ms < 5000; ms += 10) {
++			if (remote_words(&modem_remote, &words) && (dsp_state(&words) & DSP_SHUTDOWN_ACK)) {
++				smp2p_acked = true;
++			}
++			if (__atomic_load_n(&ssctl_ind_ready, __ATOMIC_ACQUIRE) && smp2p_acked) {
++				break;
++			}
++			delay_for_interval(10, NSEC_PER_MSEC);
++		}
++	}
++	ops->close(port);
++	{
++		uint32_t st = remote_words(&modem_remote, &words) ? dsp_state(&words) : 0;
++		say("mi8rp: ssctl: done resp=%d ind=%d smp2p_shutdown_ack=%d state=%#x\n",
++		    __atomic_load_n(&ssctl_resp_ok, __ATOMIC_ACQUIRE),
++		    __atomic_load_n(&ssctl_ind_ready, __ATOMIC_ACQUIRE), smp2p_acked, st);
++	}
++	return smp2p_acked;
++}
++
++static void __attribute__((noinline))
++rproc_stop_mss_and_wlan(void)
++{
++	bool halted = true, ssctl_acked = false, wl_done, threads_done;
++
++	__atomic_store_n(&rproc_stopping, true, __ATOMIC_RELEASE);
++	wl_run = false;
++	for (unsigned ms = 0; ms < 1500 &&
++	    (__atomic_load_n(&wl_thread_alive, __ATOMIC_ACQUIRE) ||
++	    __atomic_load_n(&mss_thread_alive, __ATOMIC_ACQUIRE)); ms += 10) {
++		delay_for_interval(10, NSEC_PER_MSEC);
++	}
++	wl_done = !__atomic_load_n(&wl_thread_alive, __ATOMIC_ACQUIRE) &&
++	    !__atomic_load_n(&mss_thread_alive, __ATOMIC_ACQUIRE);
++
++	/* Reclaim WLFW MSA while MSS and WCN3990 supplies are still up (proven safe in EXP-0203j, after ath10k mode OFF). */
++	if (wl_done && modem_wl != NULL) {
++		say("mi8rp: wlfw: reclaiming MSA before radio power-off\n");
++		delay_for_interval(600, NSEC_PER_MSEC);
++		(void)mi8_wlfw_destroy(modem_wl);
++		modem_wl = NULL;
++	}
++
++	mi8_bt_stop();
++
++	if (wl_powered) {
++		if (wl_level == 5) {
++			uint32_t address = 0;
++
++			if (rail_position("rfclka2", 0, &address, false) == 0 || address != 0) {
++				(void)rpmh_write("rfclka2", address + 4, 0);
++			}
++		}
++		say("mi8rp: wlfw: switching the radio's supplies off: %s\n", wlan_power(false) ? "off" : "not all off");
++		wl_powered = false;
++	}
++	rproc_stop_wsmmu();
++
++	/* Ask MPSS sysmon (SSCTL) for graceful shutdown while modem_svc_thread still pumps GLINK + RMTFS. */
++	if (mss_kept.active) {
++		ssctl_acked = modem_ssctl_shutdown();
++	}
++
++	modem_svc_run = false;
++	for (unsigned ms = 0; ms < 500 && __atomic_load_n(&modem_svc_thread_alive, __ATOMIC_ACQUIRE); ms += 10) {
++		delay_for_interval(10, NSEC_PER_MSEC);
++	}
++	threads_done = wl_done && !__atomic_load_n(&modem_svc_thread_alive, __ATOMIC_ACQUIRE);
++
++	if (threads_done) {
++		if (srn_port != NULL && srn_ops != NULL) {
++			srn_ops->close(srn_port);
++			srn_port = NULL;
++			srn_ops = NULL;
++		}
++		if (modem_hs != NULL) {
++			mi8_hostsvc_destroy(modem_hs);
++			modem_hs = NULL;
++		}
++		if (modem_gl != NULL) {
++			mi8_glink_destroy(modem_gl);
++			modem_gl = NULL;
++		}
++	} else {
++		say("mi8rp: mss: worker threads still active at stop deadline; retaining QRTR/WLFW state\n");
++	}
++
++	if (mss_kept.active) {
++		if (!ssctl_acked) {
++			(void)remote_ask_to_stop(&modem_remote, "the modem", 3000);
++		}
++		halted = mss_halt_and_clocks_off(&mss_kept);
++		if (halted) {
++			if (threads_done && rmtfs_owners != (1ull << VMID_HLOS)) {
++				say("mi8rp: mss: reclaiming rmtfs memory\n");
++				delay_for_interval(600, NSEC_PER_MSEC);
++				assign_mem("rmtfs", RMTFS_MEMORY, RMTFS_SIZE, &rmtfs_owners, true, false);
++			}
++			mss_finish_reclaim(&mss_kept, 7, false);
++			say("mi8rp: mss: orderly stop complete\n");
++		} else {
++			say("mi8rp: mss: A PORT DID NOT HALT on stop: memory retained for safety\n");
++		}
++		mss_kept.active = false;
++		modem_kept = false;
++	}
++}
++
++void
++mi8_rproc_stop(void)
++{
++	static bool stopped;
++
++	if (stopped) {
++		return;
++	}
++	stopped = true;
++	rproc_stop_audio();
++	rproc_stop_mss_and_wlan();
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
@@ -24215,10 +24788,21 @@ index 0000000000000000000000000000000000000000..e6394fc291cc837efbf341b5fd1a0fb2
 +
 +#endif
 diff --git a/bsd/dev/redwood_adreno.c b/bsd/dev/redwood_adreno.c
-index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d952313613b 100644
+index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115e9f3df60 100644
 --- a/bsd/dev/redwood_adreno.c
 +++ b/bsd/dev/redwood_adreno.c
-@@ -3196,6 +3196,7 @@ redwood_adreno_quiesce(void)
+@@ -3129,6 +3129,10 @@ gpu_block_stop(void)
+ void
+ redwood_adreno_quiesce(void)
+ {
++	if (mi8_gpu_kept()) {
++		mi8_gpu_quiesce();
++		return;
++	}
+ 	if (cx_off) {
+ 		return;
+ 	}
+@@ -3196,6 +3200,7 @@ redwood_adreno_quiesce(void)
  static bool gpu_kept;
  static uint32_t gpu_fence;              /* the number of the last submission */
  static uint32_t gpu_timed;              /* ... of the last whose times have been added up */
@@ -24226,7 +24810,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  static uint64_t gpu_ticks;              /* how long the core has worked on the submissions added up */
  static uint32_t gpu_timed_count;
  static uint32_t gpu_timed_by[7];        /* ... how many of them under 0.1, 0.25, 0.5, 1, 2, 4 ms, and longer */
-@@ -3295,6 +3296,10 @@ static void gpu_block_stop(void);
+@@ -3295,6 +3300,10 @@ static void gpu_block_stop(void);
  void
  redwood_gpu_stop(void)
  {
@@ -24237,7 +24821,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	if (gpu_kept) {
  		uint32_t waited = 0;
  
-@@ -3321,7 +3326,7 @@ redwood_adreno_stop(void)
+@@ -3321,7 +3330,7 @@ redwood_adreno_stop(void)
  {
  	uint32_t dirty = 0;
  
@@ -24246,7 +24830,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  		RedwoodGPUStop();
  	}
  }
-@@ -3329,6 +3334,9 @@ redwood_adreno_stop(void)
+@@ -3329,6 +3338,9 @@ redwood_adreno_stop(void)
  bool
  redwood_gpu_ready(void)
  {
@@ -24256,7 +24840,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	return gpu_kept;
  }
  
-@@ -3336,6 +3344,9 @@ redwood_gpu_ready(void)
+@@ -3336,6 +3348,9 @@ redwood_gpu_ready(void)
  bool
  redwood_gpu_parameter(uint32_t which, uint64_t *value)
  {
@@ -24266,7 +24850,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	switch (which) {
  	case 0x01:                              /* GPU_ID: none, the chip ID says it */
  	case 0x06:                              /* GMEM_BASE */
-@@ -3394,6 +3405,9 @@ redwood_gpu_parameter(uint32_t which, uint64_t *value)
+@@ -3394,6 +3409,9 @@ redwood_gpu_parameter(uint32_t which, uint64_t *value)
  uint64_t
  redwood_gpu_address(uint64_t size)
  {
@@ -24276,7 +24860,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	size = gpu_address_span(size);
  	for (unsigned i = 0; i < gpu_free_count; i++) {
  		if (gpu_free[i].size >= size) {
-@@ -3416,6 +3430,10 @@ redwood_gpu_address(uint64_t size)
+@@ -3416,6 +3434,10 @@ redwood_gpu_address(uint64_t size)
  void
  redwood_gpu_address_free(uint64_t address, uint64_t size)
  {
@@ -24287,7 +24871,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	unsigned at;
  
  	size = gpu_address_span(size);
-@@ -3461,6 +3479,10 @@ void
+@@ -3461,6 +3483,10 @@ void
  redwood_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest, unsigned *holes, unsigned *most, uint64_t *lost,
      uint32_t *refused)
  {
@@ -24298,7 +24882,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	*largest = 0;
  	for (unsigned i = 0; i < gpu_free_count; i++) {
  		if (gpu_free[i].size > *largest) {
-@@ -3479,18 +3501,29 @@ redwood_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest, unsigned *h
+@@ -3479,18 +3505,29 @@ redwood_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest, unsigned *h
  bool
  redwood_gpu_map(uint64_t address, uint64_t phys, bool read_only)
  {
@@ -24328,7 +24912,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	uint32_t context = smmu_context(&core_space);
  
  	for (uint64_t offset = 0; offset < size; offset += 4096) {
-@@ -3507,6 +3540,10 @@ redwood_gpu_unmap(uint64_t address, uint64_t size)
+@@ -3507,6 +3544,10 @@ redwood_gpu_unmap(uint64_t address, uint64_t size)
  void
  redwood_gpu_to_memory(void *start, uint64_t size)
  {
@@ -24339,7 +24923,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	to_memory((vm_offset_t)start, size);
  }
  
-@@ -3514,6 +3551,9 @@ redwood_gpu_to_memory(void *start, uint64_t size)
+@@ -3514,6 +3555,9 @@ redwood_gpu_to_memory(void *start, uint64_t size)
  bool
  redwood_gpu_done(uint32_t fence)
  {
@@ -24349,7 +24933,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	volatile uint32_t *word = (volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT);
  
  	to_memory((vm_offset_t)word, 4);
-@@ -3523,6 +3563,9 @@ redwood_gpu_done(uint32_t fence)
+@@ -3523,6 +3567,9 @@ redwood_gpu_done(uint32_t fence)
  uint32_t
  redwood_gpu_last(void)
  {
@@ -24359,7 +24943,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	return gpu_fence;
  }
  
-@@ -3566,6 +3609,7 @@ gpu_times(void)
+@@ -3566,6 +3613,7 @@ gpu_times(void)
  			}
  			gpu_timed_by[by]++;
  			gpu_ticks += ticks;
@@ -24367,7 +24951,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  			gpu_timed_count++;
  		}
  	}
-@@ -3578,6 +3622,10 @@ gpu_times(void)
+@@ -3578,6 +3626,10 @@ gpu_times(void)
  void
  redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7])
  {
@@ -24378,7 +24962,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	gpu_times();
  	*microseconds = gpu_ticks * 10 / 192;
  	*submissions = gpu_timed_count;
-@@ -3595,6 +3643,9 @@ redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7]
+@@ -3595,6 +3647,9 @@ redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7]
  uint32_t
  redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
  {
@@ -24388,7 +24972,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	uint32_t wanted = 26 + 4 * count, room = 0;
  
  	for (int i = 0; i < 20000; i++) {
-@@ -3640,6 +3691,10 @@ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t co
+@@ -3640,6 +3695,10 @@ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t co
  void
  redwood_gpu_report(const char *why)
  {
@@ -24399,7 +24983,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..68e492245d66a52afc6ef63673e25d95
  	uint32_t context = smmu_context(&core_space);
  
  	printf("adreno: gpu: %s: submission %u is the last, the core has done %u; ring: read up to %u, written up to %u; status "
-@@ -3712,6 +3767,9 @@ redwood_gpu_report(const char *why)
+@@ -3712,6 +3771,9 @@ redwood_gpu_report(const char *why)
  bool
  redwood_gpu_recover(void)
  {
@@ -27922,21 +28506,24 @@ index eb549c3f27629257b5ff88e3954c64a868687413..558632e256cec058f8081f26b7adce88
  void redwood_audio_init(void);
  void redwood_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virtio sound device */
 diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
-index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..85cb2115023d02023ad2bbb077a06a93198fa05d 100644
+index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..470bdb33c8d363ee450082c57eb39a1cb3abc475 100644
 --- a/bsd/sys/redwood_input.h
 +++ b/bsd/sys/redwood_input.h
-@@ -42,6 +42,10 @@ void redwood_input_init(void);
+@@ -42,6 +42,13 @@ void redwood_input_init(void);
  void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
  void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
  void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
 +void mi8_fts_init(void);                /* boot-arg fts=1 fts_steps=6: the Mi 8 touch screen (ST FTM5), steps 1-5 its probe */
 +void mi8_bt_init(void);                /* boot-arg bt=N: the first N steps of the Mi 8 Bluetooth (WCN3990 over serial engine 6) */
++void mi8_bt_stop(void);
 +void mi8_adreno_init(void);             /* boot-arg mi8gpu=N: the first N steps of waking the Mi 8 GPU (Adreno 630) */
++void mi8_gpu_quiesce(void);             /* panic quiesce for the Mi 8 GPU */
 +void mi8_rproc_init(void);              /* boot-arg mi8rp_step=N: the first N steps of the Mi 8 remote processors (SMEM, modem, ...) */
++void mi8_rproc_stop(void);              /* orderly teardown of Mi 8 audio/rproc/modem/WCN3990 power and SMMU state */
  void redwood_ufs_init(void);           /* ufs=2 to xnuloader: the phone's storage, read only, through the loader (ufs_shared_pa=) */
  void redwood_ufs_report(const char *when); /* where reading the storage has spent its time so far */
  bool redwood_ufs_dev(dev_t dev);           /* one of the storage's devices */
-@@ -122,6 +126,24 @@ void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t
+@@ -122,6 +129,24 @@ void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t
  void redwood_gpu_report(const char *why);
  bool redwood_gpu_recover(void);
  void redwood_gpu_stop(void);
@@ -31322,10 +31909,10 @@ index 63ffd4b9906f83f92e3f1ae765f5681f2654dc38..3fa60bb45cee869d7853c6dad857427b
  	if (gicd_base == 0) {
  		DTEntry entry;
 diff --git a/osfmk/arm64/loader_return.c b/osfmk/arm64/loader_return.c
-index a058bb5263934bb489894fc933ba340690f590db..a798ba4f823a38e1dd5cc67f27693c14b671ab88 100644
+index a058bb5263934bb489894fc933ba340690f590db..06623c163be1cdb6bf822b6bfb00e9765f1df877 100644
 --- a/osfmk/arm64/loader_return.c
 +++ b/osfmk/arm64/loader_return.c
-@@ -45,9 +45,15 @@ extern void gic_v3_irq_cpu_shutdown(void);
+@@ -45,9 +45,16 @@ extern void gic_v3_irq_cpu_shutdown(void);
  void loader_log_putc(char c);
  void loader_return(void);
  extern void redwood_adreno_quiesce(void);
@@ -31338,10 +31925,11 @@ index a058bb5263934bb489894fc933ba340690f590db..a798ba4f823a38e1dd5cc67f27693c14
  extern void redwood_adreno_minute(void);
  extern void redwood_wifi_stop(void);
 +extern void mi8_wifi_stop(void);
++extern void mi8_rproc_stop(void);
  extern void redwood_wifi_quiesce(void);
  extern void redwood_adsp_stop(void);
  extern void redwood_adsp_quiesce(void);
-@@ -358,9 +364,41 @@ loader_log_append_msgbuf(void)
+@@ -358,9 +365,41 @@ loader_log_append_msgbuf(void)
  	}
  }
  
@@ -31383,7 +31971,7 @@ index a058bb5263934bb489894fc933ba340690f590db..a798ba4f823a38e1dd5cc67f27693c14
  #if defined(GENERIC_PSCI_SMP)
  	/*
  	 * With more than one processor: the others switch themselves off first, and the rest of
-@@ -371,6 +409,11 @@ loader_return(void)
+@@ -371,6 +410,11 @@ loader_return(void)
  #endif
  	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
  	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
@@ -31395,7 +31983,7 @@ index a058bb5263934bb489894fc933ba340690f590db..a798ba4f823a38e1dd5cc67f27693c14
  	redwood_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
  	redwood_adsp_quiesce();         /* nor the audio DSP */
  	redwood_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
-@@ -378,6 +421,7 @@ loader_return(void)
+@@ -378,6 +422,7 @@ loader_return(void)
  	redwood_torch_quiesce();        /* the flashlight off, if it was lit */
  	redwood_camera_quiesce();       /* the camera powered down, if it was powered up */
  	redwood_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
@@ -31403,7 +31991,7 @@ index a058bb5263934bb489894fc933ba340690f590db..a798ba4f823a38e1dd5cc67f27693c14
  	/*
  	 * A panic's text is first collected in the panic buffer and only later
  	 * flushed to the console; if the console itself is what failed, that
-@@ -394,7 +438,14 @@ loader_return(void)
+@@ -394,7 +439,14 @@ loader_return(void)
  			loader_log_putc(*c);
  		}
  	}
@@ -31419,19 +32007,21 @@ index a058bb5263934bb489894fc933ba340690f590db..a798ba4f823a38e1dd5cc67f27693c14
  }
  
  /* Bring-up aid: stop here if the loader asked for checkpoint n. */
-@@ -438,6 +489,7 @@ loader_return_timer(__unused thread_call_param_t p0, __unused thread_call_param_
+@@ -438,6 +490,8 @@ loader_return_timer(__unused thread_call_param_t p0, __unused thread_call_param_
  	if (!as_panic) {
  		redwood_var_save_on_return();   /* the data volume kept, while the system is still whole */
  		redwood_adreno_stop();          /* a GPU kept for the system is given back while there is a thread to wait in */
 +		mi8_wifi_stop();                /* Mi 8 Wi-Fi driver stopped and summarized before teardown */
++		mi8_rproc_stop();               /* Mi 8 audio session, BT, WCN3990 supplies/SMMU and MSS Q6 teardown */
  		redwood_wifi_stop();            /* and the Wi-Fi DSP, if it runs, shut down */
  		redwood_adsp_stop();            /* and the audio DSP */
  	}
-@@ -484,6 +536,7 @@ loader_stop_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p
+@@ -484,6 +538,8 @@ loader_stop_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p
  		}
  		redwood_var_save_on_return();
  		redwood_adreno_stop();
 +		mi8_wifi_stop();
++		mi8_rproc_stop();
  		redwood_wifi_stop();
  		redwood_adsp_stop();
  		loader_return();

@@ -24,7 +24,7 @@
       "upstream_file_exists": false,
       "license": "UNRESOLVED",
       "basis": "Direct #include and execution of GPL-derived table established; no MIT relicense or combination compatibility claim",
-      "sha256": "cda3420e1e486e0162e94fe804d8a0abd8518c9355b86dd4b7f17f14aae0cff7"
+      "sha256": "f2f0312df54c51df773c9eb594661b3f29a5e3b5a5a55bd26747f5f15ed5fd04"
     },
     {
       "component": "xnu-mi8",
@@ -40,7 +40,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "New driver for the WCN3990 Bluetooth UART, modelled on mi8_fts.c and mi8_rproc.c (same RPMh/command-database/clock structure); register offsets are hardware facts taken from Linux headers, no GPL code is copied; maintainer to confirm the file's licence",
-      "sha256": "28b9ca54996d9ef438e075d95350b3eec36ddac784b9f59f7cf7434979e94a92"
+      "sha256": "180d96c9c9d16caec1ba95554b4773d998a1b35288a8ce0d4855b811b777c5d3"
     },
     {
       "component": "xnu-mi8",
@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "7510cc1878f1651178b5d7bb903281b69cc26b12e88ca562d8c7ec137d72837d"
+      "sha256": "221c87440bfad5ff55854fc0d5de84041a11616891d8b034b4fb1c38a58fe0c9"
     },
     {
       "component": "xnu-mi8",
@@ -136,7 +136,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "37f205855b3356c9577f17fa41e4f590316198486d9a67c261e1787c4ca537cd"
+      "sha256": "728e8d4db9627586eebe42a4c7e351f40092b5c24a2295360012394354155fc8"
     },
     {
       "component": "xnu-mi8",
@@ -224,7 +224,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "49f16603f0b1ee9cd256c901d464d097395ac0c9a9733aa15edddc8b7cfaf5ee"
+      "sha256": "1e0a8ad7c6c0b6d055c3b6e238d19f82fb31641c6c4ef507c9cad32c21c5bb15"
     },
     {
       "component": "xnu-mi8",
@@ -280,7 +280,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "92a5fcd69ade8359314847019ffccd535977aa9b05d4faf07801d04343b54ee6"
+      "sha256": "d36a637f19c4c6aa94b33e0e85f36d2018e9917783ef045e02fa1508c4b99d8f"
     },
     {
       "component": "hackios-kernel",
@@ -603,6 +603,14 @@
       "sha256": "a433f47321678e25282f15a6ceb948e347f2e6bd80a7ea16795f60c04ac2ce06"
     },
     {
+      "component": "hackios-kernel",
+      "path": "wifi/lx/src/lx_80211.c",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "Pinned HackiOS kernel repository license; existing source modifications",
+      "sha256": "8c6723e064936583167499edd3bc3a7e2546aaecc034a4db405c4fbf397ea37c"
+    },
+    {
       "component": "hackios-userland",
       "path": "userland/src/gl_osmesa.c",
       "upstream_file_exists": true,
@@ -728,7 +736,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写的有界 SMMU 诊断与软件走表；寄存器/描述符字段参考 ARM SMMUv2、Linux 定义及现有适配器，未复制驱动实现",
-      "sha256": "19f131d5d22fdbe8f64551370a3f9fa6905c35997cc17342dd10bf816cc5c9e5"
+      "sha256": "38a1686c4f7d1d1027c4340f32c9646ef6b0d01e7ac78fddb07cab59d98ba7f3"
     },
     {
       "component": "xnu-mi8",
@@ -744,7 +752,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "dcf44c42a01670d6127a2d25583f133cf28ec261518b5f9e9863950bdabcd6f9"
+      "sha256": "86624206fec683a417265320ad16d6fafa2886255aa28a6764e8fd9731ee093e"
     },
     {
       "component": "xnu-mi8",
@@ -752,7 +760,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "64a3981a74832a16705580bbe469febe872e80929e50d7f1cc45840cb40979d0"
+      "sha256": "4048b7c45cc00ce5892a85cb331ee6bfa2322d8a7b8239bd5fc201812e9d7cd9"
     },
     {
       "component": "xnu-mi8",

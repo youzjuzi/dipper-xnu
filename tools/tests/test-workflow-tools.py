@@ -122,7 +122,7 @@ if args[:2] == ['getvar', 'product']:
     sys.stderr.write('product: {product}\\nFinished. Total time: 0.001s\\n')
     raise SystemExit(0)
 if args[:2] == ['getvar', 'result']:
-    res = 'returned' if n >= 2 else 'running'
+    res = 'returned 1456278 0' if n >= 2 else 'running'
     sys.stderr.write(f'result: {{res}}\\nFinished. Total time: 0.001s\\n')
     raise SystemExit(0)
 if args[:2] == ['oem', 'stop']:
@@ -130,7 +130,11 @@ if args[:2] == ['oem', 'stop']:
     sys.stderr.write('OKAY\\n')
     raise SystemExit(0)
 if args[:2] == ['oem', 'log']:
-    state_file.write_text(str(n + 1) + '\\n', encoding='utf-8')
+    if n >= 2:
+        # Simulate xnuloader recomposing the 32 KiB loader-only log over the staged post-return log.
+        state_file.write_text('99\\n', encoding='utf-8')
+    else:
+        state_file.write_text(str(n + 1) + '\\n', encoding='utf-8')
     sys.stderr.write('OKAY\\n')
     raise SystemExit(0)
 if len(args) >= 2 and args[0] == 'get_staged':
@@ -139,8 +143,10 @@ if len(args) >= 2 and args[0] == 'get_staged':
         out.write_text('HEAD\\nline-1\\n', encoding='utf-8')
     elif n == 1:
         out.write_text('HEAD\\nline-1\\nline-2\\n', encoding='utf-8')
-    else:
+    elif n == 2:
         out.write_text('HEAD\\nline-2\\nline-3\\nreturned-ok\\n', encoding='utf-8')
+    else:
+        out.write_text('CLOBBERED-BY-OEM-LOG\\n', encoding='utf-8')
     raise SystemExit(0)
 sys.stderr.write('unexpected command\\n')
 raise SystemExit(1)
@@ -172,7 +178,9 @@ raise SystemExit(1)
             self.assertEqual(stream_log.read_text(encoding='utf-8'), 'HEAD\nline-1\nline-2\nline-3\nreturned-ok\n')
 
             # Also test orderly stop subcommand starting from running state.
-            fb2, calls2 = self._make_fake_fastboot(tdir, product='xnuloader')
+            stop_dir = tdir / 'stop'
+            stop_dir.mkdir()
+            fb2, calls2 = self._make_fake_fastboot(stop_dir, product='xnuloader')
             stop_out = tdir / 'stop.log'
             stop_res = run_py(
                 DEVICE_LOG, '--fastboot', str(fb2),
@@ -180,7 +188,15 @@ raise SystemExit(1)
             )
             self.assertEqual(stop_res.returncode, 0, stop_res.stdout + stop_res.stderr)
             self.assertIn('oem stop', calls2.read_text(encoding='utf-8'))
+            self.assertNotIn('oem log', calls2.read_text(encoding='utf-8'))
             self.assertIn('returned-ok', stop_out.read_text(encoding='utf-8'))
+
+            # Snapshot on an already-returned session must also skip oem log to preserve the staged log.
+            snap_out = tdir / 'snap.log'
+            snap_res = run_py(DEVICE_LOG, '--fastboot', str(fb2), 'snapshot', '--out', str(snap_out))
+            self.assertEqual(snap_res.returncode, 0, snap_res.stdout + snap_res.stderr)
+            self.assertNotIn('oem log', calls2.read_text(encoding='utf-8'))
+            self.assertEqual(snap_out.read_text(encoding='utf-8'), 'HEAD\nline-2\nline-3\nreturned-ok\n')
 
 
 if __name__ == '__main__':

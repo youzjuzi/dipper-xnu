@@ -61,6 +61,12 @@ static void finish_paths(void){
         }
         unsigned writes=m->writes;
         CHECK(mi8_pcm_finish(&pcm,mode==1)==(mode!=2));CHECK(m->writes==writes); /* no duplicate end/free */
+        if(mode!=2){
+            /* Verify sticky S2CR(8)=0x2b + CBAR(43)=0x1f300 can be cleanly reclaimed on a second run. */
+            m->lines=0;
+            CHECK(mi8_smmu_begin(&ops,&map,&r,true)&&map.slot==8&&map.bank==43);
+            CHECK(mi8_smmu_end(&map,true));
+        }
         free(registers);free(m);
     }
 }

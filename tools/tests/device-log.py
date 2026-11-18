@@ -15,6 +15,14 @@ sys.dont_write_bytecode = True
 TERMINAL_RESULTS = {'returned', 'hung', 'not-started'}
 
 
+def result_head(result):
+    return result.split()[0] if result else ''
+
+
+def is_terminal_result(result):
+    return result_head(result) in TERMINAL_RESULTS
+
+
 def run_fastboot(fastboot_bin, serial, args, timeout=10.0):
     cmd = [fastboot_bin]
     if serial:
@@ -99,8 +107,10 @@ def fetch_log_bytes(fastboot_bin, serial, work_dir, live_oem=True, timeout=10.0)
 def capture_once(fastboot_bin, serial, out_path, live_oem=True, timeout=10.0):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _, result, _ = get_var(fastboot_bin, serial, 'result', timeout=min(timeout, 5.0))
-    # Returned/hung sessions already have final staged log when oem log is skipped, though oem log also recomposes cleanly.
-    raw = fetch_log_bytes(fastboot_bin, serial, out_path.parent, live_oem=live_oem, timeout=timeout)
+    # Once returned/hung/not-started, oem log recomposes from loader ring only and would
+    # overwrite the full post-return kernel log already staged by xnuloader.
+    use_oem = live_oem and not is_terminal_result(result)
+    raw = fetch_log_bytes(fastboot_bin, serial, out_path.parent, live_oem=use_oem, timeout=timeout)
     atomic_write_bytes(out_path, raw)
     return result, raw
 
@@ -139,7 +149,7 @@ def cmd_watch(args):
             delta = compute_log_delta(prev_text, text)
             emit_delta(delta, args.stream, not args.quiet)
             prev_text = text
-            if result in TERMINAL_RESULTS:
+            if is_terminal_result(result):
                 print(f'\n[device-log] session ended: result={result}, saved={args.out}', file=sys.stderr)
                 return 0
         except (RuntimeError, subprocess.TimeoutExpired) as exc:
@@ -162,13 +172,13 @@ def cmd_stop(args):
     result = ''
     while time.monotonic() < deadline:
         rc, result, _ = get_var(args.fastboot, args.serial, 'result', timeout=min(args.timeout, 5.0))
-        if rc == 0 and result in TERMINAL_RESULTS:
+        if rc == 0 and is_terminal_result(result):
             break
         time.sleep(args.poll_interval)
 
     _, raw = capture_once(args.fastboot, args.serial, args.out, live_oem=True, timeout=args.timeout)
     print(f'orderly stop complete: result={result or "unknown"}, saved={args.out} ({len(raw)} bytes)')
-    if result not in TERMINAL_RESULTS:
+    if not is_terminal_result(result):
         return 1
     return 0
 
