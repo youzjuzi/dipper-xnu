@@ -1,20 +1,23 @@
-# 文档导航
+# Documentation Index
 
-先看 [当前功能状态](STATUS.md)。AI 接手再读 [开发流程与现场交接](development/DEVELOPMENT.md)。
+**English** | [简体中文](zh-CN/docs/README.md)
 
-| 分类 | 文档 |
+Start with [Current Feature Status](STATUS.md). Coding agents should also read [Mainline Development and Handoff](development/DEVELOPMENT.md).
+
+| Category | Documents |
 | --- | --- |
-| 开发与任务 development/ | [开发流程](development/DEVELOPMENT.md)、[首次安装验收任务](development/FIRST_INSTALL.md)、[开发待办](development/RELEASE_CHECKLIST.md) |
-| 构建 build/ | [构建教程](build/BUILD.md)、[输入材料](build/INPUTS.md)、[用户空间与打包](build/USERLAND.md) |
-| 安装操作 install/ | **[分区、写入与回退](install/INSTALL.md)**、**[配置、重建与启动](install/STARTUP.md)** |
-| 安装工具与测试参考 | [设备版本、TWRP 与固件准备](install/DEVICE_PREPARATION.md)、 [darwin 分区工具](install/PARTITION_DARWIN.md)、[固件与已有分区测试](install/EXISTING_INSTALL.md) |
-| 验证证据 validation/ | [验证记录](validation/VALIDATION.md)、[复现过程](validation/REPRODUCTION.md)、[设备验收数据](validation/device-validation-20261030.json) |
-| 来源与许可 legal/ | [许可审查](legal/LICENSE_REVIEW.md)、[GPU 许可](legal/GPU_LICENSE.md)、[GPU 来源数据](legal/gpu-source-audit.json) |
+| `development/` | [Development Workflow](development/DEVELOPMENT.md), [First-Install Checklist](development/FIRST_INSTALL.md), [Development Backlog](development/RELEASE_CHECKLIST.md) |
+| `build/` | [Build Guide](build/BUILD.md), [External Inputs](build/INPUTS.md), [Userspace & Packaging](build/USERLAND.md) |
+| `install/` | **[Partitioning, Flashing & Rollback](install/INSTALL.md)**, **[Configuration, Rebuild & Boot](install/STARTUP.md)** |
+| `install/` (Reference) | [Device Preparation & Firmware](install/DEVICE_PREPARATION.md), [Darwin Partition Tool](install/PARTITION_DARWIN.md), [Existing-Partition Testing](install/EXISTING_INSTALL.md) |
+| `validation/` | [Validation Log](validation/VALIDATION.md), [Reproduction Report](validation/REPRODUCTION.md), [Device Validation Data](validation/device-validation-20261030.json) |
+| `legal/` | [License Review](legal/LICENSE_REVIEW.md), [GPU License Notes](legal/GPU_LICENSE.md), [GPU Source Audit Data](legal/gpu-source-audit.json) |
+| `zh-CN/` | [Chinese Documentation Mirror (简体中文)](zh-CN/README.md) |
 
-工具分类与入口见[工具导航](../tools/README.md)。
+For tool layout and entry points see [Tools Index](../tools/README.md).
 
-images/ 放公开文档图片。任务计划说明要做什么，安装教程说明如何操作，验证记录说明实际做过什么，三者不要混写。原始私人日志和备份继续留在 work/runs/、local/，不搬进 docs。
+Keep task plans (what to do), installation guides (how to operate), and validation logs (what was actually verified) separated rather than mixing them. Raw private logs and device backups remain in `work/runs/` and `local/` and are never committed under `docs/`.
 
-新增文档归入已有类别并更新本导航；不为每轮实验新增公开文档，实验结论归并到对应任务和验证记录。
+Place new documents in the appropriate category above and update this index; do not create new public docs per test run—fold verified findings into task docs and validation records.
 
-公开首页与 build/install 教程面向使用者：只写通用步骤、标准目录、版本与验证限制，不引用开发者的固定实验路径、对话或内部轮次。development/ 和 validation/ 用于维护交接与证据追溯，其中的私有文件索引不是读者必须拥有的输入。
+The public landing page and `build/`/`install/` tutorials use a reader-facing perspective with standard directories, pinned versions, and explicit validation boundaries—no private experiment paths, chat references, or internal round numbers. `development/` and `validation/` track handoffs and evidence indices; referenced local files are not required inputs for readers.

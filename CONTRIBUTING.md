@@ -1,11 +1,13 @@
-# 贡献
+# Contributing
 
-提交问题时提供设备型号、源码 commit、构建命令、预期与实际结果。日志请先移除账号、密码、令牌、设备标识和个人内容；不要上传系统镜像、设备备份或私有固件。
+**English** | [简体中文](docs/zh-CN/CONTRIBUTING.md)
 
-提交修改时说明来源、适用许可证、测试方法，并区分主机测试和实机结果。修改第三方文件时保留版权头与许可证，记录修改日期和内容。
+When filing an issue, include the device model, source commit, build command, expected behavior, and actual behavior. Scrub account names, passwords, tokens, device identifiers, and personal details from logs before posting; never upload system images, device backups, or proprietary firmware.
 
-硬件实验由设备持有人独立决定并操作；不要把未经验证的分区布局或自动刷写加入默认构建流程。提交补丁不得包含他人的专有材料。
+When submitting changes, state the source origin, applicable license, and test method, and clearly distinguish host tests from physical device results. Preserve copyright headers and license notices when modifying third-party files, and record modification dates and summaries.
 
-## 开发流程
+Hardware experiments are decided and executed independently by the device owner; do not add unverified partition layouts or automatic flashing to default build entry points. Patches must not include third-party proprietary material.
 
-日常开发、实验分支、补丁导出、验证和回退规则见 [主线开发与实验维护](docs/development/DEVELOPMENT.md)。开始工作前阅读 [AGENTS.md](AGENTS.md)。
+## Development Workflow
+
+See [Mainline Development and Experiment Maintenance](docs/development/DEVELOPMENT.md) for daily development, feature branches, patch export, verification, and rollback rules. Read [AGENTS.md](AGENTS.md) before starting work.

@@ -1,22 +1,24 @@
-# dipper-xnu：Ubuntu 构建教程
+# dipper-xnu: Ubuntu Build Guide
 
-本教程面向 Linux x86_64 主机，开发环境为 **Ubuntu 26.04.1 LTS**。目标是从固定上游源码重建 dipper 的适配代码，逐步生成内核、加载器和 UEFI。
+**English** | [简体中文](../zh-CN/docs/build/BUILD.md)
 
-2026-10-30 已在独立源码目录完成内核编译/链接、ath10k、Mesa、用户空间启动卷、加载器、UEFI 和 darwin 系统镜像的主机构建。主机已装有依赖，尚未验证全新 Ubuntu 的软件包安装；随后在已有分区上完成桌面启动，未重新分区或刷写系统。具体证据及未通过项见 [复现记录](../validation/REPRODUCTION.md)；当前实机功能见 [功能状态](../STATUS.md)。
+This guide targets Linux `x86_64`, developed on **Ubuntu 26.04.1 LTS**. It reproduces `dipper` adaptations from pinned upstream commits to produce the kernel, loader, UEFI image, and userspace system image.
 
-## 1. 准备环境
+On 2026-10-30, host builds of the kernel (`build`), `ath10k`, Mesa, userspace boot volumes, loader, UEFI, and `darwin.img` completed cleanly in an isolated source tree on a host with dependencies pre-installed (clean-machine apt package installation has not yet been tested end-to-end), followed by home-screen boot on an existing partition. See [Reproduction Report](../validation/REPRODUCTION.md) for evidence and failed checks, and [STATUS](../STATUS.md) for current capabilities.
 
-使用普通用户运行构建命令，工作目录路径不要包含空格。准备以下工具：
+## 1. Host Prerequisites
 
-| 用途 | 工具或输入 |
+Run builds as an unprivileged user in a path with no spaces. Required tools:
+
+| Purpose | Tools or Inputs |
 | --- | --- |
-| 获取源码 | Git、curl、CA 证书 |
-| 编译内核 | C/C++ 构建工具、make、clang、lld、Python 3、Perl、xz、flex、bison、m4 |
-| 编译 UEFI | 上述工具，以及 iasl、nasm、gettext、bc、rsync、device-tree-compiler、gcc-aarch64-linux-gnu、binutils-aarch64-linux-gnu |
-| 目标平台交叉编译 | 自行准备的 Theos 工具链、iPhoneOS16.5 SDK |
-| 用户空间准备 | 7-Zip ≥23、Meson、Ninja、python3-venv、autoconf、automake，以及对应系统材料和设备固件 |
+| Source checkout | `git`, `curl`, CA certificates |
+| Kernel build | C/C++ toolchain, `make`, `clang`, `lld`, `python3`, `perl`, `xz`, `flex`, `bison`, `m4` |
+| UEFI build | Above tools plus `iasl`, `nasm`, `gettext`, `bc`, `rsync`, `device-tree-compiler`, `gcc-aarch64-linux-gnu`, `binutils-aarch64-linux-gnu` |
+| Target cross-compile | User-staged Theos toolchain and `iPhoneOS16.5.sdk` |
+| Userspace prep | `7z` (>= 23), `meson`, `ninja`, `python3-venv`, `autoconf`, `automake`, IPSW, and device firmware |
 
-先核对主机环境：
+Verify host tools:
 
 ```sh
 cat /etc/os-release
@@ -24,13 +26,11 @@ uname -m
 command -v git python3 clang lld-link make curl xz flex bison m4 perl iasl nasm
 ```
 
-预期架构为 `x86_64`。还需 UUID、zlib、OpenSSL 的开发头文件（Ubuntu 包 `uuid-dev zlib1g-dev libssl-dev`）。缺少的工具需要先安装；上面的检查不覆盖所有传递依赖。构建会保留源码、原包、提取结果和镜像，建议开始时至少预留 80 GiB；这不是经过测量的最低要求。
+Expected architecture is `x86_64`. Also install development headers for UUID, zlib, and OpenSSL (`uuid-dev zlib1g-dev libssl-dev` on Ubuntu). Reserve at least ~80 GiB of disk space for upstream sources, original archives, extracted system files, and images (not a measured minimum).
 
-工具链和 SDK 的固定链接、摘要与目录设置统一见 [外部材料与校验](INPUTS.md)。先完成下面的仓库获取，再按该页准备独立输入目录。
+Pinned URLs, checksums, and staging steps for toolchain/SDKs are in [External Inputs](INPUTS.md). Clone this repository first, then prepare inputs there.
 
-## 2. 获取本项目
-
-公开仓库可匿名读取：
+## 2. Clone and Verify the Repository
 
 ```sh
 git clone https://github.com/youzjuzi/dipper-xnu.git
@@ -38,63 +38,57 @@ cd dipper-xnu
 sha256sum -c SHA256SUMS
 ```
 
-后续命令使用 Bash。先记录仓库根目录，方便各步骤返回：
+Subsequent commands assume Bash:
 
 ```sh
 export DIPPER_PROJECT_ROOT="$PWD"
 ```
 
-如果使用的是已下载的源码包，直接进入包含 `README.md`、`patches/` 和 `tools/` 的目录，再执行校验及变量设置即可。
+Every tracked file in `SHA256SUMS` must print `OK`. Stop if any file is missing or mismatched.
 
-校验应全部显示 `OK`。若文件缺失或摘要不一致，先确认下载内容和本地修改，不要继续应用补丁。
+## 3. Prepare Upstream Sources
 
-## 3. 准备上游源码
-
-从仓库根目录执行：
+From the repository root:
 
 ```sh
 python3 tools/prepare/prepare.py
 ```
 
-这一步只显示上游仓库和固定 commit，不联网、不创建构建树。
-
-确认后获取源码并应用补丁：
+This prints pinned upstream repos and commits without network access or creating `work/`. Next, fetch sources and apply patches:
 
 ```sh
 python3 tools/prepare/prepare.py --prepare
 ```
 
-脚本会下载锁定版本及相关子模块，合并内核与用户空间目录，基于 Apple XNU 应用 HackiOS 基线和 dipper 补丁，再检查修改文件的 SHA256。`xnu-mi8.patch` 基于 HackiOS 基线，不能直接应用到原版 XNU。上游树可能包含 prebuilt，本流程不把这些产物作为已重建的 dipper 产物使用。
+The script fetches pinned commits and required submodules, overlays kernel and userspace trees, applies the HackiOS baseline and `dipper` patches onto Apple XNU (`xnu-mi8.patch` applies on top of HackiOS, not stock Apple XNU), and checks patched file SHA-256 digests. Upstream `prebuilt/` directories are never treated as rebuilt `dipper` artifacts.
 
-固定上游版本的获取流程已验证。子模块只取构建需要的层级，不递归拉取 OpenSSL 等依赖自己的测试仓库；每个版本仍由 gitlink 固定。网络失败时保留日志和固定 commit，不能通过切换到最新分支绕过。
+Submodules are fetched shallowly as needed without recursing into OpenSSL's test subrepos while keeping pinned gitlink commits. Never bypass network failures by switching to unpinned branches.
 
-主要输出目录：
+Primary output layout:
 
 ```text
 work/
-├── hackios/             合并后的内核与用户空间构建树
+├── hackios/             Merged kernel and userspace build tree
 │   └── xnu-src/
 │       └── xnu-8796.121.2/
-├── userland/            固定版本的用户空间上游副本
-├── edk2/                UEFI 源码
-└── unixnu/              启动组件依赖
+├── userland/            Pinned upstream userspace copy
+├── edk2/                UEFI source
+└── unixnu/              Boot component dependency
 ```
 
-成功时脚本打印 `Sources prepared and hashes checked.`。准备脚本已经建立 XNU 树，不要再运行上游 `xnu/apply.sh`。
+On success it prints `Sources prepared and hashes checked.`. Do **not** run upstream `xnu/apply.sh`. `prepare.py` refuses to overwrite an existing `work/` directory; preserve logs/diffs before moving a failed tree aside instead of stacking patches on top of a broken checkout.
 
-`work/` 已存在时脚本会退出，避免覆盖修改。失败现场会保留；再次尝试前应先保存日志和需要保留的源码，再将旧目录移到其他位置。不要在同一棵失败的源码树上反复叠加补丁。
+## 4. Build Kernel and Wi-Fi Driver
 
-## 4. 编译内核与 Wi-Fi 驱动
+Complete [Staging Verified Archives for Build Scripts](INPUTS.md#staging-verified-archives-for-build-scripts) and verify `THEOS` is set (or staged at `local/theos` / `../dependencies/theos` for auto-detection).
 
-先完成 [外部材料页的缓存放置](INPUTS.md#让构建脚本使用已校验的原包)，确认已设置 `THEOS`（或将工具链与 SDK 放在 `local/theos`、`../dependencies/theos` 供构建脚本自动探测）。
-
-在日常主构建树进行增量编译时，可直接从仓库根目录执行统一入口（内部自动设置 `THEOS` 并显式传入 `SOURCE_DIR="$XNU_SRC"`）：
+For incremental builds in the main development tree, run from the repository root (auto-detects `THEOS` and passes `SOURCE_DIR="$XNU_SRC"` explicitly):
 
 ```sh
 bash tools/build/build-kernel.sh [--with-ath10k] [--out work/runs/<run-id>/kernel]
 ```
 
-首次从零准备依赖或分步手工排查时，也可进入合并后的构建树依次执行：
+For initial first-time dependency setup or manual step-by-step builds inside `work/hackios`:
 
 ```sh
 cd "$DIPPER_PROJECT_ROOT/work/hackios"
@@ -103,15 +97,15 @@ bash tools/mk-ath10k.sh
 bash xnu-build.sh -j8 build SOURCE_DIR="$PWD/xnu-src/xnu-8796.121.2"
 ```
 
-`-j8` 为并行任务数，可按主机资源调整。依赖脚本会联网取得额外源码；ath10k 获取脚本固定 Linux 7.0.14，并检查归档 SHA256 和逐文件许可证；其他传递依赖尚未全部锁定。
+Adjust `-j8` to your CPU cores. `mk-ath10k.sh` pins Linux `7.0.14` and checks archive SHA-256 and per-file licenses; remaining transitive `xnu-deps` inputs are not yet fully pinned.
 
-预期内核产物，相对于 `work/hackios/`：
+Expected kernel output (relative to `work/hackios/`):
 
 ```text
 xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
 ```
 
-检查文件类型、时间和摘要：
+Inspect file type, mtime, and digest:
 
 ```sh
 file xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
@@ -119,54 +113,54 @@ stat xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development
 sha256sum xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
 ```
 
-文件应为 ARM64 Mach-O 内核。已验证显式 `build` 目标退出码为 0；它执行头文件准备、编译和链接。原教程不指定目标的 `-j8 -k` 会继续执行 `all` 中的导出检查与工具生成，已记录的构建因平台导出符号和 LLDB 脚本的 `python` 命令问题退出 2；这些检查尚未修复，不能宣称完整 `all` 通过。任何命令非零退出都应先检查日志。主机链接成功不代表设备可启动。
+The output should be an ARM64 Mach-O binary. Explicit `build` succeeds with exit code `0` (headers, compilation, linking). Default `-j8 -k` running `all` still exits `2` on platform export symbol checks and LLDB `python` script calls; host linking does not prove device boot.
 
-## 5. 编译加载器与 UEFI
+## 5. Build Loader and UEFI
 
-重新分区后，先按 [设备配置匹配](../install/STARTUP.md#1-让源码匹配新分区)核对 GUID 与边界；已有构建不能直接沿用旧 GUID。若仅唯一 GUID 改变，按本节重编译 loader/UEFI；内核边界和内容不变时，可在核验后沿用既有内核。
+After repartitioning, match GPT GUIDs and boundaries first per [Matching Sources to a New Partition](../install/STARTUP.md#1-matching-sources-to-a-new-partition); existing binaries must not reuse stale GUIDs. If only the unique partition GUID changed, rebuilding loader/UEFI suffices without rebuilding the kernel.
 
-此入口会刷新 work/ 中的原生构建输出。再次运行前，将旧 loader 源码/产物、UEFI/BootShim/FD 和本机配置复制到 local/backups/ 对应目录并校验；新候选保存到独立 work/runs/ 目录。不要复制整套源码或重新运行 prepare.py。
+Back up previous loader/UEFI artifacts and configs to `local/backups/` before overwriting, and store new candidates in fresh `work/runs/` subdirectories—do not duplicate the whole source tree or re-run `prepare.py`.
 
-返回仓库根目录：
+From the repository root:
 
 ```sh
 cd "$DIPPER_PROJECT_ROOT"
 bash tools/build/build-loader-uefi.sh
 ```
 
-脚本先编译 xnuloader，再生成含 `usb` 条目的 XNUP 引导载荷，经 `XNU_PAYLOAD` 嵌入 BootShim/UEFI，最后调用上游 dipper 构建入口。它拒绝 `-b` / `--boot`，不会连接设备。
+This compiles `xnuloader`, packages a `usb`-capable XNUP container into `XNU_PAYLOAD`, embeds it into BootShim/UEFI, and runs the upstream `dipper` UEFI build (refuses `-b` / `--boot` and never touches a device).
 
-预期输出：
+Expected outputs:
 
-| 文件 | 用途 |
+| File | Purpose |
 | --- | --- |
-| `work/hackios/xnuloader/loader.efi` | EFI 加载器 |
-| `work/edk2/boot-dipper.img` | UEFI 启动镜像 |
+| `work/hackios/xnuloader/loader.efi` | EFI loader |
+| `work/edk2/boot-dipper.img` | UEFI boot image |
 
-脚本成功后会打印这两个文件的 SHA256。UEFI 镜像生成不等于已生成包含内核及用户空间的完整启动载荷。
+The script prints SHA-256 digests on success. Note that `boot-dipper.img` does not yet contain the XNU kernel or userspace volumes.
 
-## 6. 用户空间、打包与启动
+## 6. Userspace, Packaging, and Boot
 
-设备端步骤单独见 **[分区、写入与回退教程](../install/INSTALL.md)**。当前实机路线需要 darwin 分区，首次重建 userdata 会清空 Android 数据；系统写入 UFS，之后临时加载 UEFI 启动。
+Device-side steps are covered in **[Partitioning, Flashing & Rollback](../install/INSTALL.md)**. Creating the `darwin` partition wipes Android `userdata`; the system image lives on UFS and boots via temporary RAM-loaded UEFI.
 
-按 [用户空间构建与主机打包](USERLAND.md) 继续：
+Continue with [Userspace and Packaging](USERLAND.md):
 
-1. `tools/prepare/prepare-ios.py` 校验 IPSW 并在本工作树提取系统材料。
-2. `tools/build/build-userland.sh` 从源码生成 `root.apfs` 和 `flashboot.apfs`。
-3. `tools/build/pack-darwin.py` 生成并校验 `darwin.img`。
+1. `tools/prepare/prepare-ios.py` verifies the IPSW and extracts system inputs locally.
+2. `tools/build/build-userland.sh` builds `root.apfs` and `flashboot.apfs` from source.
+3. `tools/build/pack-darwin.py` builds and verifies `darwin.img`.
 
-这些主机步骤已实际完成。进入设备测试前还必须准备经核查的本设备固件、分区配置及内核启动载荷；[已有分区路线](../install/EXISTING_INSTALL.md) 已完成桌面启动验证。公开 loader 的分区 GUID 是零占位符，边界来自历史实验，必须对照本机 GPT 修改并重编译；不能删除校验强行启动。主机产物检查完成后，先补齐 [设备输入](USERLAND.md#4-设备输入与实机测试)，再进入设备测试。
+Public `loader.c` contains zero-placeholder partition GUIDs and historical experimental boundaries that must be adjusted to match your real GPT and rebuilt. After host checks pass, stage [Device Inputs and Hardware Testing](USERLAND.md#4-device-inputs-and-hardware-testing) and follow [Existing-Partition Testing](../install/EXISTING_INSTALL.md).
 
-## 7. 常见问题
+## 7. Troubleshooting
 
-| 问题 | 检查方向 |
+| Issue | Where to Check |
 | --- | --- |
-| 公开仓库克隆失败 | 检查报错 URL、网络及代理配置 |
-| 准备脚本提示 `work/ already exists` | 保存旧目录和失败日志后，再准备独立源码树 |
-| 下载或子模块获取失败 | 检查网络和报错 URL，保留固定 commit，不要随意换成最新分支 |
-| 补丁无法应用或源码哈希不一致 | 检查是否使用锁定版本、是否有本地改动；不要忽略错误继续编译 |
-| 找不到 SDK 或交叉工具 | 检查 `THEOS`、SDK 版本和工具链安装位置 |
-| 内核构建非零退出但存在文件 | 检查完整日志及退出码，确认是否本轮完成链接，记录所有未通过检查 |
-| 已生成内核和 UEFI，但不能启动桌面 | 尚需第 6 节的用户空间、载荷与设备配置，不能仅用这两个产物代替 |
+| Public git clone fails | Check URL, network, and proxy settings |
+| `work/ already exists` | Back up logs and local diffs before moving old tree aside |
+| Submodule or tarball fetch fails | Keep pinned commits; inspect URL and network instead of switching branches |
+| Patch check or hash mismatch | Verify pinned inputs and local edits; never ignore errors |
+| Missing SDK or cross-tools | Check `THEOS`, SDK version, and toolchain path |
+| Non-zero kernel exit despite binary present | Inspect full log and exit code to verify linking completed this round |
+| Kernel + UEFI built but cannot boot desktop | Complete userspace, payload packaging, firmware staging, and GPT matching in Section 6 |
 
-报告问题时附上本项目 commit、Ubuntu 版本、失败命令和经过脱敏的日志。贡献要求见 [贡献指南](../../CONTRIBUTING.md)。
+Include commit hash, Ubuntu version, failing command, and scrubbed logs when reporting issues. See [Contributing](../../CONTRIBUTING.md).

@@ -1,28 +1,30 @@
-# 开发待办
+# Development Backlog
 
-本项目处于 Experimental / Work in Progress 阶段，以下工作仍需完成。
+**English** | [简体中文](../zh-CN/docs/development/RELEASE_CHECKLIST.md)
 
-## 许可证
+This project is in the **Experimental / Work in Progress** stage; the items below remain open.
 
-- [x] 确认 GPU 表的 Linux 派生来源，保留 GPL 声明、版权和许可证全文。
-- [ ] 取得完整的兼容 GPU 初始化来源或额外授权，解决与 APSL 内核组合的分发条件。
-- [ ] 补齐 APSL 文件级通知和修改日期。
+## Licensing
 
-逐文件清单见 [license-inventory.json](../../license-inventory.json)，具体问题见 [许可证说明](../legal/LICENSE_REVIEW.md)。
+- [x] Verify Linux-derived provenance for GPU init tables and preserve GPL notices, copyrights, and full license text.
+- [ ] Obtain a complete compatible GPU init source or additional authorization to resolve combined binary distribution with the APSL kernel.
+- [ ] Complete per-file APSL notices and modification dates across incremental patches.
 
-## 构建与安装
+Per-file inventory: [license-inventory.json](../../license-inventory.json); details: [License Review](../legal/LICENSE_REVIEW.md).
 
-- [ ] 在干净的 Ubuntu 环境验证源码获取、传递依赖及完整内核/UEFI 编译。
-- [x] 在独立源码目录完成用户空间程序、动态库和镜像组合构建，未使用旧构建产物。
-- [x] 复用核验一致的系统区，完成桌面、Wi-Fi/Safari、亮度和已列外设的短时实机复测。
-- [ ] 修复完整 XNU `all` 的导出检查和工具生成；当前显式 `build` 目标通过。
-- [ ] 提供独立的设备存储配置输入，替代历史布局和 GUID 占位符。
-- [ ] 使用按教程新构建的产物完成首次重新分区、写入与回读验证。
+## Build and Installation
 
-## 功能与稳定性
+- [ ] Verify end-to-end source fetch, transitive dependencies, and full kernel/UEFI compilation in a clean Ubuntu environment.
+- [x] Complete clean userspace binaries, dylibs, and composite image builds from an isolated source tree without stale artifacts.
+- [x] Re-test desktop, Wi-Fi/Safari, brightness, and listed peripherals in a short boot reusing a checksum-verified system partition.
+- [ ] Fix remaining XNU `all` export symbol checks and host tool generation (explicit `build` target currently passes).
+- [ ] Replace historical storage layout / GUID placeholders with independent configurable device inputs.
+- [ ] Complete a full fresh repartition, flash, and readback cycle using newly built tutorial outputs end-to-end.
 
-- [ ] 核实手电筒分档亮度；目前仅开关通过。
-- [ ] 验证持续运行、功耗、充电全过程、用户状态持久保存和退出恢复。
-- [ ] 独立验收音频输出、电话/移动数据及其他未覆盖硬件。
+## Features and Stability
 
-当前功能状态见 [STATUS.md](../STATUS.md)，验证范围见 [VALIDATION.md](../validation/VALIDATION.md)。
+- [ ] Verify torch brightness steps (currently only on/off toggle verified).
+- [ ] Verify sustained runtime, power draw, full charging cycle, persistent user state edge cases, and teardown recovery.
+- [ ] Independently validate audio output tuning/power, cellular/mobile data, and remaining unported hardware.
+
+Current capabilities: [STATUS.md](../STATUS.md); evidence scope: [VALIDATION.md](../validation/VALIDATION.md).

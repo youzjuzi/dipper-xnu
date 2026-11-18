@@ -1,29 +1,31 @@
-# 许可证适用范围与待确认事项
+# License Scope and Open Review Items
 
-更新日期：2026-10-30。
+**English** | [简体中文](../zh-CN/docs/legal/LICENSE_REVIEW.md)
 
-本页说明 `source-manifest.json` 中 74 个目标源文件及仓库附带代码/配置的许可依据。判断依据包括固定上游提交、文件级声明和代码来源。逐文件清单见 [license-inventory.json](../../license-inventory.json)。
+Updated: 2026-10-30.
 
-## 已有许可声明
+This page explains the licensing basis for the 74 inventoried target source files in `source-manifest.json` and accompanying code/configs, based on pinned upstream commits, file-level headers, and source origins. For the per-file list see [license-inventory.json](../../license-inventory.json).
 
-- yanei 的原创模块、文档、独立配置和构建脚本采用 MIT；第三方派生部分沿用相应许可证。
-- WLFW 的 ISC 文件保留 Linux Foundation/Qualcomm 版权，与 APSL 文件分别处理。
-- HackiOS 用户空间上游采用 MIT。`redwood_drm.c` 是其 IOKit DRM 适配层；外部 Mesa 依赖仍适用各自的文件许可。
-- SimpleInit 的 `libs/compatible/malloc.c` 适用 Intel 文件级 BSD 声明，原通知和 EDK2 历史许可位于 `LICENSES/`。SimpleInit 根目录的 LGPL 不用于替代该文件声明。
-- `lx_ath10k_gaps.c` 参考 FreeBSD `linux_80211.c`，相关 BSD-2-Clause 作者通知位于 `LICENSES/`。
-- `XnuLoaderDxe` 派生于 UniXNU 注册器，保留 UniXNU contributors 版权和 BSD-2-Clause-Patent 声明。
+## Established License Notices
 
-## 待确认的许可范围
+- Original modules, documentation, standalone configurations, and build scripts authored by **yanei** use MIT; third-party-derived parts retain their respective licenses.
+- WLFW ISC files retain Linux Foundation / Qualcomm copyrights and are tracked separately from APSL files.
+- HackiOS upstream userspace uses MIT. `redwood_drm.c` is its IOKit DRM shim; external Mesa build dependencies remain governed by their respective file licenses.
+- `libs/compatible/malloc.c` in SimpleInit carries an Intel file-level BSD notice; the original notice and EDK2 historical license live in `LICENSES/`. SimpleInit's root LGPL does not override that file's notice.
+- `lx_ath10k_gaps.c` references FreeBSD `linux_80211.c`; the relevant BSD-2-Clause author notice is in `LICENSES/`.
+- `XnuLoaderDxe` derives from the UniXNU registrar and retains UniXNU contributors' copyright and `BSD-2-Clause-Patent` notice.
 
-1. **GPU 初始化表**：Linux v7.2.10 来源及 105 项 HWCG、32 项 CP 保护表的对应关系已确认。`mi8_a630_hw_init.inc` 按 GPL-2.0-only 标注，保留版权和许可证全文。来源声明不代表与 APSL 内核组合的分发条件已经解决。
-2. **GPU 驱动集成**：`mi8_adreno.c` 直接包含并执行该表；Mesa 和 Fuchsia 的宽松许可来源目前只覆盖部分内容，没有可直接替换完整初始化的候选。具体差异、来源摘要与后续条件见 [GPU 许可说明](GPU_LICENSE.md)。当前以“只分发源码、不分发合并二进制”规避分发层面的冲突，冲突本身仍未解决。
-3. **APSL 文件通知**：XNU/HackiOS 派生修改需要逐文件保留适用声明并记录修改日期；部分增量补丁尚需补齐相应通知。根目录的许可证全文不能替代文件级要求。
+## Open Licensing Items
 
-`Experimental / Work in Progress` 表示开发状态，不改变上述许可条件。本页不构成对完整系统或二进制分发的许可认证。
+1. **GPU initialization tables**: Linux `v7.2.10` origin and exact correspondence of the 105 HWCG entries and 32 CP protection entries are confirmed. `mi8_a630_hw_init.inc` is marked `GPL-2.0-only` with original copyright and full GPL text preserved. Stating provenance does not resolve combined distribution terms with the APSL kernel.
+2. **GPU driver integration**: `mi8_adreno.c` directly `#include`s and executes that table; permissive sources from Mesa and Fuchsia cover only subsets without an equivalent drop-in replacement. See [GPU License Notes](GPU_LICENSE.md) for gaps, source digests, and replacement criteria. Distributing sources only (no merged binaries) avoids distribution-time conflict while leaving the underlying incompatibility unresolved.
+3. **APSL file notices**: XNU/HackiOS-derived edits require retaining applicable per-file notices and modification dates; some incremental patches still need those notices completed. Root license files do not substitute for file-level notices.
 
-## 原创 MIT 范围
+`Experimental / Work in Progress` denotes development status and does not alter these license requirements. This page does not certify full-system or binary distribution compliance.
 
-以下原创模块位于对应增量补丁中，采用 MIT；原有第三方声明继续保留：
+## Original MIT Scope
+
+The following original modules live in the respective patches under MIT while preserving existing third-party notices:
 
 - `xnu-mi8 : bsd/dev/mi8_glink.c`
 - `xnu-mi8 : bsd/dev/mi8_glink.h`
@@ -52,4 +54,4 @@
 - `hackios-kernel : wifi/lx/src-ath10k/lx_ath10k_bus.c`
 - `hackios-kernel : wifi/lx/src-ath10k/lx_ath10k_qmi.c`
 
-代码对应的精确内容摘要见 source-manifest.json。上游来源固定提交见 upstream.lock.json。项目文档、源码准备和构建脚本，以及明确标注 MIT 的独立配置/适配头也采用 MIT。
+Exact content digests are recorded in `source-manifest.json` and pinned upstream commits in `upstream.lock.json`. Project documentation, source-preparation/build scripts, and standalone configs/compat headers explicitly marked MIT also use MIT.

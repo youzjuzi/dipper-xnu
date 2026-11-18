@@ -1,94 +1,76 @@
-# 首次安装验收任务
+# First-Install Acceptance Task
 
-分支：`test/first-install`。建立日期：2026-10-30。任务状态：Android GPT 恢复及 Recovery 重启后回读通过；持有人完成 Format Data 和 Android 初始化，提供启动与数据容量输出，恢复阶段通过；随后重新分区、Format Data 及 Android 启动/容量验收通过，新分区配置匹配及 loader/UEFI 主机构建通过；镜像准确范围回读通过，持有人确认成功进入 iOS；阶段 07 的逐项回归和最终 Android 重启待验。
+**English** | [简体中文](../zh-CN/docs/development/FIRST_INSTALL.md)
 
-## 总目标
+Branch: `test/first-install`. Created: 2026-10-30. Status: Android GPT restore and post-Recovery readback passed; owner completed `Format Data` and Android setup confirming boot and `/data` capacity; subsequent repartition, `Format Data`, Android boot/capacity checks, matching loader/UEFI host build, exact `darwin.img` readback, and owner-confirmed iOS boot all passed; Stage 07 per-peripheral regression and final reboot back to Android remain pending.
 
-先只读查清本机当前分区及恢复材料，恢复经证据核对的 Android 分区布局并验证 Android 启动；在此基础上重新划分 darwin 分区，使用本仓库复现生成并核对摘要的镜像完成写入、回读和启动，验收从 Android 布局到 iOS 桌面的完整首次安装流程。
+## Overall Goal
 
-“恢复 Android 分区”首先指恢复目标分区布局、重建适用的数据文件系统并让 Android 可启动，不等于恢复旧个人数据，也不自动等于刷全套原厂固件或锁回 bootloader。目标布局必须通过本机原始备份/适用原厂资料和当前读数核对，不能把未知边界称为原厂布局。方案阶段列明哪些区会改变、哪些内容会丢失；不假定只删除 darwin 就完成恢复。
+Inspect the device's current partition layout and recovery material read-only, restore and verify a proven Android GPT layout, then carve out `darwin`, write and verify the locally built `darwin.img`, and validate the full first-install workflow from Android back to the iOS home screen.
 
-## 阶段与通过条件
+"Restoring the Android layout" means restoring target GPT boundaries, rebuilding `/data`, and verifying Android boots—not restoring old user data, flashing full stock firmware, or relocking the bootloader. Layouts must match verified device/stock evidence rather than guessing boundaries or assuming deleting `darwin` alone is sufficient.
 
-| 阶段 | 工作与必须保留的证据 | 通过条件 | 状态 |
+## Stages and Acceptance Criteria
+
+| Stage | Scope & Required Evidence | Pass Criteria | Status |
 | --- | --- | --- | --- |
-| 01 当前状态盘点 | 只读确认设备身份、容量、扇区大小、LUN/节点、完整 GPT、userdata/darwin 范围、挂载与加密情况；核对现有备份及镜像 | 主备 GPT 一致、布局可解释；原始数据与摘要保存在本机，缺项明确列出 | 布局及恢复所需 GPT 已核验 |
-| 02 恢复方案与备份核验 | 对照本机原始布局证据，列出恢复前后区间、工具、个人数据处理与恢复步骤；核验 GPT 和关键分区备份的来源与摘要 | 具体写入范围及清空影响已确认；所需恢复材料齐备，方案可审查 | 本次 GPT 恢复方案通过；非全机备份验收 |
-| 03 恢复 Android 布局 | 持有人执行审核后的恢复步骤；重新读取 GPT 和文件系统状态，验证 Android 启动与容量 | 目标布局匹配、无重叠，Android 实际可启动；记录恢复后的 GPT | 通过：GPT/内核容量已核验；格式化及 Android 启动/数据容量由持有人操作与 ADB 输出确认 |
-| 04 重新分区 | 按本机容量和目标布局规划 userdata/darwin，核对后由持有人执行；重新读取分区表与文件系统，检查 Android | 新主备 GPT 有效，边界/容量正确，Android 仍可启动 | 通过：GPT/节点容量已核验，Format Data 后 Android 启动及容量由持有人 ADB 输出确认 |
-| 05 匹配配置及准备产物 | 用新布局/GUID匹配 loader 与内核；必要时重建，核对系统镜像、UEFI、启动卷和载荷摘要 | 源码、设备配置与本轮产物相互对应，打包校验通过 | 主机通过：新 GUID loader/UEFI 已重建，候选及系统镜像校验通过；后续持有人确认进入 iOS |
-| 06 写入与回读 | 持有人将核验镜像写入本机 darwin；只读回读准确的系统镜像字节范围 | 回读 SHA256 等于主机输入；不能只依据 fastboot OKAY | 通过：TWRP 回读前 8365539328 字节与主机镜像摘要一致；未取得 fastboot 操作日志 |
-| 07 启动与收尾 | 按现有文档临时启动，检查 SpringBoard、触摸、GPU、Wi-Fi/Safari、亮度等既有项目；退出后完整重启验证 Android | 有日志与持有人实机确认；失败与未覆盖项明确，完成教程及验证记录更新 | iOS 启动由持有人确认；逐项回归及退出后 Android 重启待验 |
+| 01 Inventory | Read-only check of device identity, disk size, sector size, LUN/nodes, full GPT, `userdata`/`darwin` bounds, mounts, encryption, backups | Primary/backup GPT match and explainable; digests saved locally; gaps listed | Verified |
+| 02 Restore Plan | Compare against original layout backup; define bounds, tools, data impact, restore steps, and backup checksums | Exact write range and wipe impact confirmed; plan reviewable | Verified for GPT restore (not full-device backup) |
+| 03 Restore Android | Owner executes reviewed restore; re-read GPT and filesystem; verify Android boot and `/data` size | Target layout matches with no overlap; Android boots and reports `/data` | Passed (GPT/nodes + owner `Format Data` and ADB capacity) |
+| 04 Repartition | Plan `userdata`/`darwin` for disk size; owner executes; re-read GPT and check Android | Primary/backup GPT valid, bounds accurate, Android boots | Passed (GPT/nodes + owner `Format Data` and ADB capacity) |
+| 05 Match Config & Build | Match loader/kernel to new layout/GUID; rebuild as needed; verify image/UEFI/ramdisk/payload SHA-256 | Sources, device config, and artifacts align and pass packaging checks | Host passed; owner later confirmed iOS boot |
+| 06 Write & Readback | Owner flashes verified image to `darwin`; read back exact `darwin.img` byte range | Readback SHA-256 matches host `darwin.img` (never rely on `fastboot OKAY` alone) | Passed (TWRP readback of 8,365,539,328 bytes matched; no fastboot log saved) |
+| 07 Boot & Teardown | RAM-boot UEFI per docs; check SpringBoard, touch, GPU, Wi-Fi/Safari, brightness, peripherals; reboot to Android | Logs + owner confirmation; gaps documented; docs/validation updated | Owner confirmed iOS boot; per-item regression & Android reboot pending |
 
-阶段 03/04 会涉及 Android 用户数据清空，当前目标不包含保留数据缩容。任务开始时手机已装有 darwin；恢复后已移除，后续仍须重读当前布局，不能直接复用历史参数。具体设备写入由持有人操作，必须先形成基于实时读取结果的方案；本计划不是通用分区命令，也不授权代理自行写设备。不要使用其他设备 GPT/GUID，不覆盖身份和校准分区。指定摘要不符时停止对应步骤。
+Stages 03/04 wipe Android user data (in-place shrink with data preservation is out of scope). Re-read live GPT rather than reusing historical coordinates; device writes are executed by the owner only after reviewing the plan; never use another device's GPT/GUID or overwrite identity/calibration partitions. Stop immediately on any SHA-256 mismatch.
 
-## 完成标准
+## Completion Criteria
 
-- 上述阶段逐项有证据，不跳过 Android 恢复后的验收；已有分区上的旧启动结果不能代替此次首次安装结果。
-- 新分区上的系统镜像确实经过本轮写入与回读，运行产物可追溯到仓库提交、源码差异和本机配置。
-- 安装教程根据实际经过修订，状态与验证记录明确写出通过范围；短时启动不等于长期稳定性、完整充电或所有外设可用。
-- 公开内容脱敏；私人备份、GUID、原始日志留在本机。分支上审查通过的工具和文档再合入 main。
+- Evidence recorded per stage without skipping post-restore Android checks; pre-repartition boot results do not replace first-install results.
+- Written system image is verified by byte-exact readback and traced to repo commit, diffs, and local config.
+- Install tutorials reflect actual steps and explicitly note verification bounds (short boot != long-term stability or full charging).
+- Public content scrubbed of private backups, GUIDs, and raw logs; reviewed tools/docs merged to `main`.
 
-## 每轮记录与交接
+## Per-Round Logging
 
-继续使用现有 `work/`，不复制整套源码。每轮记录放 `work/runs/YYYYMMDD-first-install-NN/`；第一轮计划为只读盘点，实际开始时才创建目录。每轮保存 README（目标、结果、下一步）、实际命令、原始输出、源码版本/差异、输入输出摘要。必要恢复备份放 `local/backups/YYYYMMDD-first-install-NN/` 并更新本机 index.json。
+Develop sequentially inside `work/` with per-round logs under `work/runs/YYYYMMDD-first-install-NN/` and recovery backups under `local/backups/YYYYMMDD-first-install-NN/` registered in `local/index.json`. Keep live branch/handoff state solely in [Development Handoff](DEVELOPMENT.md) and product capabilities in [STATUS](../STATUS.md).
 
-本文件只维护任务范围和上表阶段结果，当前分支、源码现场和下一步统一在 [开发交接](DEVELOPMENT.md) 更新，避免平行维护多个现场状态。对外功能状态仍以 [STATUS](../STATUS.md) 为准。
+References: [Install Guide](../install/INSTALL.md), [Existing-Partition Testing](../install/EXISTING_INSTALL.md), [Validation Log](../validation/VALIDATION.md).
 
-参考：[安装教程](../install/INSTALL.md)、[已有分区测试](../install/EXISTING_INSTALL.md)、[验证记录](../validation/VALIDATION.md)。教程中的历史分区数值不是本次执行参数，必须根据阶段 01 的本机证据制定。
+## 2026-10-30 Read-Only Check
 
-## 2026-10-30 只读检查结论
+Device held ~89.09 GiB `userdata` and ~24 GiB `darwin`. Primary/backup GPT CRCs on `sda` passed and matched; compared with pre-partition backup, only entries #21/#22 differed (historical `userdata` ~113.09 GiB). `/data` mounted RW with FBE. No writes/reboots performed; logs in `work/runs/20261030-first-install-01/` and GPT backups in `local/backups/20261030-first-install-01/`.
 
-当前 Android 设备的 userdata 约 89.09 GiB，darwin 约 24 GiB。sda 主备 GPT 的 header/table CRC 通过，条目一致。分区前历史备份经指定 SHA256 校验后，条目对照仅 #21/#22 不同，其余前 20 项一致。历史 userdata 约 113.09 GiB，为恢复方案提供依据，但不代表恢复步骤已验证。
+## 2026-10-30 Android Layout Restore and Reboot Verification
 
-当前 /data 读写挂载且启用文件级加密。本轮没有重启、卸载、改分区或刷写。具体恢复方案、关键分区/个人数据备份核验尚未完成。原始读数、命令和主机分析在本机 work/runs/20261030-first-install-01/；GPT 副本及来源摘要在 local/backups/20261030-first-install-01/。
+Owner confirmed discarding Android user data and keeping TWRP 3.7. Verified historical GPT SHA-256 and dry-run restore; initial script halted cleanly on TWRP `awk` crash before writing GPT, and v2 used `grep` checks executed by the owner.
 
-## 2026-10-30 恢复与重启后核验
+After restore, primary/backup GPT matched verified backup (`userdata` 113.09 GiB, `darwin` removed); after re-entering Recovery (round 03), kernel reported `userdata` 121,425,080,320 bytes and no `darwin` node. Evidence in `work/runs/20261030-first-install-02/` and `-03/`.
 
-持有人确认不保留 Android 用户数据并保留已刷入的 TWRP 3.7。所用历史 GPT 的指定 SHA256、主备 CRC 和恢复边界已核验，恢复前演练未写入设备。首版脚本因 TWRP awk 崩溃触发挂载保护停止，回读确认 GPT 未变；v2 改用已测试的 grep 检查后，由持有人执行恢复。
+## Post-Format Android Check
 
-恢复后主备 GPT 有效，全部分区条目与已核验历史备份一致，userdata 为 113.09 GiB，darwin 条目清空。首次提示旧内核分区表后未格式化；持有人重进 Recovery，第 03 轮确认主备 GPT 字节不变、内核 userdata 为 121425080320 字节、darwin 节点不存在。TWRP 自动挂载了旧数据文件系统，此现象不算文件系统重建或 Android 启动通过。
+Owner completed TWRP `Format Data` and Android setup; ADB confirmed `sys.boot_completed=1` and `/data` total 116,193,656 KiB (~110.81 GiB), available 114,887,932 KiB (~109.57 GiB). Stage 03 passed (evidence in `work/runs/20261030-first-install-04/`).
 
-证据：本机 work/runs/20261030-first-install-02/ 和 work/runs/20261030-first-install-03/。原始日志、GUID、恢复脚本与 GPT 二进制不纳入 Git。当时下一步为重建数据文件系统并验证 Android；后续结果见下节。
+## Stage 04: ~24 GiB `darwin` Repartitioning
 
-## 格式化后的 Android 验收
+Round 05 re-read live GPT matching restored Android layout and prepared a plan with ~89.09 GiB `userdata` and 1 MiB-aligned `darwin` (`25,769,795,584` bytes, 8,192 bytes shy of 24 GiB). `sgdisk --pretend` dry-run passed; host/device syntax and transfer digests checked (`work/runs/20261030-first-install-05/`, `local/backups/20261030-first-install-05/`).
 
-持有人完成 Recovery Format Data，回 Android 完成初始化，报告设置中的系统固件约 9G。其提供的 ADB 输出显示 sys.boot_completed=1，/data 总量 116193656 KiB（约 110.81 GiB）、可用 114887932 KiB（约 109.57 GiB）。相较旧文件系统，数据容量已恢复；df 容量不等于原始分区字节数。阶段 03 据此前 GPT/内核核验和本次持有人提供的启动、容量证据通过。原始用户输出与证据来源说明在 work/runs/20261030-first-install-04/。
+### Round 05 & 06 Execution
 
-root 是否可用尚未核验；本次没有重新分区。下一步在 TWRP 只读确认最新 GPT/容量/挂载状态，再制定阶段 04 方案。
+Owner ran the partition script; readback primary/backup GPT CRCs and entries matched plan (`userdata` 95,655,297,024 bytes, `darwin` 25,769,795,584 bytes) while partitions #1–#20 and disk geometry remained intact. In Round 06 after rebooting TWRP, GPT matched byte-for-byte with updated kernel partition nodes before owner ran `Format Data` on `userdata` (`work/runs/20261030-first-install-06/`).
 
-## 阶段 04：约 24 GiB darwin 分区准备
+### Round 07: Post-Repartition Android Check
 
-第 05 轮重新读取 TWRP 当前 GPT，主备校验通过且与 Android 恢复后布局一致。准备 userdata 约 89.09 GiB、darwin 约 24 GiB 的方案；为保持 1 MiB 起点对齐，darwin 实际为 25769795584 字节（比 24 GiB 少 8192 字节）。sgdisk pretend 演练通过，之后 GPT 回读未变；脚本主机/设备语法及传输摘要通过。
+Owner confirmed `Format Data` and Android setup with `sys.boot_completed=1` and `/data` total 91,422,752 KiB (~87.19 GiB), available 90,118,260 KiB (~85.94 GiB), passing Stage 04 (`work/runs/20261030-first-install-07/`). Steps were generalized into [Darwin Partition Tool](../install/PARTITION_DARWIN.md).
 
-现场在 work/runs/20261030-first-install-05/，备份在 local/backups/20261030-first-install-05/。准备阶段仅上传脚本到 Recovery RAM，当时尚未执行分区；执行结果见下节。实际执行由持有人完成；缩小 userdata 后先回读 GPT，再重进 Recovery 核对容量并 Format Data，格式化前不得启动 Android。本阶段不写入系统镜像。
+## Round 08: Config Match & Loader/UEFI Build
 
-### 第 05 轮执行结果
+Round 06 GPT showed identical `darwin` start/end LBAs and type GUID with a new unique partition GUID, requiring only loader/UEFI rebuild while keeping kernel UFS bounds intact. After backing up old local files, `loader.c` unique GUID was updated in gitignored `work/` and `bash tools/build-loader-uefi.sh` exited `0`, verifying the new GUID inside the embedded UEFI firmware volume (`BootShim+FD+USB XNUP`) and matching DTB. `darwin.img` (8,365,539,328 bytes) matched pinned inputs, and a 300 s candidate payload was staged under `work/runs/20261030-first-install-08/`.
 
-持有人已执行分区脚本；代理回读主备 GPT CRC/条目通过，完整条目表与预定结果一致，前 20 项和磁盘身份/几何未变。userdata 为 95655297024 字节，darwin 为 25769795584 字节。写入当时内核仍报告旧 userdata 121425080320 字节，故先停下，随后按第 06/07 轮核对新节点并重建 Data。原始证据在同轮 after-verification.json 等文件。
+## Round 09: `darwin.img` Readback Verification
 
-第 06 轮：持有人重进 TWRP 后，代理确认主备 GPT 与写入后逐字节一致，CRC/条目有效；内核 userdata 为 95655297024 字节、darwin 为 25769795584 字节。该轮两者均未挂载；随后由持有人 Format Data 重建 userdata，Android 验收见第 07 轮，darwin 不作格式化。证据在 work/runs/20261030-first-install-06/。
+Under TWRP with `darwin` matching Round 06 and unmounted, readback of the exact 8,365,539,328 bytes gave SHA-256 `9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560`, matching host `darwin.img` identically (`dd` byte count and exit codes verified; Stage 06 passed; `work/runs/20261030-first-install-09/`).
 
-### 第 07 轮：重新分区后的 Android 验收
+## Round 10: iOS Boot Success on New Partition
 
-持有人确认 Format Data 后完成 Android 启动，提供 sys.boot_completed=1，/data 总量 91422752 KiB（约 87.19 GiB）、可用 90118260 KiB（约 85.94 GiB）。结合此前 GPT/节点核验，阶段 04 通过。MIUI 系统固件显示约 34G，可能包含非 Android 数据分区容量；分类算法未独立核验，不据此判定固件实际大小。证据在 work/runs/20261030-first-install-07/。下一步匹配新分区配置及准备产物，尚未写入镜像。
-
-本次分区步骤已整理为[通用分区工具](../install/PARTITION_DARWIN.md)，公共逻辑与本机参数分离；本机历史配置仅用于离线回放，不是再次分区的待执行方案。通用工具离线通过不替代设备镜像写入验收。
-
-## 第 08 轮：新布局配置与 loader/UEFI 构建
-
-依据第 06 轮已验证 GPT 核对：darwin 起止 LBA、块数和类型未变，唯一 GUID 改变。当前 loader 的旧 GUID 需替换；内核 UFS 边界仍一致，无需因此重编译内核。先备份旧本机源码/配置和启动产物，再仅修改忽略目录中的 loader GUID，公共源码保持零占位。
-
-按构建教程执行 `bash tools/build-loader-uefi.sh`，退出 0。验证新 ARM64 EFI loader 的 GUID、新 loader 确实嵌入 UEFI 压缩固件卷、boot 镜像解包为 BootShim+FD+USB XNUP、DTB 一致，均通过。74 项源码核对只有本机 loader 配置差异。内核、root.apfs、flashboot.apfs 与上次实机摘要相同。
-
-现有 darwin.img 完整 SHA256 与固定输入一致，8365539328 字节，小于 darwin 分区；无需重建系统镜像。使用仓库 build-payload.py 打包 300 秒 Wi-Fi/外设候选，保存在 work/runs/20261030-first-install-08/candidate/。日志、源码差异与验证在同轮目录，旧产物在 local/backups/20261030-first-install-08/。这是主机验证，尚未刷写/回读新分区或启动本轮 iOS。下一步阶段 06。
-
-## 第 09 轮：新 darwin 镜像回读验收
-
-TWRP 下主备 GPT 与第 06 轮一致，新 darwin GUID/容量匹配候选配置且未挂载。代理只读回读镜像准确范围 8365539328 字节，SHA256 为 `9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560`，与本轮重新计算的主机镜像一致。dd 完整字节计数和管道退出码通过，未依赖 fastboot OKAY；持有人未提供 fastboot 日志。证据在 work/runs/20261030-first-install-09/，阶段 06 通过。下一步使用第 08 轮候选临时启动 UEFI，确认 xnuloader 后加载内核/用户态，当时 iOS 实机启动待验；后续结果见第 10 轮。
-
-## 第 10 轮：新分区 iOS 启动成功
-
-代理实时 fastboot 查询确认 product 为 xnuloader；使用第 08 轮 300 秒候选，存储写入关闭。持有人随后明确报告“成功进入ios了 没问题”。据此确认本次恢复、重新分区、镜像回读、配置匹配及新 loader/UEFI 启动链已走通。boot.log 仅含 oem run 的 OKAY，不是内核启动日志；本轮未补采详细启动日志。外设逐项回归、限时退出后的完整 Android 重启仍待验，不能继承旧布局的全部功能验收。原始记录在 work/runs/20261030-first-install-10/。
-
-教程已分为[分区、写入与回退](../install/INSTALL.md)和[配置、重建与启动](../install/STARTUP.md)，独立恢复说明整合为前者的回退章节。
+Fastboot detected `product: xnuloader` running the Round 08 300 s read-only candidate (`ufs_write` disabled), and the owner confirmed clean boot into iOS without issues (`boot.log` captured `oem run OKAY` only). Per-peripheral regression and post-exit Android reboot remain pending (`work/runs/20261030-first-install-10/`). Installation tutorials were split into [Install Guide](../install/INSTALL.md) and [Startup Guide](../install/STARTUP.md).

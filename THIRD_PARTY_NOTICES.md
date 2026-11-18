@@ -1,27 +1,29 @@
-# 第三方来源与修改记录
+# Third-Party Notices and Modification Summary
 
-更新日期：2026-10-31。上游版本见 `upstream.lock.json`，适配文件及其内容摘要见 `source-manifest.json`。补丁包含 dipper 平台适配，原有第三方版权和许可声明继续适用。
+**English** | [简体中文](docs/zh-CN/THIRD_PARTY_NOTICES.md)
 
-| 来源 | 使用范围 | 许可证与通知 |
-|---|---|---|
-| [HackiOS kernel](https://github.com/oosexgang/hackios-xnu-kernel) | xnuloader、构建入口、无线 glue；XNU 基线 | 根 APSL 2.0；逐文件例外与新增文件归属待审计 |
-| [Apple XNU](https://github.com/apple-oss-distributions/xnu) | XNU 8796.121.2 上的 Mi 8 增量 | APSL 2.0 及原文件其他许可 |
-| [HackiOS userland](https://github.com/oosexgang/hackios-xnu-userland) | 显示、Wi-Fi、launchd 与注入适配 | 根 MIT；Mesa 派生文件保留独立归属 |
-| [edk2-sdm845](https://github.com/edk2-porting/edk2-sdm845) | dipper 平台、BootShim | 根许可证已附；子模块分别遵守原许可 |
-| SimpleInit（edk2 子模块） | NULL 释放保护修改 | malloc.c 适用 Intel 文件级 BSD；原通知和 EDK2 历史许可见 LICENSES/，根 LGPL 文本另保留 |
-| [UniXNU](https://github.com/UniXNU/UniXNU) | 库构建补丁与 XnuLoaderDxe 派生注册器 | package 的 BSD-2-Clause-Patent 已附 |
-| [Linux](https://www.kernel.org/) / ath10k | WLFW 表与无线源码获取脚本 | 文件中的 ISC 及版权头保留；不将整个 Linux 声称为 ISC |
-| [Mesa](https://gitlab.freedesktop.org/mesa/mesa) / freedreno | DRM 适配与渲染构建依赖 | 本补丁修改的是 HackiOS MIT IOKit DRM 适配层；完整 Mesa 依赖仍按上游逐文件许可 |
-| [FreeBSD](https://github.com/freebsd/freebsd-src) | 上游无线兼容层基础 | linux_80211.c 原 BSD-2-Clause 通知已补入 LICENSES/ |
+Updated: 2026-10-31. Pinned upstream revisions are recorded in `upstream.lock.json`, and patched files with content digests are listed in `source-manifest.json`. Patches contain `dipper` platform adaptations; upstream copyright and license notices continue to apply.
 
-没有把这些项目的全部源码复制到本仓库。通过脚本取得的上游内容仍受原许可证约束。提供链接和致谢不取代保留版权、提供源码或其他许可义务。
+| Origin | Scope of Use | License and Notices |
+| --- | --- | --- |
+| [HackiOS kernel](https://github.com/oosexgang/hackios-xnu-kernel) | `xnuloader`, build entry points, wireless glue, XNU baseline | Root APSL 2.0; per-file exceptions and added file attribution audited individually |
+| [Apple XNU](https://github.com/apple-oss-distributions/xnu) | Mi 8 deltas on XNU 8796.121.2 | APSL 2.0 and other original file licenses |
+| [HackiOS userland](https://github.com/oosexgang/hackios-xnu-userland) | Display, Wi-Fi, launchd, and injection shims | Root MIT; Mesa-derived files keep separate attribution |
+| [edk2-sdm845](https://github.com/edk2-porting/edk2-sdm845) | `dipper` platform, BootShim | Root license included; submodules keep their respective licenses |
+| SimpleInit (edk2 submodule) | `NULL`-free guard modification | `malloc.c` carries an Intel file-level BSD notice; original notice and EDK2 history are in `LICENSES/`, while the root LGPL text is kept separately |
+| [UniXNU](https://github.com/UniXNU/UniXNU) | Library build patch and `XnuLoaderDxe`-derived registrar | Package `BSD-2-Clause-Patent` included |
+| [Linux](https://www.kernel.org/) / ath10k | WLFW tables and wireless source fetch script | In-file ISC notices and copyright headers retained; Linux as a whole is not claimed as ISC |
+| [Mesa](https://gitlab.freedesktop.org/mesa/mesa) / freedreno | DRM adaptation and graphics build dependency | Patches modify HackiOS's MIT IOKit DRM layer; full Mesa dependencies remain under their respective upstream licenses |
+| [FreeBSD](https://github.com/freebsd/freebsd-src) | Upstream wireless compatibility base | Original BSD-2-Clause notice for `linux_80211.c` added to `LICENSES/` |
 
-## 外部设备维护工具
+Full source trees of these projects are not copied into this repository. Upstream sources fetched by scripts remain subject to their original licenses. Providing links and notices does not replace copyright retention, source availability, or other license obligations.
 
-[Team Win / TWRP](https://twrp.me/xiaomi/xiaomimi8.html) 及 dipper 维护者提供设备维护所需的 Recovery 环境；本项目已验证使用版本为 3.7.0_9-0。TWRP 用于分区维护、Format Data、只读回读等，不是 iOS 的 UEFI 或内核组件。本仓库仅提供官方获取入口和操作说明，不附带或镜像分发 TWRP 二进制，其权利与许可遵循上游声明。
+## External Device Maintenance Tools
 
-## GPU 代码的许可范围
+[Team Win / TWRP](https://twrp.me/xiaomi/xiaomimi8.html) and the `dipper` maintainers provide the Recovery environment required for device maintenance; this project has verified version `3.7.0_9-0`. TWRP is used for partition maintenance, `Format Data`, and readback checks, and is not an iOS UEFI or kernel component. This repository only links to the official download page and instructions without bundling or mirroring TWRP binaries; its rights and license follow upstream terms.
 
-Linux GPU 初始化表按 GPL-2.0-only 保留来源、版权及许可证全文，与 ISC ath10k 分开处理。该表由 APSL 内核驱动直接包含，组合分发条件尚未解决。Mesa/freedreno 与 Fuchsia 的宽松许可来源仅覆盖部分初始化；来源、差异和验证范围见 [GPU 许可说明](docs/legal/GPU_LICENSE.md)。
+## GPU Code License Scope
 
-dipper 原创修改的作者为 yanei，其原创部分采用 MIT。第三方源文件声明及作者署名保留，不属于该 MIT 授权范围。
+Linux-derived GPU initialization tables retain their origin, copyrights, and the full GPL-2.0-only license text, kept separate from ISC `ath10k` files. Because the table is `#include`d directly by an APSL kernel driver, combined binary distribution terms remain unresolved. Permissive sources from Mesa/freedreno and Fuchsia cover only part of the initialization; origins, gaps, and verification scope are documented in [GPU License Notes](docs/legal/GPU_LICENSE.md).
+
+Original `dipper` modifications authored by **yanei** are licensed under MIT. Third-party file notices and author attributions are preserved and excluded from that MIT grant.

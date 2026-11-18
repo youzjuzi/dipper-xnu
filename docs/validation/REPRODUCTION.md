@@ -1,48 +1,49 @@
-# 2026-10-30 独立目录复现记录
+# 2026-10-30 Isolated-Directory Reproduction Report
 
-起点：公开仓库提交 `e930c26c4303283d7f2f5fc87479946d46409783`，Ubuntu 26.04.1 LTS x86_64。下面结果包含本次对教程和构建脚本的修复，不代表原提交未经修改即可全部通过。
+**English** | [简体中文](../zh-CN/docs/validation/REPRODUCTION.md)
 
-## 输入与隔离
+Starting commit: `e930c26c4303283d7f2f5fc87479946d46409783` on Ubuntu 26.04.1 LTS `x86_64`. Results below include fixes added to tutorials and build scripts during reproduction; the unmodified starting commit did not pass end-to-end as-is.
 
-- 在独立目录克隆公开仓库；上游源码由本轮联网获取，采用 `upstream.lock.json` 固定版本。
-- 7 项外部输入先查公开来源，再校验本地原包/SDK；经持有人确认后复制。未借用旧内核、旧 UEFI、旧启动载荷、用户空间产物或已修改的开发源码。来源与校验强度见 [INPUTS.md](../build/INPUTS.md)。
-- `THEOS` 指向本轮独立工具链与 SDK。iOS 提取、Mesa、主机工具、启动卷和系统镜像均在本工作树生成。
-- 主机已有系统依赖，**不是全新 Ubuntu 安装验证**。首次准备因调整复用策略而中断，随后保留现场并分段恢复；没有把这个过程记作一次无中断成功。
-- 修复后的 `prepare.py --prepare` 又在第二个空目录完整执行：仅通过本轮获取的 Git 对象缓存提供固定上游提交，禁用网络，不复制工作树改动。6 组补丁、72 个源码文件摘要全部通过。这验证了准备脚本完整回放，不代替未来网络可用性保证。
+## Inputs and Isolation
 
-## 初始主机构建结果
+- Cloned the public repo into a fresh directory and fetched pinned upstream commits via `upstream.lock.json`.
+- Verified all 7 external archives/SDKs against official origins and SHA-256 checksums before copying ([INPUTS.md](../build/INPUTS.md)); reused no old kernels, UEFI images, payloads, userspace builds, or modified worktrees.
+- `THEOS` pointed to an isolated toolchain/SDK; iOS extraction, Mesa, host tools, APFS volumes, and `darwin.img` were generated fresh inside the isolated tree.
+- Host packages were pre-installed (**not** a clean-OS apt test). An interrupted initial fetch was retained and resumed cleanly before re-running the fixed `prepare.py --prepare` offline into a second empty directory (all 6 patch sets and 72 manifest hashes passed).
 
-| 阶段 | 结果 | 边界 |
+## Initial Host Build Results
+
+| Stage | Result | Scope & Boundaries |
 | --- | --- | --- |
-| iPhoneOS16.5 SDK | 8,867 个文件/链接及模式构成的 Git tree 匹配 | 不是只看目录名 |
-| XNU 依赖 stage1 / stage2 | 退出 0 | 在已有主机环境构建 |
-| ath10k | 编译通过 | 不代表设备无线可用 |
-| XNU `-j8 -k` 默认目标 | **退出 2** | 导出符号检查、LLDB 工具生成未通过 |
-| XNU `-j8 build` | **退出 0**，ARM64 Mach-O 内核 | 编译/链接目标通过，不代表 `all` 通过 |
-| IPSW 校验及提取 | 退出 0 | 完整 SHA256、BuildManifest、3 个镜像逐一验证 |
-| Mesa / 图形 / 注入 / net_test | 源码编译通过 | 不使用 PREBUILT |
-| 用户空间入口 | 退出 0，生成 root.apfs / flashboot.apfs | 此阶段 GPU 固件仍缺失；后续补齐并进行实机验证 |
-| xnuloader / UEFI | 退出 0 | Android boot image 中 BootShim + FD + USB XNUP 逐字节匹配，DTB 存在；loader 为 ARM64 EFI application |
-| darwin.img | 退出 0，8,365,539,328 字节 | 输出摘要与历史系统镜像一致，无设备写入 |
-| APFS 主机回读 | 4/4 内容匹配 | 用内核 APFS 代码的主机工具读取图形库、net_test、Wi-Fi plist、stage0，与本轮输入逐一比 SHA256 |
+| `iPhoneOS16.5.sdk` | Git tree hash matched all 8,867 files/symlinks/modes | Full tree digest, not just path check |
+| XNU deps stage1 / stage2 | Exit `0` | Built on host with pre-installed packages |
+| `ath10k` | Compiled cleanly | Does not verify device Wi-Fi |
+| XNU `-j8 -k` default (`all`) | **Exit `2`** | Failed on export symbol check & LLDB tool generation |
+| XNU `-j8 build` | **Exit `0`**, ARM64 Mach-O | Headers/compile/link pass; does not imply `all` passes |
+| IPSW verify & extract | Exit `0` | Verified full SHA-256, `BuildManifest`, and 3 DMGs |
+| Mesa / GL / shims / `net_test` | Built from source | `PREBUILT` rejected |
+| Userspace entry point | Exit `0`, built `root.apfs` / `flashboot.apfs` | GPU firmware still missing at this stage; staged later for hardware test |
+| `xnuloader` / UEFI | Exit `0` | BootShim + FD + USB XNUP matched byte-for-byte; DTB present; ARM64 EFI confirmed |
+| `darwin.img` | Exit `0`, 8,365,539,328 bytes | SHA-256 matched historical system image; no device writes |
+| Host APFS readback | 4/4 digests matched | Read graphics lib, `net_test`, Wi-Fi plist, and stage0 via host `apfs-tool` |
 
-APFS 打包器在受限沙箱中曾因 Python 多进程 IPC 权限失败；允许主机本地 IPC 后完成。此失败没有作为源码缺陷绕过，也没有将管道尾部成功当作镜像生成成功。
+APFS packing failed initially inside a restricted sandbox without Python multiprocessing IPC permissions and succeeded once local IPC was enabled.
 
-## 本轮修复
+## Fixes Applied During Reproduction
 
-1. 源码准备按固件构建需要获取子模块层级，保留 gitlink 固定版本，避免递归获取依赖自己的大型测试仓库。
-2. `net_test.m` 使用 Network API，构建补上 `-framework Network`。
-3. 用户空间脚本启用 `pipefail`；缺少链接器直接报错，新入口拒绝 `PREBUILT`，不自动退回旧二进制。
-4. Mesa venv 创建后若安装中断，重跑会检查并补齐 Python 依赖；Ninja 使用 `BUILD_JOBS` 控制并行量。
-5. 容器无 timedatectl 服务时允许显式 `BUILD_TIMEZONE` / UTC；UFS 路线跳过不使用的 RAM 根卷 `system.apfs`。
-6. UEFI 入口生成并嵌入 USB XNUP 引导载荷，同时拒绝自动启动设备的参数。
-7. 新增 SDK 树校验、IPSW 提取、用户空间构建、darwin 镜像打包入口及对应教程。镜像打包只取 UDIF 中的 APFS 分区，不将 GPT 包装写入系统布局。
+1. Shallow-fetched only required UEFI/boot submodules per pinned gitlinks rather than cloning OpenSSL's nested test repos.
+2. Added `-framework Network` for `net_test.m`.
+3. Enabled `pipefail` in userspace wrapper, enforced linker check, and rejected `PREBUILT`.
+4. Added Mesa venv dependency recovery on retry and `BUILD_JOBS` Ninja concurrency control.
+5. Added `BUILD_TIMEZONE` / UTC fallback without `timedatectl` and skipped unused RAM-root `system.apfs`.
+6. Automatically embedded USB XNUP payload in UEFI build while refusing device-boot options.
+7. Added SDK tree verification, IPSW extractor, userspace/UEFI wrappers, `darwin.img` packer (extracting `3.apfs` without GPT wrapper), and tutorials.
 
-补丁、源码清单和许可证清单同步更新；许可证范围没有改变。图形初始化代码既有的许可问题仍见 [GPU_LICENSE.md](../legal/GPU_LICENSE.md)。
+Patches, `source-manifest.json`, and `license-inventory.json` were updated together; existing [GPU licensing constraints](../legal/GPU_LICENSE.md) remain unchanged.
 
-## 初始主机构建产物摘要
+## Initial Host Artifact Digests
 
-以下是**初始主机构建记录，早于 Wi-Fi 与亮度修复**；最终实机产物摘要见 [设备验收记录](device-validation-20261030.json)。除固定 Apple 系统组合镜像外，未证明包含时间、路径、APFS 元数据等的构建产物可跨机器逐字节重复；不要把这些摘要当成通用下载校验值。
+These **initial host digests predate the Wi-Fi and brightness fixes**; see [Device Validation Data](device-validation-20261030.json) for hardware-tested artifacts. Except for the deterministic Apple composite `darwin.img`, host-built artifacts embed timestamps/paths/APFS metadata and are not proven byte-identical across machines:
 
 ```text
 01bc508afdb937cc67512c5ff9915e7b6228d0917eb7303480217b92ee656ca0  mach.development.bcm2837
@@ -53,62 +54,32 @@ APFS 打包器在受限沙箱中曾因 Python 多进程 IPC 权限失败；允�
 9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560  darwin.img
 ```
 
-## 当前未完成项
+## Remaining Open Items at Reproduction
 
-- 完整 XNU `all` 的导出检查和工具生成。
-- 所有传递依赖锁定，以及干净 OS 上的依赖安装验证。
-- 通用设备配置输入、首次重新分区与系统刷写。
-- 长期稳定性、功耗、充电全过程、持久保存，以及完整音频等未覆盖硬件。
+- XNU `all` export check and tool generation.
+- Full transitive dependency pinning and clean-OS package install validation.
+- Generic device config input, fresh repartitioning, and flashing (repartition/readback verified separately in [First-Install Task](../development/FIRST_INSTALL.md)).
+- Long-term stability, power, charging, and remaining unported hardware.
 
-固件来源、GPT 与源码配置对齐、载荷生成及 Wi-Fi/亮度验证已在后续设备阶段完成，见下文。最终修复补丁回放共有 74 个源码文件摘要匹配；上方 72 个文件记录对应较早的主机阶段。后续复现可按 [已有分区测试](../install/EXISTING_INSTALL.md) 或 [首次安装教程](../install/INSTALL.md) 选择路线，不能把前者记为首次安装通过。
+## Hardware Validation on Existing Partition
 
-## 现有分区上的实机验收
+Attached the test `dipper` with existing GPT verified (`8,365,539,328`-byte `darwin` system span readback matched new `darwin.img` SHA-256 identically, so existing partition was reused without flashing). Staged four verified A630 GPU blobs and updated local `loader.c` GUID in the gitignored build tree.
 
-本轮随后连接同一台 dipper，按持有人选择保留现有分区。GPT 主、备份 header 和 entry CRC 一致，darwin 边界与源码相符；只读回算系统区 8,365,539,328 字节，SHA256 与新生成镜像完全一致。因此复用现有系统区，没有执行 flash、erase 或分区修改。
+Round 1 entered XNU, mounted rootfs, and authenticated A630 ZAP, but `launchd` rejected services (`Path had bad ownership/permissions`—`0775`/`0664` due to host umask). Fixed `umask 022` in userspace build and added strict APFS `0755`/`0644` checks in `build-payload.py`.
 
-4 个 GPU 固件经持有人确认从手机只读提取，手机端/主机端摘要全部一致。来源和步骤见 [已有分区测试](../install/EXISTING_INSTALL.md)。本机 GUID 仅写入忽略目录中的构建树，再重建 loader/UEFI；不进入公共补丁。
+Round 2 launched SpringBoard cleanly (Settings foreground, touch down/up events, active GPU rendering, 0 launchd permission denials), decoded native `4608`-byte-stride framebuffer showing desktop icons (screenshot interface captured top 2107 lines at UEFI `1080x2248` out of `1125x2436`), returned cleanly after 5 min (`returned 1441823 0`), and rebooted to Android (`sys.boot_completed=1`). See [Device Validation Data](device-validation-20261030.json).
 
-第一轮新构建已进入 XNU、挂载系统卷并完成 A630 ZAP 认证，但 launchd 拒绝加载服务，未进入桌面。日志报告 `Path had bad ownership/permissions`；APFS 回读证实根目录和 LaunchDaemons 为 0775，服务 plist 为 0664。构建脚本未设置 umask，继承了主机的组可写默认值。
+## Wi-Fi and Safari Hardware Validation
 
-已在用户空间构建中固定 `umask 022`，并在载荷入口增加实际 APFS 的 owner/mode 检查；旧镜像在负向检查中被拒绝，新镜像关键目录为 0755、服务配置为 0644。第一轮产物和日志保留，手机完整返回 Android 后进行第二轮验证。
+Tested Wi-Fi in 900 s RAM-boot rounds (`514`-byte bootargs with local `wifi_mac`, full reboots between rounds):
 
-第二轮已启动 SpringBoard，日志中设置应用进入前台，触摸 down/up 事件与 GPU 持续绘制同时出现；采样日志中的 launchd 权限拒绝为 0。实际读取的 framebuffer 经原生 4608 字节行宽解码，可见 SpringBoard 桌面图标。截图接口仍按 UEFI 的 1080×2248 尺寸读取，原生缓冲区为 1125×2436，因此截图只覆盖上方 2107 行，不能当作完整屏幕照片。
+- Round 1/2 captured `lx: no 46137344 bytes of memory in one piece` / `rc=12` after `FW_READY` (userspace fragmented memory before allocation); fixed by reserving the 44 MiB pool prior to modem thread startup.
+- Round 3 reached WLAN start and hit `rc=60` due to missing `firmware-5.bin`; staged verified 60-byte file ([External Inputs](../build/INPUTS.md#wcn3990-wi-fi-feature-file)) and enforced host packaging check.
+- Round 4 passed: `FW_READY`, `redwood_lx_start rc=0`, `en0` associated with IPv4/IPv6 and DNS (`wifi 1 cellular 0`), and owner confirmed Safari loaded and refreshed pages before returning cleanly (`returned 1441823 0`) and rebooting to Android ([Section 5 of Existing-Partition Testing](../install/EXISTING_INSTALL.md#5-wi-fi-and-web-browsing-test)).
 
-结论：**新源码构建在已有 darwin 分区上的桌面启动已验证**。这两轮桌面测试未重刷系统区、未重新分区，未加载旧 var_store，也未测试 Wi-Fi、音频、长期稳定性或首次安装。后续 Wi-Fi 测试见下节；结构化结果与产物摘要见 [设备验收记录](device-validation-20261030.json)。
+## Peripherals and Interactive Hardware Validation
 
-第二轮 5 分钟后 loader 返回 `returned 1441823 0`；最终日志已保存，随后完整重启回 Android，ADB 已确认 `sys.boot_completed=1`。该结果证明本轮短时桌面运行，不证明长期稳定性。
+Added `battery=1 torch=3 haptic=3` (`578`-byte bootargs, [Section 6 of Existing-Partition Testing](../install/EXISTING_INSTALL.md#6-peripherals-and-interactive-desktop-test)):
 
-## Wi-Fi 与 Safari 实机验收
-
-沿用同一台手机和已核验系统区，以 900 秒上限的 RAM 载荷测试 Wi-Fi，每轮之间完整重启。实际 bootargs 为 514 字节，末尾 MAC 参数完整；未启用存储写入或旧用户状态。
-
-初次测试中持有人报告 Wi-Fi 关闭且无法启用。第二次使用完全相同载荷，在启动前 100 秒每 2 秒保存日志，捕获 `FW_READY` 后申请 46,137,344 字节连续内存失败，驱动返回 12。原实现到固件就绪才分配，而此时用户空间已经启动。修复将无线池预留提前至 modem 线程创建前；DMA 映射仍等到 WLFW/SMMU 初始化完成。池大小由内核与 ath10k 共用的头文件定义。
-
-第三次新内核实测确认预留和映射成功，WLAN 工作模式请求返回 0，但 ath10k 随后缺少 `firmware-5.bin`，驱动启动最终返回 60。该文件是 linux-firmware 的 60 字节特性描述，独立于手机 modem 分区的 DSP 固件。在线来源和本机副本 SHA256 一致，经持有人确认复制，补入用户空间打包步骤；`--wifi` 入口现在回读 APFS 校验它，缺少时在主机端拒绝生成载荷。来源、摘要见 [外部材料](../build/INPUTS.md#wcn3990-wi-fi-特性描述文件)。
-
-第四次使用修复后的内核和新 root.apfs，通过以下验收：
-
-- 固件报告 `FW_READY`，特性文件从小镜像读到，`redwood_lx_start rc=0`。
-- en0 创建并连接热点，日志观察到 IPv4 和 IPv6 地址。
-- 网络路径状态为 satisfied，接口为 en0，`wifi 1 cellular 0`，并报告 DNS 可用。
-- 设备持有人确认 Wi-Fi 已连接，Safari 网页能够打开并刷新。
-
-因此本次复现的 **Wi-Fi 入网和 Safari 上网已通过**。网页显示来自持有人确认；地址与网络路径来自设备日志，未单独测量 IPv6 外网、吞吐或长期稳定性。完整日志留在忽略目录，公共记录不包含 SSID、MAC、地址或浏览内容。新增教程入口见 [已有分区测试第 5 节](../install/EXISTING_INSTALL.md#5-wi-fi-与网页测试)。
-
-确认成功并保存日志后，结束 RAM 测试；loader 返回 `returned 1441823 0`，完整重启回 Android，ADB 确认 `sys.boot_completed=1`。修复后的内核、启动镜像和文件摘要均保留在本轮设备记录中。
-
-## 外设与日常交互验收
-
-随后加入 `battery=1 torch=3 haptic=3`，保留 Wi-Fi，使用相同系统区和启动镜像验证其他已实现功能。实际 bootargs 为 578 字节，包含电池共享地址和全部末尾参数。操作清单及命令见 [已有分区测试第 6 节](../install/EXISTING_INSTALL.md#6-外设与日常交互测试)。
-
-首轮持有人确认手电筒开关、震动、音量键/音量条、电量、壁纸、小组件及锁屏唤醒正常，但屏幕亮度不随滑块改变。日志确认 DSI 命令缓冲区位于 4 GiB 以上，无法装入 32 位 DMA 地址寄存器；重复拖动还会重复申请并遗留被拒绝的页面。
-
-修复为受 32 位物理地址上限约束的连续页分配，并以实际页面大小检查完整缓冲区范围；异常分配会释放。更新后的完整 XNU 补丁从固定基线回放、清单校验及内核重建均通过。
-
-第二轮只更换内核及生成的载荷，其他 4 项镜像/加载器摘要与首轮一致。实机取得 `0xfd4fc000` 的 16 KiB 命令页，完整处于 4 GiB 以下；所采日志中的超界拒绝和亮度写入错误均为 0。持有人确认：
-
-- 设置和控制中心均能改变实际屏幕亮度，锁屏/唤醒 3 次正常。
-- 手电筒开关、长按震动、音量键/音量条、电量和小组件正常，Wi-Fi 网页刷新正常。
-- 手电筒分档亮度仍不明显，因此只验收开关，不把分档调光记为通过。
-
-退出日志确认马达停止，enable/play 均为 0；手电筒 enable、channels 和 targets 均为 0。结果和最终内核摘要见 [设备验收记录](device-validation-20261030.json)。音量 UI 不代表扬声器输出；电量显示不代表充电全过程；壁纸和小组件显示不代表持久保存。完整音频、电话/移动数据和其他未覆盖硬件仍不列为通过。
+- Round 1 confirmed torch, haptics, volume keys/slider, battery, wallpaper, widgets, and lock/wake, while brightness failed because DSI command buffers landed above 4 GiB (32-bit DMA limit). Fixed `kmem_alloc_contig` under 32-bit physical bounds and freed failed allocations.
+- Round 2 (kernel + payload rebuilt; other 4 artifact hashes identical) allocated a 16 KiB command page at `0xfd4fc000` (`0` out-of-range rejections/write errors); owner confirmed Settings & Control Center dimming, 3x lock/wake, torch toggle (steps visually subtle—only toggle marked passing), haptics, volume UI, battery, widgets, and Wi-Fi web refresh, with teardown logging motors/torch disabled (`0`). Volume UI does not cover speaker output; battery readout does not verify full charging ([Device Validation Data](device-validation-20261030.json)).

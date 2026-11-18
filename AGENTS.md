@@ -1,47 +1,45 @@
-# dipper-xnu 开发约定
+# dipper-xnu Development Conventions
 
-## 开始工作
+**English** | [简体中文](docs/zh-CN/AGENTS.md)
 
-- 本仓库是后续开发入口。先运行 `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py --deep` 核查当前 Git 分支、校验摘要、构建产物及 `work/` 中未导出改动（该命令自动忽略已归一化的本机 `loader.c` 占位差异），再依次读 `docs/README.md`、`docs/STATUS.md`、`docs/development/DEVELOPMENT.md`（含当前现场交接）。若本机 `local/` 下存在已有索引或私有交接资料，可仅作只读参考，严禁把任何私有路径、编号或内容写入公开文件或提交。
-- 日常开发常用统一入口：查看未导出差异用 `python3 -B tools/prepare/status.py diff`；内核增量构建用 `bash tools/build/build-kernel.sh`；全套主机回归与自动清理干净重放用 `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/run-tests.py --suite all --clean-replay`；提交前校验用 `python3 -B tools/prepare/status.py check --refresh-sums`。
-- 当前可复现交付物是固定上游版本 + `patches/` + `source-manifest.json` + 构建工具，不是单独的 `work/`。
-- `work/` 和 `local/` 虽被 Git 忽略，可能包含未导出的源码、本机配置、固件和唯一的测试证据。不得默认清理、覆盖或切换其内层仓库。
-- 旧 MI8-IOS 工作区只作历史参考。不要把旧启动脚本、旧产物和当前复现树混合使用。
+## Getting Started
 
-## 修改与验证
+- This repository is the single mainline development entry point. First run `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py --deep` to inspect the active Git branch, checksums, build artifacts, and any unexported changes in `work/` (automatically normalizing local identity fields in `loader.c`), then read `docs/README.md`, `docs/STATUS.md`, and `docs/development/DEVELOPMENT.md` (including the current handoff section). If local indices or private planning files exist under `local/`, consult them read-only only and never copy private paths, internal IDs, or private notes into public files or commits.
+- Standard daily commands: inspect unexported diffs with `python3 -B tools/prepare/status.py diff`; run incremental kernel builds with `bash tools/build/build-kernel.sh`; run host regressions and disposable clean-replay verification with `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/run-tests.py --suite all --clean-replay`; run pre-commit verification with `python3 -B tools/prepare/status.py check --refresh-sums`.
+- The reproducible deliverable is pinned upstream commits + `patches/` + `source-manifest.json` + build tools, not `work/` by itself.
+- Although `work/` and `local/` are gitignored, they may hold unexported source changes, local device configurations, firmware blobs, and unique test evidence. Never wipe, overwrite, or reset their inner repositories by default.
+- The legacy MI8-IOS workspace is historical reference only. Never mix legacy boot scripts or legacy artifacts with the current reproducible tree.
 
-- 每次改动围绕一个问题；默认一任务一分支，在本仓库唯一的 work/ 顺序开发。不为每个任务复制仓库或建立工作树；每轮仅新建运行记录目录。
-- 修改上游衍生源码后，导出对应补丁；更新源码清单，并检查许可清单中受影响的条目。不能只改忽略目录后宣称已提交修复。
-- 导出必须基于相应组件的正确基线，先审查文件列表。XNU 的 dipper 补丁基于 HackiOS 基线，不直接基于 Apple 原版。
-- 补丁导出、干净重放和隐私扫描用 `tools/prepare/patchtool.py`（用法见 `tools/README.md`）。先导出到 `work/runs/` 下的新目录审查，不要手工拼补丁或直接对 `work/` 做 `git diff`。
-- 私人 GUID、MAC、密码、固件、SDK、系统镜像和原始设备日志不进入补丁或提交。公开 loader 保留占位值，本机配置单独保存。
-- 改动后按范围验证：文档做链接和摘要检查；源码做补丁重放、编译及必要的主机回归。设备成功只能依据实际设备证据。
-- 有效源码变更更新 `docs/STATUS.md`、`docs/validation/VALIDATION.md`，面向使用者的变化写 `CHANGELOG.md`；维护 `SHA256SUMS`。
-- 不使用 `git add .`；逐个指定审查过的文件。未获授权不 push、发布或创建 Release。
+## Modifying and Verifying
 
-## 设备与输入
+- Keep each change focused on one problem; use one branch per task and develop sequentially inside this repository's single `work/` tree. Never duplicate the full source tree per task; create a fresh subdirectory under `work/runs/` for each test round.
+- After modifying upstream-derived sources, export the corresponding patches, update `source-manifest.json`, and review affected entries in `license-inventory.json`. Never claim a fix is committed when it only exists inside gitignored directories.
+- Export patches against the proper baseline for each component and review the file list first. XNU `dipper` patches apply on top of the HackiOS baseline, not directly on stock Apple XNU.
+- Use `tools/prepare/patchtool.py` for patch export, clean replay, and privacy scanning (see `tools/README.md`). Always export into a new directory under `work/runs/` for review first; never hand-edit patches or run raw `git diff` across `work/`.
+- Private GUIDs, MACs, passwords, firmware, SDKs, system images, and raw device logs must never enter patches or commits. Public `loader.c` retains placeholder values while device-specific configuration lives in `local/`.
+- Verify changes according to scope: check links and checksums for docs; verify clean patch replay, compilation, and host regressions for code. Hardware status claims must rely solely on real device evidence.
+- Meaningful code changes must update `docs/STATUS.md` and `docs/validation/VALIDATION.md`, user-visible changes go into `CHANGELOG.md`, and `SHA256SUMS` must be maintained.
+- Never run `git add .`; stage reviewed files explicitly by name. Never push, publish, or create a release without owner authorization.
 
-- 构建和主机检查不自动操作手机。设备操作由持有人执行；不得自行 flash、erase、分区、写块设备或解锁。
-- 遇到指定 SHA256 不一致立即停止对应步骤，不换版本、不绕过校验。
-- 当前 GPU/基带退出恢复尚未闭合；设备轮次之间完整重启，不能沿用旧记录直接 rerun。
-- 保留已有产物，每轮使用新输出目录；不以主机通过替代真机验证。
+## Device and Inputs
 
-## 目录纪律
+- Builds and host checks must never touch a phone automatically. Device operations are performed by the owner; never run flash, erase, partition, block-write, or unlock commands autonomously.
+- If any expected SHA-256 mismatches, stop immediately rather than swapping versions or bypassing checks.
+- GPU/baseband teardown recovery is still incomplete; perform a full reboot between device test rounds instead of reusing a dirty state.
+- Preserve existing artifacts and write each round to a new output directory; host test passes never replace physical hardware verification.
 
-- 严格遵循 `docs/development/DEVELOPMENT.md` 的固定目录表。已有类别不得另建顶层目录；新增类别先说明用途并更新目录表。
-- 仅干净重放/重建验证或明确需要的并行工作使用顶层 `experiments/<topic>/` 临时树（验证后清理）；日常运行日志和产物放本仓库的 `work/runs/YYYYMMDD-<topic>-NN/`，发布审查放 `local/reviews/YYYYMMDD-<topic>/`。
-- 原停用的顶层 `sources/` 目录已移除，不再重建；工作区 archive/20261030 下的历史 reproduction-logs、release-review 和旧 MI8-IOS 工作区不再追加日常内容。禁止再维护第二套发布源码副本。
-- 不为整理外观移动现有构建树或输入。路径调整须同步脚本、文档并验证；可复用脚本放 `tools/`，一次性脚本跟随对应实验记录。
+## Directory Discipline
 
-- `local/` 遵循开发文档的 local 管理约定：现有配置路径不变，新配置/来源/备份/审查分别归入 devices、provenance、backups、reviews；同步本机 index.json，禁止临时堆在根目录。运行产物放 work/runs，不放 local。
+- Strictly follow the fixed directory layout in `docs/development/DEVELOPMENT.md`. Do not add top-level directories for existing categories; document and update the layout table before introducing a new category.
+- Use workspace-level `experiments/<topic>/` only for clean replay/rebuild verification or explicit parallel isolation (clean up after verification); place daily run logs and artifacts in `work/runs/YYYYMMDD-<topic>-NN/`, and pre-release reviews in `local/reviews/YYYYMMDD-<topic>/`.
+- The deprecated top-level `sources/` directory has been removed and must not be recreated; do not append daily work to workspace `archive/20261030/` logs or the legacy MI8-IOS workspace, and never maintain a second release source copy.
+- Do not move existing build trees or inputs purely for cosmetic cleanup. Any path change must update scripts, docs, and verification together; reusable scripts belong under `tools/`, while one-off scripts stay in their run directories.
+- `local/` follows the local management rules in `DEVELOPMENT.md`: preserve existing config paths (`local/wifi-mac` is read directly by build scripts), file new entries under `devices/`, `provenance/`, `backups/`, or `reviews/`, and keep `local/index.json` synchronized without dumping files in `local/` root. Run artifacts belong in `work/runs/`, not `local/`.
 
-## 单源码树与交接
+## Single Source Tree and Handoff
 
-- 父仓库分支切换不更新被忽略的 work/。切任务前先导出并保存所有源码差异；切到不同源码版本后，核对 work/ 与目标提交的对应关系才能编译。禁止以覆盖、清空或另复制一份来回避未保存修改。
-- docs/development/DEVELOPMENT.md 的“当前开发现场交接”是唯一开发现场入口，每次结束更新任务、分支/提交、未导出修改、产物证据和下一步。STATUS 记录产品功能边界，不复制一份平行状态文档。
-
-- 文档分类见 docs/README.md：development、build、install、validation、legal；新增文档归入相应类别，不平铺 docs 根目录。首次安装计划为 docs/development/FIRST_INSTALL.md；当前维护分支及任务以 DEVELOPMENT.md 现场交接为准。
-
-- tools 分类固定为 prepare/、build/、partition/、tests/，入口见 tools/README.md；新增工具归入对应类别。历史轮次保留原始命令和摘要，当前教程使用新路径。
-
-- 公开首页和 build/install 教程使用读者视角：保留标准目录/参数占位符、适用版本和验证边界，不写固定私人实验路径、聊天引用或内部轮次。具体过程与证据索引归 development/、validation/，不得用删减叙述掩盖未验证事项。
+- Switching branches in the parent repository does not change gitignored `work/`. Export and save all source diffs before switching tasks; after switching branches, verify `work/` matches the target commit before building. Never resolve mismatches by overwriting, wiping, or cloning a duplicate tree.
+- The "Current Development Handoff" section in `docs/development/DEVELOPMENT.md` is the single live status entry point; update task, branch/commit, unexported changes, artifact evidence, and next steps at handoff. `docs/STATUS.md` tracks product capabilities without duplicating a parallel status doc.
+- Documentation follows `docs/README.md`: `development/`, `build/`, `install/`, `validation/`, `legal/`, with Chinese mirrors under `docs/zh-CN/`. Do not flatten new docs into `docs/` root.
+- `tools/` uses fixed categories `prepare/`, `build/`, `partition/`, and `tests/` (see `tools/README.md`). Legacy runs preserve their historical commands; current tutorials use the categorized paths.
+- Public home pages and `build/`/`install/` tutorials use a reader perspective with standard placeholder paths, pinned versions, and explicit validation boundaries—no private experiment paths, chat references, or internal round numbers. Detailed procedures and evidence indices belong in `development/` and `validation/` without hiding unverified gaps.

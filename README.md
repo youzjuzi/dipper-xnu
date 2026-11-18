@@ -1,6 +1,6 @@
 # dipper-xnu
 
-**English** | [简体中文](README.zh-CN.md)
+**English** | [简体中文](docs/zh-CN/README.md)
 
 **Experimental / Work in Progress**
 
@@ -10,19 +10,13 @@ Built on the [HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) foundati
 
 This project is still under active development and is **not** ready for daily use.
 
-<p align="center">
-  <img src="docs/images/mi8-ios-desktop.png" alt="Xiaomi Mi 8 running iOS 16.5 SpringBoard on real hardware" width="320">
-  <br>
-  <sub>Xiaomi Mi 8 · iOS 16.5 · Running on real hardware</sub>
-</p>
-
 ## Recent Updates · 2026-11-12
 
 - **Internal speaker audio works**: iOS ringtones, keyboard clicks, and media audio play from the Mi 8 speaker and respond to the iOS volume slider. Audio wakes in ~40 ms with fade-in/fade-out and pop-free idle shutdown; verified in a 10-minute 0 dB continuous playback run with amp health checks passing and CPU at 41–43 °C.
 - **How it works**: The kernel consumes PCM from iOS audio services and routes it through the Qualcomm ADSP (`GLINK`/`APR` -> `ASM`/`ADM`/`AFE` over Quaternary MI2S) to a native `TAS2557` SmartAmp driver (firmware loading, power-up, health verification, soft mute/shutdown when idle, and emergency reset on kernel panic).
 - **Bluetooth, audio, battery, haptics, and torch enabled by default**: Packaging with `--wifi` now turns them on without extra boot arguments (`--bluetooth` / `--peripherals` are no longer required; pass `bt=0`, `audio=0`, etc. to disable).
 - **Current audio & network limits**: Speaker output becomes ready ~1 minute after boot once Wi-Fi initializes; acoustic tuning is incomplete; Bluetooth audio, earpiece, microphone, and voice calls are not implemented; the volume button HUD shows a mute icon; intermittent browser/Wi-Fi RX stalls remain under investigation; long-term power consumption is untested.
-- **User-supplied amp firmware**: `TAS2557` firmware must be extracted from your own phone (ADSP firmware is read directly by the kernel from the phone's `modem` partition). See [Configuration, Rebuild & Boot](docs/install/STARTUP.md#扬声器电量震动与手电缺省开启).
+- **User-supplied amp firmware**: `TAS2557` firmware must be extracted from your own phone (ADSP firmware is read directly by the kernel from the phone's `modem` partition). See [Configuration, Rebuild & Boot](docs/install/STARTUP.md#speaker-audio-and-peripherals-enabled-by-default).
 - Hardware results above are from maintainer testing and device logs rather than an automated full regression; details in [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](docs/validation/VALIDATION.md).
 
 ## Hardware & Boot Chain
@@ -72,7 +66,7 @@ Detailed status and verification boundaries are tracked in [docs/STATUS.md](docs
 
 This repository publishes **source patches, file manifests, host build/test tools, and documentation only**:
 
-- **No prebuilt kernels or merged binaries** are hosted or distributed (see [GPU_LICENSE.md](docs/legal/GPU_LICENSE.md) regarding `mi8_a630_hw_init.inc` and APSL 2.0/GPL-2.0-only boundaries).
+- **No prebuilt kernels or merged binaries** are hosted or distributed (see [GPU_LICENSE.md](docs/legal/GPU_LICENSE.md#distribution-policy) regarding `mi8_a630_hw_init.inc` and APSL 2.0/GPL-2.0-only boundaries).
 - **No Apple binaries or IPSW contents** (no rootfs, dyld shared cache, system apps, fonts, or proprietary Apple keys/certificates) are committed.
 - **No proprietary vendor firmware** is committed; device firmware (`a630_*`, `crbtfw21.tlv`/`crnv21.bin`, `tas2557_uCDSP_goer.bin`) and device-unique GPT GUIDs/MAC addresses must be obtained from your own device. Public patches keep zero/placeholder identifiers (`loader.c`).
 
@@ -80,7 +74,7 @@ This repository publishes **source patches, file manifests, host build/test tool
 
 Developed on **Ubuntu 26.04.1 LTS (`x86_64`)**. Rather than tracking a full XNU fork directly, this repository reproduces the port deterministically from pinned upstream commits ([upstream.lock.json](upstream.lock.json)), component patches (`patches/`), and file checksums ([source-manifest.json](source-manifest.json)).
 
-> **Note:** Detailed step-by-step guides under `docs/` are currently written in Chinese and contain full dependency tables, SHA-256 checksums, and verification notes. Use [README.zh-CN.md](README.zh-CN.md) or [docs/README.md](docs/README.md) for the complete walkthrough.
+> **Note:** Chinese mirrors of all documentation are available under [docs/zh-CN/](docs/zh-CN/README.md).
 
 1. **Verify repo files and prepare pinned sources**:
    ```sh

@@ -1,16 +1,18 @@
-# 主线开发与实验维护
+# Mainline Development and Experiment Maintenance
 
-## 哪些内容是主线
+**English** | [简体中文](../zh-CN/docs/development/DEVELOPMENT.md)
 
-主线由 Git 中的固定上游版本、适配补丁、构建脚本、源码清单和文档构成。`main` 保留已审查、验证范围明确的修改；实验在独立分支完成。文档或主机工具修改不强制要求实机验证，但不能改写设备功能结论。
+## What Lives on Mainline
 
-2026-10-30 的起点为 `f784c8e`，功能边界见 [STATUS](../STATUS.md) 和 [VALIDATION](../validation/VALIDATION.md)。这是已装依赖主机上的构建和已有分区的短时设备验证，不是全新环境或首次安装验收。
+Mainline comprises pinned upstream commits, adaptation patches, build/maintenance tools, file manifests, and documentation. `main` retains reviewed changes with clear validation scope, while feature and fix work happens on isolated branches. Doc or host-tool edits do not require hardware boots, though they must never alter hardware status claims.
 
-`work/` 是准备后的上游和构建树，`local/` 是私人配置。Git 工作区干净不表示它们没有修改。当前 `work/` 已做本机 loader 配置，是唯一的日常开发源码树。默认在这里顺序开发；修改前记录差异，保留已验证产物，不复制整套源码。
+The baseline started at `f784c8e` (2026-10-30), with capabilities and limits tracked in [STATUS](../STATUS.md) and [VALIDATION](../validation/VALIDATION.md).
 
-## 开始一项功能修改
+`work/` holds the prepared upstream/build tree and `local/` holds private device configuration; a clean parent `git status` does not guarantee `work/` is unmodified. Currently `work/` is configured for local device testing and serves as the single sequential development tree—record diffs before changing tasks, keep verified artifacts, and never duplicate the entire source tree per task.
 
-在仓库根目录先检查（或一键运行 `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py --deep`）：
+## Starting a Feature or Fix
+
+From the repository root, inspect current state first (or run `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py --deep`):
 
 ```sh
 git status --short
@@ -19,122 +21,104 @@ sha256sum -c SHA256SUMS
 PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py --deep
 ```
 
-有摘要失配时先解释差异，不要先重写清单掩盖问题。`origin/main` 是本地远端跟踪记录，未 fetch 不代表实时 GitHub 状态。
+Explain any checksum mismatch before refreshing `SHA256SUMS`. `origin/main` reflects the last local fetch, not necessarily live GitHub state.
 
-默认一项任务一个分支，在同一个仓库、同一个 `work/` 顺序开发，不创建第二份仓库或源码树。新分支从已核对的当前基线创建；不要在有未归属修改时切换到其他任务。
+Work one task per branch in the single repository and single `work/` tree; create new branches from a verified baseline and never switch tasks while unattributed edits remain in `work/`.
 
-**父仓库切分支不会改变被忽略的 `work/`。** 开始任务前核对源码清单、本机配置以及清单外的新文件与修改。结束或切换任务前，导出所有有效修改并提交，记录当前源码对应的提交。仅查看父仓库 `git status` 不足以完成这一步。
+**Switching branches in the parent repository does not update gitignored `work/`.** Before switching away from a branch with code edits, export or back up all source changes and record the matching commit. Checking `git status` in the parent repository alone is insufficient.
 
-切到源码不同的既有分支时，必须先确认现有源码修改已完整保存，再按该分支固定输入和补丁同步源码并验证；目前没有安全自动切换工具，不允许直接切父分支后继续编译，也不允许通过覆盖或删除 `work/` 解决差异。无法确定对应关系时先停止编译并说明差异。
+When switching to a branch whose patches/inputs differ, confirm current `work/` edits are saved and align `work/` with the target branch before compiling—never resolve mismatches by deleting or overwriting `work/` blindly.
 
-只有干净重放/从零重建验证或明确需要的并行任务，才建立额外的临时树，位置固定为工作区 `experiments/<topic>/`，记录目的、基线和结束条件。它是验证或隔离现场，不是第二条主线；不为每轮测试复制源码。
+Create extra trees under workspace `experiments/<topic>/` only when explicitly needed for clean replay, from-scratch builds, or parallel isolation, and clean them up once verified.
 
-## 从实验变成可提交源码
+## From Experiment to Committable Source
 
-1. 在当前仓库唯一的 `work/` 修改对应源码，记录问题、输入版本和改动范围；每轮输出放入新建的 `work/runs/<run-id>/`。
-2. 编译并执行与改动相关的检查。设备验证需要持有人操作，范围按 [EXISTING_INSTALL](../install/EXISTING_INSTALL.md) 记录。
-3. 将修改导出到对应 `patches/*.patch`。逐项更新 `source-manifest.json`；源码内容变化涉及的 `license-inventory.json` 摘要与来源也要复核，不能改变继承许可。
-4. 在另一份干净准备目录重放补丁并核对清单。仅当前增量树能编译，不足以证明他人能复现。
-5. 更新状态、验证记录和适用的更新日志，审查差异；最后更新文件摘要并校验。
-6. 只暂存审查过的文件，在任务分支提交。确认验证与风险边界后合入 `main`；push 和发布按持有人授权执行。
+1. Edit sources inside `work/`, recording the problem, input commits, and scope; place each run's outputs in a new `work/runs/<run-id>/` subdirectory.
+2. Build and run relevant host tests. Hardware verification is executed by the device owner per [Existing-Partition Testing](../install/EXISTING_INSTALL.md).
+3. Export edits into `patches/*.patch`, update `source-manifest.json`, and review affected entries in `license-inventory.json` without altering inherited licenses.
+4. Replay patches and verify the manifest on an isolated clean tree—local incremental builds alone do not prove reproducibility.
+5. Update `STATUS`, `VALIDATION`, `CHANGELOG`, and `SHA256SUMS`, and review the diff.
+6. Stage reviewed files explicitly by name on the task branch before merging into `main`; push/publish only with owner authorization.
 
-补丁导出使用 `python3 tools/prepare/patchtool.py export --out work/runs/<run-id>/export`，默认只读日常源码，将补丁、清单和差异报告写入新目录。逐项审查清单外文件，新增用 `--add COMPONENT:PATH` 登记；删除自动记录。工具从锁定 Git 对象重建正确基线，共用准备工具的 XNU 叠加逻辑，并恢复已知 loader 身份占位字段；无法确认的隐私内容会阻止导出。只有明确使用 `--write` 才更新仓库补丁和清单，采纳后仍须复核许可与摘要。
+Export diffs with `python3 tools/prepare/patchtool.py export --out work/runs/<run-id>/export` (read-only on `work/`; inspects unowned diffs, adds explicit entries via `--add COMPONENT:PATH`, restores loader identity placeholders, and aborts on privacy violations or unverified binaries). Pass `--write` only after reviewing the report and diffs, then review `license-inventory.json` and `SHA256SUMS`.
 
-干净验证与主机全套测试可使用 `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/run-tests.py --suite all --clean-replay --sanitize`（会自动搭建一次性干净重放树、运行 `patchtool.py replay` 与全部测试并销毁临时目录）；如需手工分步调试，再使用 `prepare.py --prepare --dest ../experiments/<topic>/clean` 与 `patchtool.py replay --tree ../experiments/<topic>/clean`（用完清理临时树）。提交前运行 `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py check --refresh-sums`（含摘要核对、`patchtool.py scan` 与 `git diff --check`）；隐私 error 必须处理，历史 warning 逐项审查。完整用法见[工具导航](../../tools/README.md#补丁导出与重放)。历史归档脚本仍不是通用导出入口。
+Clean verification and the full host suite run via `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/run-tests.py --suite all --clean-replay --sanitize` (builds a disposable clean replay tree, runs `patchtool.py replay` and all tests, and cleans up on exit). For manual debugging, use `prepare.py --prepare --dest ../experiments/<topic>/clean` followed by `patchtool.py replay --tree ../experiments/<topic>/clean` and remove the temporary tree afterward. Before committing, run `PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py check --refresh-sums` (`SHA256SUMS`, `patchtool.py scan`, `git diff --check`); fix all privacy errors and review warnings. See [Tools Index](../../tools/README.md#patch-export-and-replay).
 
-## 补丁与实际源码的对应关系
+## Patch-to-Source Mapping
 
-以下路径均相对于当前仓库的 `work/`：
+Paths below are relative to `work/`:
 
-| 补丁组件 | 源码目录 | 基线注意事项 |
+| Patch Component | Source Directory | Baseline Notes |
 | --- | --- | --- |
-| `xnu-mi8` | `hackios/xnu-src/xnu-8796.121.2/` | Apple XNU 加固定 HackiOS patch/files 后的基线 |
-| `hackios-kernel` | `hackios/` | 固定 HackiOS 版本，按源码清单限定范围 |
-| `hackios-userland` | `hackios/` 中的用户态文件 | 固定 userland 仓库覆盖后的基线 |
-| `edk2-sdm845` | `edk2/` | 固定 edk2 版本及 gitlink |
-| `simpleinit` | `edk2/GPLDrivers/Library/SimpleInit/` | 固定子模块基线 |
-| `unixnu` | `unixnu/` | 固定 UniXNU 版本 |
+| `xnu-mi8` | `hackios/xnu-src/xnu-8796.121.2/` | Apple XNU + pinned HackiOS patch/files |
+| `hackios-kernel` | `hackios/` | Pinned HackiOS commit scoped by manifest |
+| `hackios-userland` | Userspace files in `hackios/` | Pinned `userland` repo overlay |
+| `edk2-sdm845` | `edk2/` | Pinned `edk2` commit and gitlink |
+| `simpleinit` | `edk2/GPLDrivers/Library/SimpleInit/` | Pinned submodule baseline |
+| `unixnu` | `unixnu/` | Pinned UniXNU commit |
 
-这些组件可能共享物理目录，不能把整个 `git diff` 不加区分地导出到一个补丁。新增源码须进入组件清单，删除文件也须记录。不要导出本机 loader GUID 或其他设备身份值。
+Components share physical directories, so never dump raw `git diff` into a single patch or export local loader GUIDs/identity fields. Register additions and deletions in `source-manifest.json`.
 
-## 每次检查什么
+## Minimum Verification Matrix
 
-| 修改类型 | 最低检查 |
+| Change Type | Minimum Checks |
 | --- | --- |
-| 文档 | 本地链接、与当前事实一致、SHA256SUMS |
-| 构建/打包工具 | 语法、正常输入及必要的失败输入检查，不覆盖现有输出 |
-| 驱动/用户态 | 补丁干净重放、清单匹配、相关编译与主机测试；设备行为变化补设备验收或明确待验 |
-| 上游版本 | 单独任务更新 lock，检查全部组件补丁、接口和许可证，不随功能修复一起升级 |
+| Documentation | Local links/anchors, factual consistency, `SHA256SUMS` |
+| Build / packaging scripts | Syntax, valid/failure input handling, no overwriting existing outputs |
+| Drivers / userspace | Clean patch replay, manifest match, compilation, host tests, plus device validation (or explicit pending note) |
+| Upstream lock bumps | Dedicated task updating `upstream.lock.json` and auditing all patches, interfaces, and licenses |
 
-摘要清单不含 `SHA256SUMS` 自身。新增文件经审查后加入清单；既有文件改变时可通过 `python3 -B tools/prepare/status.py check --refresh-sums` 或人工刷新已审查项，不递归扫描 `work/`、`local/` 或下载目录。提交前执行 `git diff --check` 和 `sha256sum -c SHA256SUMS`，逐个指定暂存文件，再审查 `git diff --cached`。
+`SHA256SUMS` excludes itself. Refresh reviewed entries with `python3 -B tools/prepare/status.py check --refresh-sums` (never scan `work/`, `local/`, or `downloads/`). Run `git diff --check` and inspect `git diff --cached` before committing.
 
-完整 XNU `all` 检查仍未通过，不能用 `build` 通过替代；详见 [BUILD](../build/BUILD.md)。
+Full XNU `all` checks still fail; `build` passing does not claim `all` passes (see [BUILD](../build/BUILD.md)).
 
-## 证据与回退
+## Evidence and Rollback
 
-每项实验至少记录：源码提交及未提交差异、上游锁定版本、构建命令、输入/产物 SHA256、设备配置的私有记录位置、结果和验证层级。原始日志放忽略目录，公开文档只放脱敏结论。
+Record source commit + unexported diffs, upstream lock, build commands, input/output SHA-256, private device config location, outcome, and verification level per experiment. Keep raw device logs in gitignored paths and sanitized summaries in public docs.
 
-已启动成功的产物不覆盖。已合并修改需要撤回时优先使用新的 revert 提交，不 reset 已共享历史。不要在删除工作树时依赖 Git 的“干净”判断：先检查被忽略的源码修改、配置、日志和产物是否已导出或备份。
+Never overwrite known-good boot artifacts. Prefer `git revert` over resetting shared history. Never delete a worktree based on `git status` alone without checking gitignored edits, configs, and logs first.
 
-近期顺序：固化此开发流程；工具化补丁导出与重放；锁定剩余构建依赖并修复 `all`；再逐项引入上游 Wi-Fi 与 GPU 稳定性修复。无需为了目录外观拆成多个仓库，也不需要整体升级到 HakiOS 新架构。
+## Fixed Directory Layout
 
-## 固定目录规则（后续工作必须遵循）
+Keep one canonical location per artifact category rather than adding ad-hoc top-level dated copies:
 
-目标是让每类内容只有明确入口。保留现有可用构建布局，不再在工作区顶层创建日期命名的临时源码、日志或发布副本。
-
-| 内容 | 固定位置 |
+| Artifact | Canonical Location |
 | --- | --- |
-| 主仓库 | `dipper-xnu/` |
-| SDK、工具链等共享输入 | 顶层 `dependencies/` |
-| 原始下载包 | 顶层 `downloads/` |
-| 额外验证/并行现场（例外） | 顶层 `experiments/<topic>/`，仅有明确需要时创建；日常开发不用 |
-| 展开的上游源码及原生构建输出 | 所属仓库的 `work/`；沿用构建脚本既定子目录，不另设顶层源码树 |
-| 每轮实验产物、命令记录和原始日志 | 所属仓库的 `work/runs/YYYYMMDD-<topic>-NN/`，新建目录、不覆盖旧轮次 |
-| 私人设备配置 | 所属仓库的 `local/`；现有配置路径保持不变 |
-| 发布前审查资料 | 所属仓库的 `local/reviews/YYYYMMDD-<topic>-NN/` |
-| 修改前恢复备份 | 所属仓库的 `local/backups/YYYYMMDD-<topic>-NN/` |
-| 可复用维护工具 | 主仓库 `tools/`，经审查与验证后纳入 Git；一次性脚本留在对应运行或审查目录 |
-| 可公开的结论与状态 | 主仓库 `docs/`，保留一个当前 `STATUS.md`；原始私人日志不提交 |
+| Main repository | `dipper-xnu/` |
+| Shared SDK / toolchain inputs | Workspace `dependencies/` |
+| Original downloaded archives | Workspace `downloads/` |
+| Temporary verification / parallel tree (exception) | Workspace `experiments/<topic>/` (removed after use) |
+| Prepared upstream trees and native builds | Repo `work/` |
+| Per-run artifacts, commands, and raw logs | Repo `work/runs/YYYYMMDD-<topic>-NN/` (never overwrite old runs) |
+| Private device configuration | Repo `local/` (`local/wifi-mac` path preserved) |
+| Pre-release review records | Repo `local/reviews/YYYYMMDD-<topic>-NN/` |
+| Pre-edit recovery backups | Repo `local/backups/YYYYMMDD-<topic>-NN/` |
+| Reusable tools | Repo `tools/` (one-off scripts stay in run directories) |
+| Public conclusions and status | Repo `docs/` (single `STATUS.md`) |
 
-默认“所属仓库”就是 dipper-xnu。额外验证树采用相同内部布局，但必须标明其临时用途。有效修改只汇入 dipper-xnu 主线，不维护第二套发布副本。
+The deprecated top-level `sources/` directory has been removed and must not be recreated. Do not append daily work to workspace `archive/20261030/` or the legacy MI8-IOS workspace. Expired `experiments/` verification trees and duplicate `work/release/` images are not retained; use `tools/build/build-payload.py --link-inputs` for payloads and `python3 -B tools/prepare/status.py prune-runs --apply` for periodic run-directory cleanup.
 
-原停用的顶层 `sources/` 空目录已清理移除，不再重建第二套源码入口。工作区 `archive/20261030/reproduction-logs/`、`archive/20261030/release-review/` 和旧 MI8-IOS 工作区作为历史档案保留，不继续追加日常开发内容。已有脚本固定写入的位置本次不搬迁；以后确需改路径时，必须连同脚本、文档和验证一起修改。
+## Tool Categories
 
-不再保留已过期任务的 `experiments/` 临时树与废弃的 `work/release/` 重复大镜像；日常打包推荐使用 `tools/build/build-payload.py --link-inputs`，周期性清理旧实验中间产物可使用 `python3 -B tools/prepare/status.py prune-runs --apply`。
+`tools/` uses `prepare/`, `build/`, `partition/`, and `tests/` (see [Tools Index](../../tools/README.md)); keep `tools/build/cc-gnu17/cc` in place and place new scripts in the matching category rather than `tools/` root.
 
-任何新增顶层目录都先说明用途并更新此目录表；已有类别必须使用表中位置。删除实验 worktree 或历史资料前，先检查被 Git 忽略的源码、设备配置和证据，不以 Git 工作区干净作为可删除依据。
+## `local/` Management Rules
 
-## 工具分类约定
+`local/` stores private device configs, provenance notes, recovery backups, and reviews. Preserve `local/wifi-mac` and legacy backup paths; file new items under `devices/<alias>/`, `provenance/<component>/`, `backups/YYYYMMDD-<topic>-NN/`, or `reviews/YYYYMMDD-<topic>-NN/`, registering each group in `local/index.json` (without storing secret values). Never track `local/` in Git or `SHA256SUMS`.
 
-tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）、partition（分区与恢复）、tests（测试），详见[工具导航](../../tools/README.md)。现有 cc-gnu17 包装器保持 tools/build/cc-gnu17/cc；新工具沿用分类，不再放在 tools 根目录。历史轮次命令与摘要保持原样，重跑使用新路径和新轮次。
+## Run Records and Handoff
 
-## local 管理约定
+Create a fresh `work/runs/YYYYMMDD-<topic>-NN/` per round with a short README, exact commands, logs, source commit + diffs, and artifact checksums.
 
-`local/` 只保存本机配置、来源记录、必要恢复备份与发布审查。现有根目录文件保持兼容，尤其 `local/wifi-mac` 是构建脚本直接读取的路径，不改名。三个历史备份目录停止追加。
+Handoff reading order: `AGENTS.md` -> `docs/README.md` -> `STATUS.md` -> this document. Update the handoff section below in place at the end of each task without creating parallel status files or copying private logs into public docs.
 
-新条目按用途放入 `devices/<alias>/`、`provenance/<component>/`、`backups/YYYYMMDD-<topic>-NN/` 或 `reviews/YYYYMMDD-<topic>-NN/`，按需创建。alias 使用稳定昵称，不使用序列号或 MAC。不再创建随意命名的根目录文件或 `xxx-before` 目录。运行日志和普通编译产物统一放 `work/runs/`。
+### Current Development Handoff (2026-11-18 — Re-verify on Pickup)
 
-本机 `local/README.md` 解释现有布局，`local/index.json` 登记条目路径、类别、用途和保留条件。新增、迁移或删除条目时同步索引；备份和审查按组登记，无需登记其中每个文件。每组附简短 README，记录关联提交、来源、恢复用途和清理条件。初次建立的新工作树按需建立这些本机文件，不复制旧设备配置。
+- **Mainline state**: `main` includes speaker audio and default-on peripherals (`bt=7`, resident `audio=5`, `battery=1`, `torch=3`, `haptic=3`), updated toolchain scripts (`status.py`, `build-kernel.sh`, `run-tests.py`), and bilingual documentation layout (English default with Chinese mirrors under `docs/zh-CN/`). Active working branch `feat/sideload-apps` (aligned with `main` and `fix/wifi-stall`).
+- **`work/` unexported state**: `xnuloader/loader.c` differs only in local device identity fields (normalizes cleanly against manifest). **Four unexported experimental edits** remain in `work/` (snapshotted and diffed in `local/backups/20261118-sideload-work-01/`):
+  - `xnu-mi8` (unowned): `bsd/vfs/vfs_attrlist.c` (`UIO_SIZEOF` stack buffer alignment).
+  - `hackios-userland` (manifest-tracked): `userland/build.sh`, `userland/src/init.c`, `userland/src/inject_sb.c` (`/apps` boot-volume union mount, `RedwoodMetal.bundle` bind mount, and SpringBoard Metal isolation tested with local sideload apps).
+- **Build & test state**: Standard kernel incremental `BUILD/` directory is warmed and verified (`tools/build/build-kernel.sh`); clean replay + full host test suite (`--clean-replay --sanitize`) passes with automatic temp-tree cleanup. Hardware run P28 (`work/runs/20261112-audio-default-01/`) verified zero-arg peripherals.
+- **Open items & next step**: Before switching to `fix/wifi-stall` (investigating TCP `SYN_SENT` / `ath10k rx_confused` RX stalls) or other tasks, explicitly decide whether to export/merge the four sideload edits above or restore them from backup so unrelated commits stay clean. Other open items: volume HUD muted icon, Safari video green-tint/decode issue, and long-term audio power/quality tuning.
 
-索引不记录秘密值。`local/` 全部保持 Git 忽略，不加入公共 SHA256SUMS。新增条目先核对脚本读写路径；需要改变路径时连同消费者与文档一起修改、验证。清理前确认修改已进入主线、证据有保留位置、备份无恢复需求；本规范不授权自动删除。
-
-历史档案归档到工作区 `archive/<日期>/`。2026-10-30 两组档案已整体迁入，源文件内容、模式、mtime 和符号链接目标均经迁移前后核验；原始脚本与日志中的旧绝对路径保留为历史记录，不直接重跑。工作区归档 README 记录路径映射及恢复方法。
-
-## 每轮实验与 AI 交接
-
-每轮只新建 `work/runs/YYYYMMDD-<topic>-NN/`，不新建整套源码。保留简短 README（目标、修改、结果、下一步）、实际命令、日志、源码版本与未提交差异、输入和产物摘要；已有打包工具生成的清单直接复用，不再重复记录。被忽略的源码变更也必须保存，不能只保存父仓库 diff。
-
-接手顺序固定为：AGENTS → docs/README（文档导航）→ STATUS（功能与设备边界）→ 本文（开发流程和现场交接）。每项任务结束更新下面的现场交接，不另建多个 current/latest 状态文件。设备标识、原始日志和私人配置只引用本机位置，不复制到公共文档。
-
-### 当前开发现场交接（2026-11-18，接手时重新核对）
-
-- 主线状态：`main` 已合入扬声器音频与缺省外设（bt=7、audio=5 常驻、battery=1、torch=3、haptic=3）；当前分支 `feat/sideload-apps`（与 `main`、`fix/wifi-stall` 同基线，后续工作树具工具增强提交将同步对齐）。
-- `work/` 源码与未导出修改：`xnuloader/loader.c` 仅含本机配置差异（经占位归一化后与清单一致）。另有 **4 处未导出实验修改**（已于 `local/backups/20261118-sideload-work-01/` 完整留存快照与差异补丁）：
-  - `xnu-mi8`（未登记清单）：`bsd/vfs/vfs_attrlist.c`（`UIO_SIZEOF` 栈缓冲对齐）。
-  - `hackios-userland`（清单内差异）：`userland/build.sh`、`userland/src/init.c`、`userland/src/inject_sb.c`（用于启动卷 `/apps` 联合挂载、`RedwoodMetal.bundle` 绑定与 SpringBoard Metal 隔离，配合 `work/hackios/apps/Via.app` 与 `apps-off/bili-overseas.app` 测试）。
-- 构建与验证现场：标准内核增量 `BUILD` 目录已预热对齐（`tools/build/build-kernel.sh`）；干净重放与全套主机回归（含 ASan/UBSan）通过，可复现树自动清理不占位。设备端 P28（`work/runs/20261112-audio-default-01/`）无参数试用正常。
-- 未决与下一步：若切换去排查 Wi-Fi 接收停滞（`fix/wifi-stall`，TCP SYN_SENT / `ath10k rx_confused`）或其他任务，先决定上述 4 处未导出改动是导出合入还是按备份还原，切勿混入无关分支提交；其余未决项仍含音量键 HUD“声音关闭”、Safari 视频发绿及常驻音质/功耗长测。
-
-以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
-
-文档按 docs/README.md 分类导航；新任务计划放 development/，构建说明放 build/，安装操作放 install/，验收证据放 validation/，来源与许可放 legal/。不要再把上述类别文件平铺到 docs 根目录。
+Follow `docs/README.md` for all doc placements (`development/`, `build/`, `install/`, `validation/`, `legal/`, and `zh-CN/` mirrors); never flatten new docs into `docs/` root.

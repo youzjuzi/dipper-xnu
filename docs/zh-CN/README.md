@@ -1,6 +1,7 @@
 # dipper-xnu
 
-[English](README.md) | **简体中文**
+[English](../../README.md) | **简体中文**
+
 
 **Experimental / Work in Progress**
 
@@ -10,11 +11,6 @@
 
 项目仍在开发中，尚不适合作为日常使用系统。
 
-<p align="center">
-  <img src="docs/images/mi8-ios-desktop.png" alt="小米 8 运行 iOS 16.5 SpringBoard 桌面的实机照片" width="320">
-  <br>
-  <sub>小米 8 · iOS 16.5 · 实机运行照片</sub>
-</p>
 
 ## 近期更新 · 2026-11-12
 
@@ -130,7 +126,7 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 
 ## 许可证
 
-各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围见 [许可说明](LICENSE.md) 和 [LICENSES](LICENSES)。其他文件的许可范围见 [许可证说明](docs/legal/LICENSE_REVIEW.md)。
+各部分代码遵循其对应许可证，第三方版权声明予以保留。本项目并非整体采用单一 MIT 许可证；具体适用范围见 [许可说明](LICENSE.md) 和 [LICENSES](../../LICENSES)。其他文件的许可范围见 [许可证说明](docs/legal/LICENSE_REVIEW.md)。
 
 本项目为独立研究项目，与设备厂商、系统厂商及所参考项目不存在官方隶属关系。
 

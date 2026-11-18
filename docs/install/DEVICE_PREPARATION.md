@@ -1,158 +1,156 @@
-# 设备版本、TWRP 与固件准备
+# Device Version, TWRP, and Firmware Preparation
 
-本页是[分区与写入](INSTALL.md)、[构建与打包](../build/USERLAND.md)之前的设备材料入口。只读提取固件不需要重新分区或格式化 Data。固件、Recovery 镜像、设备标识和原始日志不提交 Git。
+**English** | [简体中文](../zh-CN/docs/install/DEVICE_PREPARATION.md)
 
-建议先按第 1 节确认版本，再选择提取环境：已有 Android root 可直接使用第 3 节的 `MODE=root`，无需为提取固件切到 TWRP。需要 Recovery 时再看第 2 节。
+Read this page before [Partitioning and Flashing](INSTALL.md) and [Userspace Build](../build/USERLAND.md). Read-only firmware extraction does not require repartitioning or formatting Data. Firmware blobs, Recovery images, device identifiers, and raw logs must never be committed to Git.
 
-## 1. 已验证设备基线
+Verify your device version in Section 1 first: if you already have Android root, use `MODE=root` in Section 3 directly without booting into TWRP solely to pull firmware. See Section 2 if you need Recovery.
 
-| 项目 | 最近记录 | 证据与边界 |
+## 1. Verified Device Baseline
+
+| Item | Recorded Baseline | Evidence & Scope |
 | --- | --- | --- |
-| 手机 | 小米 8，设备代号 dipper，SDM845 / A630 | 已验证设备 |
-| Android | Android 10 | 2026-10-31 实机确认 |
-| MIUI | V12.5.2.0.QEACNXM | 已验证版本；不要求其他版本强行刷成此版本 |
-| Recovery | TWRP 3.7.0_9-0 | Recovery 内 getprop 与 root 身份核验 |
-| 系统卷目标 | iOS 16.5 / 20F66 | 本仓库固定输入；与 Android 版本分别记录 |
-| Android root | 2026-10-31 su 返回 uid=0 | Android root 提取已通过实机验证 |
+| Device | Xiaomi Mi 8 (`dipper`), SDM845 / A630 | Verified target hardware |
+| Android | Android 10 | Verified on device (2026-10-31) |
+| MIUI | `V12.5.2.0.QEACNXM` | Tested baseline; other versions do not need forced downgrade |
+| Recovery | TWRP `3.7.0_9-0` | Verified via `getprop` and `uid=0` inside Recovery |
+| Target System Volume | iOS 16.5 / `20F66` | Pinned repository input; tracked separately from Android version |
+| Android Root | `su` returned `uid=0` (2026-10-31) | `MODE=root` firmware extraction verified on hardware |
 
-下列步骤以表中版本为测试基线。使用前请读取自己的设备版本并核对输入，不要把测试设备的结果直接套用到其他设备。验证范围见文末，实验过程见[验证记录](../validation/VALIDATION.md)。
+Record your own device versions before reusing these steps rather than assuming another phone matches the baseline device. See [Validation Log](../validation/VALIDATION.md) for full scope.
 
-在 Android 已启动并允许 USB 调试后，选择自己的设备，在主机 Bash 执行：
+With Android booted and USB debugging authorized, check your target serial in Bash:
 
 ```sh
 adb devices -l
-export DEVICE_SERIAL='替换为自己的序列号'
+export DEVICE_SERIAL='<your-adb-serial>'
 adb -s "$DEVICE_SERIAL" shell 'getprop ro.product.device; getprop ro.build.version.release; getprop ro.build.version.incremental; getprop ro.miui.ui.version.name; getprop ro.build.fingerprint'
 ```
 
-保留这些输出，区分完整 MIUI 构建号与界面上的 MIUI 大版本。TWRP 内的 Android 属性可能来自 Recovery 自身，不能拿来证明已安装 Android 的版本。新采集记录写到 `local/devices/<alias>/`，同步本机 `local/index.json`；公开文档只写脱敏版本信息。
+Save these outputs and distinguish the full MIUI build string from the marketing version. `getprop` values inside TWRP can come from the Recovery image itself rather than the installed Android OS. Record private device provenance under `local/devices/<alias>/` and update `local/index.json`; keep public docs scrubbed.
 
-## 2. TWRP 获取与核验
+## 2. Obtaining and Verifying TWRP
 
-- [Team Win 小米 8 设备页](https://twrp.me/xiaomi/xiaomimi8.html)：确认设备代号 dipper 和安装说明。
-- [dipper 官方下载列表](https://dl.twrp.me/dipper/)。
-- [3.7.0_9-0 下载页](https://dl.twrp.me/dipper/twrp-3.7.0_9-0-dipper.img.html)：提供镜像、SHA256 文件及 PGP 签名入口。
+- [Team Win Xiaomi Mi 8 device page](https://twrp.me/xiaomi/xiaomimi8.html): confirms codename `dipper` and installation notes.
+- [Official dipper download directory](https://dl.twrp.me/dipper/).
+- [3.7.0_9-0 download page](https://dl.twrp.me/dipper/twrp-3.7.0_9-0-dipper.img.html): image, `.sha256`, and PGP signature link.
 
-2026-10-31 核对官方页面时可获取该版本。这里采用已验证版本，不把“最新版本”当作兼容性证据。其他 Mi 8 系列机型的镜像不能按名称相近混用。已有可用 TWRP 时不必为本教程重新刷写。
+Verified available upstream on 2026-10-31; using "latest" without testing does not prove compatibility, and images for other Mi 8 variants must never be substituted. If a working `dipper` TWRP is already installed, do not reflash it.
 
-将镜像和对应 SHA256 校验文件下载到工作区现有 `downloads/` 下的独立目录，保留文件名，在该目录核验：
+Download the image and `.sha256` file into a dedicated directory under workspace `downloads/` without renaming, and verify:
 
 ```sh
 sha256sum -c twrp-3.7.0_9-0-dipper.img.sha256
 ```
 
-若下载页面实际提供的是纯摘要文本，使用 `sha256sum twrp-3.7.0_9-0-dipper.img`，与页面对应值逐字核对。失配或拿不到可信摘要就停止；不自行重写校验文件让它通过。校验同一网站的摘要能检查文件一致性，不等于已完成独立的签名认证。
+If only plain hash text is listed on the page, verify `sha256sum twrp-3.7.0_9-0-dipper.img` character-for-character against the page—stop on mismatch rather than altering the checksum file. Checking a hash from the same mirror checks transfer integrity, not independent signature trust. Record source URL, download date, SHA-256, and local path privately. Note that temporary `fastboot boot` of iOS UEFI is unrelated to TWRP installation (see [Startup Guide](STARTUP.md)).
 
-把来源页面、下载日期、镜像 SHA256 与本机存放位置登记到私有设备记录。本仓库不镜像分发 TWRP，也不预填未经核对的镜像摘要。尚未安装 Recovery 时，先按下文核对安装条件。加载 iOS UEFI 的 `fastboot boot` 与安装 TWRP 是两件事，见[启动教程](STARTUP.md)。
+### Already Have TWRP Installed
 
-### 已安装 TWRP：进入即可，不重复刷写
-
-如果手机已经安装可用 TWRP，Android 正常启动且 ADB 已授权时执行：
+If TWRP is already installed and Android ADB is authorized:
 
 ```sh
-: "${DEVICE_SERIAL:?先设置并核对 ADB 序列号}"
+: "${DEVICE_SERIAL:?Set and verify ADB serial}"
 adb -s "$DEVICE_SERIAL" reboot recovery
 ```
 
-等待 Recovery 启动，再执行下方版本与 root 检查。ADB 不可用时，可在关机状态按住 **音量上 + 电源键**，出现 Mi 8 标志后松开；对应按键说明见 [LineageOS dipper 设备资料](https://github.com/LineageOS/lineage_wiki/blob/main/_data/devices/dipper.yml)。如果进入原厂 Recovery，则不能按 TWRP 命令继续操作。
+If ADB is unavailable, power off and hold **Volume Up + Power**, releasing after the Mi logo appears (key combo per [LineageOS dipper specs](https://github.com/LineageOS/lineage_wiki/blob/main/_data/devices/dipper.yml)). If stock Recovery appears instead, stop—TWRP commands do not apply.
 
-### 尚未安装 TWRP：官方首次安装路线
+### First-Time TWRP Installation (Official Route)
 
-仅适用于明确需要安装 TWRP 的 dipper，bootloader 必须已解锁，镜像与恢复材料已核对。本段根据 [Team Win dipper 安装说明](https://twrp.me/xiaomi/xiaomimi8.html)整理；以下命令来自官方安装说明；本项目验证了 TWRP 环境中的维护操作，尚未单独复测该安装流程。
+Applies only when TWRP is needed on a `dipper` with an unlocked bootloader and verified recovery backups. Steps below follow Team Win's official `dipper` instructions; this project verified maintenance inside TWRP without separately re-testing initial TWRP flashing:
 
-1. 按前文获取 dipper 镜像，验证官方摘要，记录文件路径和摘要；确认备份及恢复手段。尚未解锁时不要为了试命令直接解锁，解锁是另一项会清除数据的操作。
-2. 在已授权 Android ADB 中进入厂商 bootloader：
+1. Verify the `dipper` TWRP image digest and ensure backups exist (do not unlock the bootloader just to test commands—unlocking wipes user data).
+2. Reboot into vendor bootloader fastboot:
 
 ```sh
 adb -s "$DEVICE_SERIAL" reboot bootloader
 fastboot devices
 ```
 
-3. 选择这台手机的厂商 fastboot 序列号，核对 product 为 dipper，以及实际存在 recovery 分区。这里不是 product 为 xnuloader 的 UEFI 服务。
+3. Select the vendor fastboot serial (not `xnuloader`), verify `product` is `dipper`, and verify `recovery` exists:
 
 ```sh
-: "${BOOT_SERIAL:?设置已确认的厂商 fastboot 序列号}"
-: "${TWRP_IMAGE:?设置已通过官方摘要校验的镜像绝对路径}"
+: "${BOOT_SERIAL:?Set verified vendor fastboot serial}"
+: "${TWRP_IMAGE:?Set verified TWRP image path}"
 fastboot -s "$BOOT_SERIAL" getvar product
 fastboot -s "$BOOT_SERIAL" getvar partition-size:recovery
 sha256sum "$TWRP_IMAGE"
 ```
 
-4. 仅在上述核对全部通过、镜像适用于本机且容量可容纳时，执行以下持久写入。目标是 **recovery**，不要替换为 boot 或整盘节点：
+4. Only after checks pass, flash specifically to `recovery` (never `boot` or whole disk):
 
 ```sh
 fastboot -s "$BOOT_SERIAL" flash recovery "$TWRP_IMAGE"
 ```
 
-5. 确认刷写成功后，按住 Recovery 的按键组合，在执行以下命令后直接进入 Recovery；避免先进入 Android。官方说明指出，某些系统可能在正常启动时恢复原厂 Recovery。
+5. Hold the Recovery key combo immediately after running:
 
 ```sh
 fastboot -s "$BOOT_SERIAL" reboot
 ```
 
-6. 进入后检查版本和 root。保存实际刷写命令、输出、镜像摘要和启动结果；fastboot OKAY 本身不算 Recovery 可用性验收。只为安装或进入 TWRP，不应顺带执行 Format Data、分区、关闭校验或刷其他镜像；分区任务按独立教程安排。
+6. Verify version and root once inside TWRP (`fastboot OKAY` alone does not verify Recovery). Do not combine TWRP setup with formatting Data or repartitioning.
 
-### Recovery 内核验与下一步
-
-进入 TWRP 后核验：
+### Recovery Verification
 
 ```sh
 adb -s "$DEVICE_SERIAL" shell 'id; getprop ro.product.device; getprop ro.twrp.version; cat /proc/mounts'
 ```
 
-应确认 dipper、3.7.0_9-0 和 uid=0。TWRP 不自带本项目所需的 sgdisk 保证；分区工具准备及其独立摘要要求见[分区教程](INSTALL.md)。
+Confirm `dipper`, `3.7.0_9-0`, and `uid=0`. TWRP does not bundle the verified `sgdisk` binary required for partitioning; see [Install Guide](INSTALL.md).
 
-### TWRP 与 iOS 启动的区别
+### TWRP vs. iOS Boot
 
-| 要做的事 | 入口 | 是否需要再次安装 TWRP |
+| Task | Entry Point | Need to Reflash TWRP? |
 | --- | --- | --- |
-| Android root 下提取 GPU 固件 | 本页第 3 节 | 不需要 |
-| 修改布局、Format Data、系统镜像回读 | 进入已安装的 TWRP，按[分区教程](INSTALL.md) | 已安装可用时不需要 |
-| 日常启动 iOS | 厂商 fastboot 临时加载 boot-dipper.img，再进入 xnuloader | 不需要；按[启动教程](STARTUP.md) |
+| Pull GPU firmware via Android root | Section 3 below | No |
+| Repartition, `Format Data`, `darwin.img` readback | Existing TWRP + [Install Guide](INSTALL.md) | No |
+| Daily iOS RAM boot | Vendor `fastboot boot boot-dipper.img` -> `xnuloader` | No ([Startup Guide](STARTUP.md)) |
 
-## 3. GPU 固件清单
+## 3. GPU Firmware Manifest
 
-以下摘要来自上述 MIUI 版本的实机文件，未与原厂 ZIP 做逐字节对照。不同版本摘要不符时停止核对来源，不能修改预期值绕过当前构建校验。
+Digests below come from the tested MIUI `V12.5.2.0.QEACNXM` device files (not compared byte-for-byte against stock OTA ZIPs). Stop and investigate if another ROM version differs rather than bypassing build checks:
 
-| 手机文件 | 已验证 SHA256 |
+| Phone Path | Verified SHA-256 |
 | --- | --- |
-| /vendor/firmware/a630_gmu.bin | b07f90299ff2ae33948fcfd6ed67f53fbd287b5bf85ff2d43db11d4d32c1621f |
-| /vendor/firmware/a630_sqe.fw | 34edacb6fdedfbfc07ed5cd1d29b0b57a3543ef5be6ab34a43bd64686826fa1e |
-| /vendor/firmware/a630_zap.mdt | f369d5614503a516a6443887f04dd8497cc7127b1ff3429c492666b26a9ab34b |
-| /vendor/firmware/a630_zap.b02 | 519b5538809f54ee566246b0520746a8ea82ca9384ea6bddb0b0e0d3c2de520c |
+| `/vendor/firmware/a630_gmu.bin` | `b07f90299ff2ae33948fcfd6ed67f53fbd287b5bf85ff2d43db11d4d32c1621f` |
+| `/vendor/firmware/a630_sqe.fw` | `34edacb6fdedfbfc07ed5cd1d29b0b57a3543ef5be6ab34a43bd64686826fa1e` |
+| `/vendor/firmware/a630_zap.mdt` | `f369d5614503a516a6443887f04dd8497cc7127b1ff3429c492666b26a9ab34b` |
+| `/vendor/firmware/a630_zap.b02` | `519b5538809f54ee566246b0520746a8ea82ca9384ea6bddb0b0e0d3c2de520c` |
 
-### Android 与 TWRP 的读取条件
+### Read Preconditions in Android and TWRP
 
-- **Android**：先尝试普通 ADB 读取。如果权限不足，仅在已有且已授权 root 时使用下述 root 模式；本机 root 已重新核验；其他设备仍须自行核验，不为提取而解锁或清空手机。
-- **TWRP**：ADB 通常为 root，选择 recovery 模式；检查 `/vendor/firmware/` 确实来自本机 vendor 分区且挂载为只读。未挂载时先按本机 Recovery 的挂载界面确认 Vendor；不要猜设备节点执行 mount，也不要格式化它。路径不存在或无法确定来源时停止。
+- **Android**: Try plain ADB read first; if permission is denied, use `MODE=root` only when `su` is already installed and authorized (never unlock/wipe purely to extract).
+- **TWRP**: Verify `/vendor/firmware/` comes from the phone's `vendor` partition mounted read-only (`/proc/mounts`); if unmounted, mount Vendor via TWRP's GUI rather than guessing block nodes.
 
-TWRP 下先检查：
+In TWRP:
 
 ```sh
 adb -s "$DEVICE_SERIAL" shell 'cat /proc/mounts; ls -l /vendor/firmware/a630_gmu.bin /vendor/firmware/a630_sqe.fw /vendor/firmware/a630_zap.mdt /vendor/firmware/a630_zap.b02'
 ```
 
-使用 Android root 路线前，确认 Android 启动完成并允许本次 su 请求：
+Before Android `MODE=root`:
 
 ```sh
 adb -s "$DEVICE_SERIAL" shell getprop sys.boot_completed
 adb -s "$DEVICE_SERIAL" exec-out su -c id
 ```
 
-应分别看到 `1` 和 `uid=0`；授权被拒绝或命令失败时停止，不继续提取。
+Expect `1` and `uid=0`.
 
-### 提取到新轮次并双端校验
+### Extract and Verify on Both Ends
 
-以下是主机 Bash 示例，从仓库根目录执行。先设置 `DEVICE_SERIAL` 和全新的 `RUN_ID`；不覆盖任何历史提取结果。选择一种 MODE，不要把 root 不可用当作成功。
+Run from repository root in Bash with a fresh `RUN_ID` (never overwrite previous runs):
 
 ```bash
 set -euo pipefail
-: "${DEVICE_SERIAL:?设置目标 ADB 序列号}"
-: "${RUN_ID:?设置新的轮次名称，使用自己的日期和轮次}"
-MODE=android  # android / root / recovery，按上面的读取条件选择
+: "${DEVICE_SERIAL:?Set target ADB serial}"
+: "${RUN_ID:?Set new run directory ID}"
+MODE=android  # android / root / recovery per read preconditions above
 case "$MODE" in android|root|recovery) ;; *) exit 1 ;; esac
 OUT="work/runs/$RUN_ID"
-mkdir "$OUT"                  # 要求 work/runs 已存在，且目标目录不存在
+mkdir "$OUT"
 mkdir "$OUT/gpu"
 cat > "$OUT/gpu/SHA256SUMS" <<'HASHES'
 b07f90299ff2ae33948fcfd6ed67f53fbd287b5bf85ff2d43db11d4d32c1621f  a630_gmu.bin
@@ -179,15 +177,15 @@ done
 (cd "$OUT/gpu" && sha256sum -c SHA256SUMS)
 ```
 
-任何命令或摘要检查失败都停止。手机端前后摘要与主机摘要一致，且匹配固定输入，才算提取通过。记录实际 MODE、Android/TWRP 版本和日期；部分失败的文件保留为失败证据，重新尝试使用新轮次。
+Stop on any failure. Extraction passes only when before/after phone digests, host digests, and pinned digests all match.
 
-### 放入构建输入目录
+### Stage into Build Tree
 
-核验通过后，将上述 4 个文件放入 `work/hackios/fw-gpu/`。目录已有文件时先比较，摘要相同则复用，不覆盖不同内容：
+Copy verified blobs into `work/hackios/fw-gpu/` without blindly overwriting differing files:
 
 ```bash
 set -euo pipefail
-: "${OUT:?使用刚才已通过校验的提取目录}"
+: "${OUT:?Set verified extraction directory}"
 (cd "$OUT/gpu" && sha256sum -c SHA256SUMS)
 mkdir -p work/hackios/fw-gpu
 for name in a630_gmu.bin a630_sqe.fw a630_zap.mdt a630_zap.b02; do
@@ -201,39 +199,39 @@ for name in a630_gmu.bin a630_sqe.fw a630_zap.mdt a630_zap.b02; do
 done
 ```
 
-记录来源到 `local/devices/<alias>/` 并登记本机索引。`work/` 的提取结果和 `local/` 的来源记录均保持私有；只把脱敏结论写入验证文档。
+Log provenance under `local/devices/<alias>/` and update `local/index.json`; keep `work/` and `local/` private.
 
-## 4. Wi-Fi 固件与后续构建
+## 4. Wi-Fi Firmware and Subsequent Builds
 
-Wi-Fi 分两类输入：
+Wi-Fi uses two inputs:
 
-- 本机 modem 分区中的 MBA、modem、wlanmdsp 和板级数据，由本项目内核运行时读取，当前路线不要求逐个 adb pull 到电脑。不要把 GPU 提取方法套到 modem 分区，也不要用其他设备的板级数据替换。
-- `firmware-5.bin` 是 WCN3990 特性描述文件，来源和固定 SHA256 见[输入材料](../build/INPUTS.md#wcn3990-wi-fi-特性描述文件)，放到 `work/hackios/fw-wifi/`。它不是从本机 Android 提取的 DSP 固件。
+- MBA, modem, `wlanmdsp`, and board data from the phone's `modem` partition are read directly by the kernel at runtime (no manual `adb pull` needed; never substitute board data from other devices).
+- `firmware-5.bin` (WCN3990 feature flags; origin and SHA-256 in [External Inputs](../build/INPUTS.md#wcn3990-wi-fi-feature-file)), placed at `work/hackios/fw-wifi/firmware-5.bin`.
 
-所有输入齐备后，按[用户空间教程](../build/USERLAND.md)配置 Theos/SDK 并执行 `bash tools/build/build-userland.sh`，再在新目录用 `tools/build/build-payload.py` 打包。载荷工具会回读 APFS 内固件并检查输入；提取到磁盘上不等于旧启动镜像自动更新。设备配置和启动顺序见[启动教程](STARTUP.md)。
+Once inputs are staged, configure Theos/SDK per [Userspace Build](../build/USERLAND.md), run `bash tools/build/build-userland.sh`, and package a new run with `tools/build/build-payload.py` (which re-verifies firmware inside the APFS images). See [Startup Guide](STARTUP.md) for device config matching and boot sequence.
 
-## 5. 蓝牙固件（实验）
+## 5. Bluetooth Firmware
 
-WCN3990 的蓝牙固件在手机的 `bluetooth` 分区（FAT 文件系统，Android 里挂载为 `/bt_firmware`），目录 `image/` 下有多个版本。本机芯片的 ROM 版本为 0x21，用到两个文件，其余版本（`crbtfw11/20`、`apbtfw*`、`crnv11/20` 等）不用：
+WCN3990 Bluetooth firmware resides on the phone's `bluetooth` partition (FAT, mounted as `/bt_firmware` in Android) under `image/`. The Mi 8 chip uses ROM version `0x21`, requiring two files (ignore `crbtfw11/20`, `apbtfw*`, `crnv11/20`):
 
-| 文件 | 大小 | SHA256（MIUI V12.5.2.0.QEACNXM 的这台手机） |
+| File | Size (bytes) | SHA-256 (tested MIUI V12.5.2.0.QEACNXM phone) |
 | --- | --- | --- |
-| crbtfw21.tlv | 222988 | 2ce84e4dc3267f8401e2f4dbf6137c3902a734ee0011541a3b4d7385bbc07dce |
-| crnv21.bin | 4591 | cf5eef9879a381d1edd0be8aedbe41c765b82ce1edb18eed96ff314c66406a2d |
+| `crbtfw21.tlv` | 222988 | `2ce84e4dc3267f8401e2f4dbf6137c3902a734ee0011541a3b4d7385bbc07dce` |
+| `crnv21.bin` | 4591 | `cf5eef9879a381d1edd0be8aedbe41c765b82ce1edb18eed96ff314c66406a2d` |
 
-在 Android root 或 TWRP 中用 `adb pull` 取出（TWRP 里先以只读方式挂载该分区；用 `/dev/block/by-name/bluetooth`，不要猜设备节点），在手机端和电脑端各算一次 SHA256 并核对，放到 `work/hackios/fw-bt/`。它们是厂商文件，不进 Git。`userland/build.sh` 在构建启动卷（`FLASHBOOT=1`）时把两个文件放进 `fw/`，内核 `bt=5` 从 RAM 盘的 `fw/` 读取。ROM 版本不是 0x21 的手机需要换对应文件名，驱动会先读芯片版本并在不符时拒绝下载。
+Pull via Android root or TWRP (mounting `/dev/block/by-name/bluetooth` read-only without guessing raw block nodes), compare SHA-256 on phone and host, and place them in `work/hackios/fw-bt/` (never committed to Git). `userland/build.sh` (`FLASHBOOT=1`) embeds them under `/fw/` in `flashboot.apfs`, and the kernel (`bt=5..7`) checks the chip ROM version before loading.
 
-## 验证范围
+## Verification Scope
 
-2026-10-31 已在 Android 10 / MIUI V12.5.2.0.QEACNXM 上使用已有 root 验证提取流程。4 个 GPU 固件的手机端前后摘要、主机端摘要和固定 SHA256 均一致，与已有构建输入逐字节相同。测试未覆盖或修改原有构建输入。
+On 2026-10-31, `MODE=root` extraction of the four GPU firmware blobs was verified on Android 10 / MIUI `V12.5.2.0.QEACNXM` with matching phone/host/pinned SHA-256 digests and zero modification to existing build inputs.
 
-| 路线或检查 | 验证结果 |
+| Path or Check | Verified Status |
 | --- | --- |
-| Android 版本、启动完成、su root | 已实机确认 |
-| MODE=root 提取 4 个 GPU 固件 | 实机通过 |
-| 提取前后手机端、主机端、固定 SHA256 | 全部一致 |
-| 普通 ADB / TWRP 固件提取 | 尚未单独实测 |
-| 官方 TWRP 首次刷入步骤 | 已核对官方说明，尚未单独复测 |
-| 提取后复制、重新构建与启动 | 未在本次提取测试中执行 |
+| Android version, boot complete, `su` root | Verified on hardware |
+| `MODE=root` extraction of 4 GPU firmware files | Passed on hardware |
+| Before/after device, host, and pinned SHA-256 match | All matched |
+| Unprivileged ADB / TWRP firmware extraction | Not tested separately |
+| Official initial TWRP flashing instructions | Cross-checked with upstream docs; not re-tested here |
+| Post-extraction copy, rebuild, and boot | Not part of this extraction test |
 
-详细测试过程见[验证记录](../validation/VALIDATION.md)。
+Details in [Validation Log](../validation/VALIDATION.md).

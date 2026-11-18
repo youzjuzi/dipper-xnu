@@ -1,60 +1,60 @@
-# 用户空间构建与主机打包
+# Userspace Build and Host Packaging
 
-先完成 [构建教程](BUILD.md) 的源码准备、内核依赖与编译，并设置 `DIPPER_PROJECT_ROOT`、`DIPPER_INPUTS` 和 `THEOS`。本页构建命令只操作主机文件；设备侧步骤见 [已有分区测试](../install/EXISTING_INSTALL.md)。
+**English** | [简体中文](../zh-CN/docs/build/USERLAND.md)
 
-## 1. 提取已校验的 iOS 材料
+Complete source preparation, kernel dependencies, and kernel build in the [Build Guide](BUILD.md), and set `DIPPER_PROJECT_ROOT`, `DIPPER_INPUTS`, and `THEOS` first. Commands here operate on host files only; device steps are in [Existing-Partition Testing](../install/EXISTING_INSTALL.md).
 
-需要支持 APFS 的 7-Zip（23 或更新版本）。在仓库根目录执行：
+## 1. Extract Verified iOS Materials
+
+Requires 7-Zip (`7z`) version 23 or newer with APFS support. From the repository root:
 
 ```sh
 python3 tools/prepare/prepare-ios.py \
   --ipsw "$DIPPER_INPUTS/iPhone10,3,iPhone10,6_16.5_20F66_Restore.ipsw"
 ```
 
-脚本先验证整个 IPSW 的 SHA-256 和 BuildManifest，再提取 3 个指定镜像。已有镜像会逐一与 IPSW 内容做 SHA-256 比对，失配即停止；不会覆盖失配文件。随后执行锁定上游的 `ios165/fetch.sh`，生成 rootfs、cryptex、dyld cache 等本工作树自己的目录。原始 DMG 保留，来源记录在 `work/hackios/ios165/input-provenance.json`。
+The script verifies the full IPSW SHA-256 and `BuildManifest.plist`, then extracts three DMGs (existing DMGs are hash-checked and aborted on mismatch without overwriting). It then invokes pinned `ios165/fetch.sh` to populate `rootfs`, `cryptex`, and `dyld_shared_cache` under the current `work/` tree and records provenance in `work/hackios/ios165/input-provenance.json`. Do not symlink `ios165/rootfs` to an unrelated directory.
 
-这里不需要读取开发者的旧提取目录，也不要把 `ios165/rootfs` 设成指向另一棵工作树的符号链接。
-
-## 2. 编译并生成两个小启动镜像
+## 2. Build Boot Volumes (`root.apfs` & `flashboot.apfs`)
 
 ```sh
-export BUILD_TIMEZONE=Asia/Tokyo   # 可改为自己的时区；未设置且主机无法查询时使用 UTC
+export BUILD_TIMEZONE=Asia/Tokyo   # Or your local timezone; falls back to UTC
 export BUILD_JOBS=8
 bash tools/build/build-userland.sh
 ```
 
-入口明确采用 `GL=1 FLASHBOOT=1 CRYPTEXES=flash REST=1 BT=1`，从源码编译 Mesa、图形适配、注入库及网络程序；`BT=1` 加入 iOS 的蓝牙守护进程 `bluetoothd` 与 `BlueTool`、它们的注入库和占位固件文件，只有内核以 `bt=7` 启动时才用得上，蓝牙芯片固件另从 `fw-bt/` 放进启动卷；拒绝 `PREBUILT`，缺少交叉链接器时直接报错。`SHARE=1` 排除上游脚本可选的本机网络密码和 SSH 密钥。不会额外生成 RAM 根卷方案的 `system.apfs`。固定 `umask 022`，避免 launchd 拒绝组可写的配置；桌面验收不执行后台 CPU 基准。
+The wrapper sets `GL=1 FLASHBOOT=1 CRYPTEXES=flash SKIP_SYSTEM=1 SHARE=1 REST=1 BT=1` (`BT=1` includes `bluetoothd`, `BlueTool`, injection dylib, and placeholder HCD for `bt=7`, while chip firmware from `fw-bt/` is packed into `flashboot.apfs`; `SHARE=1` omits local Wi-Fi passwords/SSH keys; `PREBUILT` is rejected). `umask 022` keeps launchd plists non-group-writable.
 
-| 输出，相对于 `work/hackios/` | 用途 |
+| Output (under `work/hackios/`) | Purpose |
 | --- | --- |
-| `userland/root.apfs` | 适配程序、动态库、launchd 配置；后续作为内核载荷的 `ramdisk` |
-| `userland/flashboot.apfs` | 小启动卷，后续用 `fastboot stage` 送入 RAM |
-| `userland/obj/` | 本轮编译程序和库 |
-| `xnu-deps/build/mesa/out/` | 本轮 Mesa 输出 |
+| `userland/root.apfs` | Adapted binaries, dylibs, launchd plists; kernel payload `ramdisk` |
+| `userland/flashboot.apfs` | Small boot volume staged via `fastboot stage` |
+| `userland/obj/` | Compiled userspace binaries and libraries |
+| `xnu-deps/build/mesa/out/` | Mesa build output |
 
-缺少 GPU 固件时，入口仍可完成主机编译，但会明确列出缺项；此时产物不具备设备测试条件。不能把脚本退出成功解释为桌面启动成功。APFS 打包器使用 Python 多进程；受限容器需允许本地 IPC，否则 `PermissionError` 是打包失败，不能忽略。
+If GPU firmware files are missing, compilation still completes while reporting the missing blobs—images lacking firmware are not device-ready. The APFS packer uses Python multiprocessing; restricted sandboxes must allow local IPC or fail cleanly rather than ignoring `PermissionError`.
 
-## 3. 生成写入 darwin 的原始系统组合镜像
+## 3. Build Raw `darwin.img`
 
 ```sh
 python3 tools/build/pack-darwin.py
 ```
 
-输出为 `work/images/darwin.img`，8,365,539,328 字节。脚本不会覆盖已有输出，校验输入来源、各 APFS 魔数和大小，并要求最终 SHA-256 为：
+Outputs `work/images/darwin.img` (`8,365,539,328` bytes). Refuses to overwrite existing files, checks provenance and APFS `NXSB` magic/sizes, and requires final SHA-256:
 
 ```text
 9efb156f417e32b6f92d709af33c0e8e584693c3fbd29eaf139b57eee3735560
 ```
 
-关键区别：`rootfs.dmg` 的 UDIF 封装内含 GPT 磁盘。脚本使用 `7z x -tDmg -so ... 3.apfs` 只提取其中的 APFS 分区，再顺序拼接 OS、App cryptex。直接写入压缩 DMG，或把带 GPT 的整个展开磁盘拼进去，均不符合本项目布局。发生错误时保留 `.partial` 供检查，不能用于刷写。
+Crucial detail: `rootfs.dmg` wraps a full GPT disk in UDIF. `pack-darwin.py` extracts only the APFS partition (`7z x -tDmg -so ... 3.apfs`) and appends `cryptex-os.dmg` and `cryptex-app.dmg`—never write the compressed DMG or full GPT disk wrapper directly. Any `.partial` file left on error must not be flashed.
 
-## 4. 设备输入与实机测试
+## 4. Device Inputs and Hardware Testing
 
-单独完成主机构建后，还需以下设备输入。设备版本、TWRP 获取及固件提取见[设备准备](../install/DEVICE_PREPARATION.md)，启动测试见[已有分区测试](../install/EXISTING_INSTALL.md)：
+After host compilation, prepare device-specific inputs per [Device Preparation](../install/DEVICE_PREPARATION.md) before testing per [Existing-Partition Testing](../install/EXISTING_INSTALL.md):
 
-- GPU 固件：在 `work/hackios/fw-gpu/` 放置与 dipper 匹配的 `a630_gmu.bin`、`a630_sqe.fw`、`a630_zap.mdt`、`a630_zap.b02`，记录获取链接/来源、版本和 SHA-256 后重建启动卷。
-- Wi-Fi：内核通过本机 Android modem 分区读取基带与板级数据；另需 [WCN3990 特性描述文件](INPUTS.md#wcn3990-wi-fi-特性描述文件) `firmware-5.bin`，经校验后装入 root.apfs。需核对本机 modem 布局。上游 `wpss` / `qca6750` 示例属于另一设备，不能当作 WCN3990 的通用输入。
-- 本机分区参数：公开 loader 的 `BLOCK_DARWIN_UNIQ` 是零占位符；内核和 loader 的边界需与本机 GPT 对齐后重编译。具体见 [启动教程配置章节](../install/STARTUP.md#1-让源码匹配新分区)。
-- dipper 完整启动参数及最终 `payload.bin`：现已提供 `tools/build/build-payload.py --output work/runs/desktop-01`，用于已核对 GPT 和系统区的 5 分钟桌面测试。它不包含 Wi-Fi、存储写入或旧用户状态恢复，不能代替设备配置核对。
+- **GPU firmware**: Stage matching `a630_gmu.bin`, `a630_sqe.fw`, `a630_zap.mdt`, and `a630_zap.b02` into `work/hackios/fw-gpu/`, verify hashes, and rebuild boot volumes.
+- **Wi-Fi**: Kernel reads baseband/board data from Android's `modem` partition; stage verified [WCN3990 feature file](INPUTS.md#wcn3990-wi-fi-feature-file) `firmware-5.bin` into `work/hackios/fw-wifi/` and rebuild `root.apfs`. Check your `modem` layout rather than using unrelated `wpss`/`qca6750` examples.
+- **Device GPT config**: Public `loader.c` uses zero placeholder `BLOCK_DARWIN_UNIQ`; align GUID and UFS bounds to your GPT and rebuild ([Matching Sources to a New Partition](../install/STARTUP.md#1-matching-sources-to-a-new-partition)).
+- **Payload packaging**: `tools/build/build-payload.py --output work/runs/desktop-01` packages a bounded RAM-boot payload (`--wifi` adds Wi-Fi, Bluetooth, and speaker audio defaults).
 
-先只读核对设备与输入，完成设备配置和载荷打包，再按 [已有分区测试](../install/EXISTING_INSTALL.md) 进行实机验收。结果与未通过项记录在 [复现记录](../validation/REPRODUCTION.md)。
+Inspect device state read-only first, match configs, package a run directory, and log verified findings in [Reproduction Report](../validation/REPRODUCTION.md).

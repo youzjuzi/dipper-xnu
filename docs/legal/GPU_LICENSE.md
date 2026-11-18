@@ -1,86 +1,81 @@
-# GPU 代码来源与许可处理
+# GPU Source Provenance and Licensing
 
-更新日期：2026-10-31。
+**English** | [简体中文](../zh-CN/docs/legal/GPU_LICENSE.md)
 
-现有 GPU 功能保留。`mi8_a630_hw_init.inc` 按其 Linux 派生来源标注 GPL-2.0-only，并附原作者通知及 [GPL 2.0 全文](../../LICENSES/GPL-2.0-only.txt)。这项来源声明**不构成将它与 APSL 内核组合分发的许可确认**。
+Updated: 2026-10-31.
 
-## 分发方式（2026-10-31 起）
+Existing GPU functionality is retained. `mi8_a630_hw_init.inc` is marked `GPL-2.0-only` per its Linux-derived provenance, preserving upstream author notices and the full [GPL 2.0 text](../../LICENSES/GPL-2.0-only.txt). This provenance notice does **not** constitute permission to distribute it linked into an APSL kernel binary.
 
-GPL-2.0 与 APSL 2.0 的冲突只在**分发把两者合并在一起的二进制**（预编译内核、含该内核的 kernelcache、启动镜像、系统镜像）时出现。因此本项目：
+## Distribution Policy
 
-- **只分发源码、补丁、构建脚本和文档**。`mi8_a630_hw_init.inc` 作为独立文件保留 GPL-2.0-only 及原作者通知，其余文件保留各自许可，互不改标。
-- **不分发、不托管**含该初始化表的预编译内核或任何包含它的合并二进制，包括网盘、Release 附件和安装包内置文件。
-- 使用者在**自己的机器上**按[构建教程](../build/BUILD.md)编译，构建产物仅供其自用。
+The conflict between GPL-2.0 and APSL 2.0 arises when **distributing merged binaries** containing both (prebuilt kernels, kernelcaches, boot images, or system images containing that kernel). Therefore, since 2026-10-31, this project:
 
-注意：
-1. 这是对分发行为的限制，不是对许可冲突本身的解决。第三方若自行重新分发合并二进制，需自行承担许可风险；请勿在 Issue、网盘或安装器中提供这类文件。
-2. 若日后要提供预编译内核，必须先完成下文“保留 GPU 的后续条件”中的独立来源替换，或取得权利人的额外授权。
-3. 本文是来源核对记录，不是法律意见。
+- **Distributes sources, patches, build scripts, and documentation only.** `mi8_a630_hw_init.inc` remains a separate `GPL-2.0-only` file with upstream notices while other files retain their respective licenses; no file is relicensed.
+- **Does not distribute or host** any prebuilt kernel or merged binary containing that table, including file hosts, release attachments, or installer payloads.
+- Requires users to compile on **their own machine** following the [Build Guide](../build/BUILD.md) for personal use only.
 
-## 已确认的来源
+Notes:
 
-`mi8_adreno.c` 直接 `#include "mi8_a630_hw_init.inc"`，并执行其中的初始化表。它参与内核编译，不是独立的文档或运行于其他进程的程序。
+1. This constrains distribution behavior rather than resolving the underlying license incompatibility. Any third party redistributing merged binaries assumes full licensing responsibility; never share merged binaries in issues, drives, or installers.
+2. Providing prebuilt kernels in the future requires replacing the table with an independently verified compatible source or obtaining additional permission from rights holders.
+3. This document is a provenance audit record, not legal advice.
 
-对仓库补丁中实际导出的表进行比对：
+## Verified Provenance
 
-| 项目 | 结果 |
+`mi8_adreno.c` directly `#include "mi8_a630_hw_init.inc"` and executes its tables inside the kernel rather than as a standalone document or separate process.
+
+Comparison against exported repository patches:
+
+| Item | Result |
 | --- | --- |
-| 主初始化表 | 180 项写操作 |
-| HWCG 表 | 105 项，符号名和值与 Linux v7.2.10 的 `a630_hwcg` 完全一致 |
-| CP 保护表 | 32 项，编码值与 Linux v7.2.10 的 `a630_protect_regs` 完全一致 |
-| 来源文件声明 | `a6xx_gpu.c` 为 GPL-2.0，`a6xx_catalog.c` 为 GPL-2.0-only |
+| Primary init table | 180 register writes |
+| HWCG table | 105 entries; symbol names and values match Linux `v7.2.10` `a630_hwcg` identically |
+| CP protect table | 32 entries; encodings match Linux `v7.2.10` `a630_protect_regs` identically |
+| Upstream file headers | `a6xx_gpu.c` (`GPL-2.0`), `a6xx_catalog.c` (`GPL-2.0-only`) |
 
-比对仅证明来源对应关系，不判定单个寄存器数值是否受版权保护。公开补丁仍包含对上游表、顺序和实现的提取与改编，不能因其中包含硬件事实就将整个文件重新标为 MIT。
+This correspondence establishes derivation; individual register numbers alone do not make an extracted table, sequence, and helper code MIT-relicensable. Changing the root license, splitting into patches, downloading locally, or adding an Experimental banner does not alter upstream rights.
 
-GNU 的[许可证列表](https://www.gnu.org/licenses/license-list.html#apsl2)明确将 APSL 2.0 列为与 GPL 不兼容。为文件保留 GPL 声明和提供源码是必要的来源处理，但不足以确认当前组合的分发条件。项目根目录改成 GPL、拆成补丁、仅在本机下载或增加 Experimental 标签，都不能自行改变上游授予的权利。
+GNU's [license list](https://www.gnu.org/licenses/license-list.html#apsl2) explicitly classifies APSL 2.0 as GPL-incompatible. Preserving GPL notices and providing source satisfies source attribution only, not combined-binary redistribution.
 
-## 宽松许可来源
+## Permissive-License Candidates
 
 ### Mesa / freedreno
 
-[寄存器描述](https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-25.0.7/src/freedreno/registers/adreno/a6xx.xml)导入了 [freedreno 版权和宽松许可声明](https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-25.0.7/src/freedreno/registers/freedreno_copyright.xml)。它可作为寄存器名称、偏移和位域的来源。
+[a6xx.xml](https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-25.0.7/src/freedreno/registers/adreno/a6xx.xml) carries the [freedreno copyright and permissive notice](https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-25.0.7/src/freedreno/registers/freedreno_copyright.xml), usable for register names, offsets, and bitfields.
 
-寄存器定义不能替代初始化配方：目前没有从这组 XML 中确认到覆盖现有 105 项 HWCG 值、完整 CP 保护策略及所有执行顺序的等价实现。不能仅替换符号定义，就把 Linux 来源的整套初始化表视作已解决。
+Register definitions alone cannot substitute for an initialization recipe: those XML files do not provide the 105 HWCG values, full CP protection policy, or execution ordering. Swapping register symbol names does not resolve Linux derivation of the sequence.
 
-### Fuchsia 历史 Adreno 驱动
+### Historical Fuchsia Adreno Driver
 
-固定提交：`d05398df901609c870db41e1558eeafcbf4320b7`。
+Pinned commit: `d05398df901609c870db41e1558eeafcbf4320b7`.
 
-- [初始化实现](https://fuchsia.googlesource.com/fuchsia/+/d05398df901609c870db41e1558eeafcbf4320b7/src/graphics/drivers/msd-qcom-adreno/src/msd_qcom_device.cc)
-- [寄存器定义](https://fuchsia.googlesource.com/fuchsia/+/d05398df901609c870db41e1558eeafcbf4320b7/src/graphics/drivers/msd-qcom-adreno/src/registers.h)
-- [BSD-3-Clause 许可证](https://fuchsia.googlesource.com/fuchsia/+/d05398df901609c870db41e1558eeafcbf4320b7/LICENSE)
+- [Device init](https://fuchsia.googlesource.com/fuchsia/+/d05398df901609c870db41e1558eeafcbf4320b7/src/graphics/drivers/msd-qcom-adreno/src/msd_qcom_device.cc)
+- [Register definitions](https://fuchsia.googlesource.com/fuchsia/+/d05398df901609c870db41e1558eeafcbf4320b7/src/graphics/drivers/msd-qcom-adreno/src/registers.h)
+- [BSD-3-Clause license](https://fuchsia.googlesource.com/fuchsia/+/d05398df901609c870db41e1558eeafcbf4320b7/LICENSE)
 
-该实现可作为内存范围、部分核心寄存器、环缓冲和 CP 保护设置的候选来源，但存在明确差异：
+Useful as a candidate reference for memory ranges, select core registers, ring buffers, and partial CP protection, with notable gaps:
 
-- `HardwareInit()` 调用 `EnableClockGating(false)`；后者只在硬件时钟门控已关闭时返回成功，其他情况报未实现，没有提供 HWCG 配置表。
-- CP 保护设置为 26 项，当前表为 32 项，保护区间和值也有差异，不能当作等价替换。
-- GMU、供电、SMMU、固件和设备入口状态仍需与 dipper 平台单独匹配。未证明这份驱动能直接替代现有 A630 路线。
+- `HardwareInit()` calls `EnableClockGating(false)` which only succeeds if HWCG is already disabled and returns unimplemented otherwise—no HWCG table is included.
+- CP protection covers 26 entries rather than the current 32, with differing protected ranges and values.
+- GMU, power rails, SMMU, firmware, and entry states must still be matched to `dipper`. No drop-in replacement is proven.
+- Even in later commits up to removal (`16e2530aabedcb2f8cf8eff076278e60535965f7`), that unmaintained driver did not provide a complete replacement.
 
-已核对的较新历史仍未提供完整替代：该驱动在提交 `16e2530aabedcb2f8cf8eff076278e60535965f7` 中作为未维护驱动被删除。不能据此宣称找到可直接移植的当前实现。
-
-Fuchsia 是部分兼容来源，尚未集成到项目中；保留其许可证副本用于明确候选来源条件，不表示本项目已经采用该实现。
+Fuchsia is a partially compatible reference not yet integrated; retaining its license copy documents candidate evaluation only.
 
 ### Qualcomm KGSL
 
-核对的 [Qualcomm KGSL A6xx 实现](https://github.com/qualcomm-linux/kgsl/blob/gfx-kernel.le.0.0/adreno_a6xx.c)同样标为 GPL-2.0-only，不是已找到的宽松许可替代。
+The audited [Qualcomm KGSL A6xx implementation](https://github.com/qualcomm-linux/kgsl/blob/gfx-kernel.le.0.0/adreno_a6xx.c) is likewise `GPL-2.0-only` and not a permissive replacement.
 
-## 保留 GPU 的后续条件
+## Requirements for Any Future Replacement
 
-要替换现有 Linux 派生实现并保留 GPU 功能，需要取得完整的兼容许可来源或相关权利人的额外授权。选择独立实现时，需要为其余初始化值、保护策略和顺序建立独立、可使用的硬件依据，而不是仅换语言、变量名或删除来源注释。
+Replacing the Linux-derived init sequence while keeping GPU support requires either a fully compatible source or extra rights-holder authorization, with independent hardware justification for every register, value, reserved bit, precondition, HWCG/GMU/security ordering, and non-reduced CP protection coverage, followed by cold-boot, submit-completion, display, and teardown verification on real hardware by the device owner.
 
-替代实现还需验证：
+Until both a complete compatible source and hardware verification exist, the licensing conflict remains open.
 
-1. 所有目标寄存器、取值、保留位及写入前提都有明确来源。
-2. HWCG 与 GMU/安全设置的先后顺序满足 A630 和本机固件状态。
-3. CP 保护范围没有因复用另一份驱动而减少或失效。
-4. 主机检查通过后，由设备持有人验证冷启动、提交完成、图形输出及退出恢复。源码或主机检查不能代替这些实机结果。
+## Verification Record
 
-目前缺少的是完整替代来源与相应验证，不能将许可问题标记为已解决。
+- Preprocessor output of the init fragment remained identical before and after adding file header notices; no register values, order, or function logic changed.
+- Replaying the updated XNU patch in an isolated directory matched all 34 entries in the updated `source-manifest.json`.
+- Original driver and init tables in the development tree were left untouched and no device operations were run.
 
-## 验证记录
-
-- 补充文件头声明前后，初始化片段的预处理结果完全一致；未更改寄存器值、顺序或函数实现。
-- 修改后的 XNU 补丁在隔离目录严格回放，34 个输出文件均与更新后的 `source-manifest.json` 摘要一致。
-- 开发目录中的原驱动和原初始化表保持原样，未执行设备操作。
-
-精确来源 URL、文件 SHA256 与比对结果见 [gpu-source-audit.json](gpu-source-audit.json)。
+Exact source URLs, SHA-256 digests, and comparison results are stored in [gpu-source-audit.json](gpu-source-audit.json).
