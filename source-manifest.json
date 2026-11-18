@@ -15,7 +15,7 @@
       },
       {
         "path": "bsd/dev/mi8_adreno.c",
-        "sha256": "f2f0312df54c51df773c9eb594661b3f29a5e3b5a5a55bd26747f5f15ed5fd04",
+        "sha256": "0f9dd7223d32c8e413c53cedc2e140952f1b4029f900e2a2c87ed67bbfe24692",
         "mode": "0o664"
       },
       {
@@ -105,7 +105,7 @@
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "aa42fc6f9a0a5c65fe36e27e22ca12879b2617ef82096e5e0252cfa27a00ae7c",
+        "sha256": "907334955bae93d75475a93f74e65c82761745f218f7724744af8851e864c349",
         "mode": "0o664"
       },
       {
@@ -150,7 +150,7 @@
       },
       {
         "path": "bsd/dev/redwood_apple80211.c",
-        "sha256": "03a45956e6b65a543f9ad27c1492071625ebf9851fb97b9fe2bb9b5e35edcf04",
+        "sha256": "997b390c16a5b14c7f8e7b5bb73f97cb7122b52d0e0f851756f7640b5227a40b",
         "mode": "0o664"
       },
       {
@@ -180,7 +180,7 @@
       },
       {
         "path": "bsd/dev/redwood_input.c",
-        "sha256": "caf4068ad0c023257ac26e0768affd0a9de74f8ff92009a35fd816a8ce872c93",
+        "sha256": "05ee732b1e08e8a558fb3185f3ff834ed39f19c058229166ed0a83e96ecdc705",
         "mode": "0o664"
       },
       {
@@ -220,7 +220,7 @@
       },
       {
         "path": "bsd/sys/redwood_input.h",
-        "sha256": "1e0a8ad7c6c0b6d055c3b6e238d19f82fb31641c6c4ef507c9cad32c21c5bb15",
+        "sha256": "f166749159d738b4b7695187b2f78b803a4fffe143c6822dfb1d13410c55b744",
         "mode": "0o664"
       },
       {
@@ -250,12 +250,17 @@
       },
       {
         "path": "iokit/Kernel/RedwoodBT.cpp",
-        "sha256": "1f34a7237cb865b400a79d3e8e84b2ca1c4402043979f74ba1f7f5c51bc57bab",
+        "sha256": "02076aee3ff87f781339b9d2d628ece0f01675d0ee4d00fa78104e39a85e8f2d",
         "mode": "0o664"
       },
       {
         "path": "iokit/Kernel/RedwoodGPU.cpp",
-        "sha256": "08771e80db344bc06378afb1efbbae43a3202e11f79ddafa23b9b3b7d9571cb2",
+        "sha256": "044e4abe44913239ed09213d8733fe2dee6b42d2244cfcf8fced1e6525022843",
+        "mode": "0o664"
+      },
+      {
+        "path": "iokit/Kernel/RedwoodWLAN.cpp",
+        "sha256": "f30c794b13c395acb05051fe0ccb6fdfb43cd08da87b84bc8a3d513f85bfe23f",
         "mode": "0o664"
       },
       {
@@ -406,7 +411,7 @@
       },
       {
         "path": "wifi/lx/src/lx_80211.c",
-        "sha256": "8c6723e064936583167499edd3bc3a7e2546aaecc034a4db405c4fbf397ea37c",
+        "sha256": "9e1828dc438104b19d875aa594bd7ff6caef004622a5698a65bf0c976a881880",
         "mode": "0o664"
       },
       {
@@ -447,7 +452,7 @@
       },
       {
         "path": "userland/build.sh",
-        "sha256": "c508396d4da624450f3b097e22a6b7cf2a2133272ae51b1da3fe31925c0c2f73",
+        "sha256": "77991ededa56af7141c1f6a15bca38444789443b1f648b414b33c339fb35b8e3",
         "mode": "0o755"
       },
       {
@@ -482,7 +487,7 @@
       },
       {
         "path": "userland/src/inject_sb.c",
-        "sha256": "7c8dcdcd644581b41d790778dea85c0f2de1a97de7e79e8bd6a6da14521fca96",
+        "sha256": "17b2d60b46ef2ff55c20961f4aad44c8fd569317cd39512c7ba3ab65de79eeff",
         "mode": "0o644"
       },
       {

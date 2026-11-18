@@ -494,10 +494,10 @@ index 0000000000000000000000000000000000000000..f571c1cc1ddd8f9708d4c7da3fc8841e
 +}
 diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d68b90c83
+index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee4aa215b3
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,5184 @@
+@@ -0,0 +1,5351 @@
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -533,6 +533,7 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 + */
 +#include <console/video_console.h>
 +#include <kern/clock.h>
++#include <kern/sched_prim.h>
 +#include <kern/thread.h>
 +#include <libkern/libkern.h>
 +#include <mach/mach_types.h>
@@ -3522,9 +3523,11 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +	uint64_t began = mach_absolute_time();
 +
 +	to_memory((vm_offset_t)start, size);
-+	keep_flush_ticks += mach_absolute_time() - began;
-+	keep_flush_bytes += size;
-+	keep_flush_calls++;
++	if (size != 0) {
++		keep_flush_ticks += mach_absolute_time() - began;
++		keep_flush_bytes += size;
++		keep_flush_calls++;
++	}
 +}
 +
 +bool
@@ -3579,12 +3582,16 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +extern void perfprof_submit_mi8(unsigned segment, uint64_t ticks);
 +
 +static uint32_t mi8_gpu_submit_inner(const uint64_t *addresses, const uint32_t *words, uint32_t count);
++static void mi8_perf_kick_gpu(void);
 +
 +uint32_t
 +mi8_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
 +{
 +	uint64_t began = mach_absolute_time();
-+	uint32_t fence = mi8_gpu_submit_inner(addresses, words, count);
++	uint32_t fence;
++
++	mi8_perf_kick_gpu();
++	fence = mi8_gpu_submit_inner(addresses, words, count);
 +
 +	keep_submit_ticks += mach_absolute_time() - began;
 +	return fence;
@@ -3742,11 +3749,15 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +#define TG_DONE 8u
 +static struct {
 +	uint32_t gate, armed;
-+	unsigned target, lower, upper, row, hot, cool, invalid_streak;
-+	uint64_t down, up, invalid;
++	unsigned target, idle_row, lower, upper, cap, row, hot, cool, invalid_streak;
++	uint64_t down, up, invalid, boosts, idles, ddr_ups, ddr_downs, active_ticks, idle_ticks;
 +	int temperature;
 +	bool valid;
 +} thermgov;
++static uint64_t perf_boot_at, perf_last_active;
++static uint32_t perf_ddr_low, tg_thread_alive;
++static uint32_t ddr_boot_vote, ddr_idle_vote = 2, ddr_cur_vote;
++static bool mi8_ddr_vote_set(uint32_t sixteenths, bool verbose);
 +extern bool redwood_cpu_temperature(int *maximum_mc);
 +/* Read-only view of the governor's latest sample for the audio long-play log.
 + * The governor thread is the sole writer; aligned int/bool loads only. */
@@ -3874,14 +3885,17 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +	unsigned upper = cpufreq_seen_state[1];
 +	if (rd(cpufreq_observed_base[1] + 0x920) != upper) { return false; }
 +	if (upper >= cpufreq_rows[1] || upper >= 40) { return false; }
-+	unsigned lower = 0;
++	unsigned idle_row = 0;
++	while (idle_row < upper && cpufreq_mhz[1][idle_row] < 825) { idle_row++; }
++	unsigned lower = idle_row;
 +	while (lower <= upper && cpufreq_mhz[1][lower] < 1600) { lower++; }
-+	if (lower >= upper) { return false; }
-+	for (unsigned row = lower + 1; row <= upper; row++) {
++	if (lower >= upper || idle_row >= lower) { return false; }
++	for (unsigned row = idle_row + 1; row <= upper; row++) {
 +		if (cpufreq_mhz[1][row] <= cpufreq_mhz[1][row - 1]) { return false; }
 +	}
++	thermgov.idle_row = idle_row;
 +	thermgov.lower = lower;
-+	thermgov.upper = thermgov.row = upper;
++	thermgov.upper = thermgov.cap = thermgov.row = upper;
 +	return true;
 +}
 +
@@ -3890,7 +3904,7 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +static void
 +tg_set(unsigned row)
 +{
-+	if (row < thermgov.lower || row > thermgov.upper || row == thermgov.row) { return; }
++	if (row < thermgov.idle_row || row > thermgov.upper || row == thermgov.row) { return; }
 +	if (!cpufreq_changed[1]) {
 +		cpufreq_base[1] = cpufreq_observed_base[1];
 +		cpufreq_original[1] = thermgov.upper;
@@ -3899,6 +3913,56 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +	wr(cpufreq_base[1] + 0x920, row);
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +	thermgov.row = row;
++}
++
++void
++mi8_perf_kick(void)
++{
++	uint64_t now = mach_absolute_time();
++
++	os_atomic_store(&perf_last_active, now, release);
++	if (os_atomic_load(&thermgov.armed, acquire)) {
++		disable_preemption();
++		boolean_t interrupts = ml_set_interrupts_enabled(FALSE);
++		for (unsigned spins = 0; spins < 10000; spins++) {
++			uint32_t state = os_atomic_load(&thermgov.gate, acquire);
++			if (state & (TG_STOP | TG_RESTORE | TG_DONE)) {
++				break;
++			}
++			if (!(state & TG_BUSY) &&
++			    os_atomic_cmpxchg(&thermgov.gate, state, state | TG_BUSY, acq_rel)) {
++				if (thermgov.row < thermgov.cap) {
++					tg_set(thermgov.cap);
++					thermgov.boosts++;
++				}
++				os_atomic_andnot(&thermgov.gate, TG_BUSY, release);
++				break;
++			}
++			__asm__ volatile ("yield" ::: "memory");
++		}
++		ml_set_interrupts_enabled(interrupts);
++		enable_preemption();
++	}
++	if (os_atomic_load(&perf_ddr_low, acquire)) {
++		thread_wakeup((event_t)&perf_ddr_low);
++	}
++}
++
++static void
++mi8_perf_kick_gpu(void)
++{
++	static uint64_t win_start;
++	static uint32_t win_submits;
++	uint64_t now = mach_absolute_time();
++
++	if (win_start == 0 || now < win_start || tg_us(now - win_start) >= 250000ULL) {
++		win_start = now;
++		win_submits = 1;
++		return;
++	}
++	if (++win_submits >= 10) {
++		mi8_perf_kick();
++	}
 +}
 +
 +struct tg_report { unsigned row; uint64_t down, up, invalid; };
@@ -3923,6 +3987,7 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +		thermgov.hot = thermgov.cool = 0;
 +		thermgov.invalid++;
 +		if (++thermgov.invalid_streak >= 10) {
++			thermgov.cap = thermgov.upper;
 +			tg_set(thermgov.upper);
 +			os_atomic_or(&thermgov.gate, TG_STOP, relaxed);
 +			reason = "invalid";
@@ -3932,19 +3997,32 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +		thermgov.cool = 0;
 +		if (++thermgov.hot >= 2) {
 +			thermgov.hot = 0;
-+			if (thermgov.row > thermgov.lower) {
-+				tg_set(thermgov.row - 1); thermgov.down++; reason = "down";
++			if (thermgov.cap > thermgov.lower) {
++				thermgov.cap--; thermgov.down++; reason = "down";
 +			}
 +		}
 +	} else if (temperature <= ((int)thermgov.target - 4) * 1000) {
 +		thermgov.hot = 0;
 +		if (++thermgov.cool >= 10) {
 +			thermgov.cool = 0;
-+			if (thermgov.row < thermgov.upper) {
-+				tg_set(thermgov.row + 1); thermgov.up++; reason = "up";
++			if (thermgov.cap < thermgov.upper) {
++				thermgov.cap++; thermgov.up++; reason = "up";
 +			}
 +		}
 +	} else { thermgov.hot = thermgov.cool = 0; }
++	if (running) {
++		uint64_t last = os_atomic_load(&perf_last_active, acquire);
++		bool active = tg_us(now - perf_boot_at) < 20000000ULL ||
++		    (last != 0 && now >= last && tg_us(now - last) < 600000ULL);
++		unsigned want_row = active ? thermgov.cap : thermgov.idle_row;
++		if (active) {
++			thermgov.active_ticks++;
++		} else {
++			if (thermgov.row != want_row) { thermgov.idles++; }
++			thermgov.idle_ticks++;
++		}
++		tg_set(want_row);
++	}
 +	row = thermgov.row;
 +	if (snapshot) { snapshot->row = row; snapshot->down = thermgov.down; snapshot->up = thermgov.up; snapshot->invalid = thermgov.invalid; }
 +	os_atomic_andnot(&thermgov.gate, TG_BUSY, release); /* preserves concurrent STOP */
@@ -3988,27 +4066,72 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +static void
 +tg_thread(void *arg __unused, wait_result_t wr __unused)
 +{
-+	uint64_t report = mach_absolute_time(), invalid = 0;
++	uint64_t report = mach_absolute_time(), perf_log_at = report, invalid = 0;
 +	unsigned profile = 0;
 +	PE_parse_boot_argn("perfprof", &profile, sizeof(profile));
 +	for (;;) {
-+		delay_for_interval(100, NSEC_PER_MSEC);
++		assert_wait_timeout((event_t)&perf_ddr_low, THREAD_UNINT, 100, NSEC_PER_MSEC);
++		if (os_atomic_load(&thermgov.gate, acquire) & TG_STOP) {
++			clear_wait(current_thread(), THREAD_AWAKENED);
++			break;
++		}
++		if (os_atomic_load(&perf_ddr_low, acquire)) {
++			uint64_t check_last = os_atomic_load(&perf_last_active, acquire);
++			uint64_t check_now = mach_absolute_time();
++			if (check_last != 0 && check_now >= check_last && tg_us(check_now - check_last) < 500000ULL) {
++				clear_wait(current_thread(), THREAD_AWAKENED);
++				goto tick;
++			}
++		}
++		thread_block(THREAD_CONTINUE_NULL);
 +		if (os_atomic_load(&thermgov.gate, acquire) & TG_STOP) { break; }
-+		int temperature = 0;
-+		bool valid = redwood_cpu_temperature(&temperature);
-+		uint64_t now = mach_absolute_time();
-+		struct tg_report sample;
-+		if (!tg_tick(temperature, valid, now, &sample)) { break; }
-+		if (profile == 1 && tg_us(now - report) >= 1000000) {
-+			char text[16];
-+			strlcpy(text, "NA", sizeof(text));
-+			if (valid) { snprintf(text, sizeof(text), "%d", temperature); }
-+			redwood_tl("pf: gov at %llu T=%s row=%u mhz=%u target=%u down=%llu up=%llu inv=%llu\n", tg_us(now),
-+			    text, sample.row, cpufreq_mhz[1][sample.row], thermgov.target, sample.down, sample.up, sample.invalid - invalid);
-+			invalid = sample.invalid;
-+			report = now;
++tick:
++		{
++			int temperature = 0;
++			bool valid = redwood_cpu_temperature(&temperature);
++			uint64_t now = mach_absolute_time();
++			struct tg_report sample;
++			if (!tg_tick(temperature, valid, now, &sample)) { break; }
++			if (ddr_idle_vote > 0 && ddr_boot_vote > ddr_idle_vote && ddr_boot_vote <= 16) {
++				uint64_t last = os_atomic_load(&perf_last_active, acquire);
++				bool ddr_active = tg_us(now - perf_boot_at) < 20000000ULL ||
++				    (last != 0 && now >= last && tg_us(now - last) < 500000ULL);
++				uint32_t want_ddr = ddr_active ? ddr_boot_vote : ddr_idle_vote;
++
++				os_atomic_store(&perf_ddr_low, ddr_active ? 0u : 1u, release);
++				if (want_ddr != ddr_cur_vote) {
++					uint32_t old_ddr = ddr_cur_vote;
++					if (mi8_ddr_vote_set(want_ddr, false)) {
++						if (want_ddr > old_ddr) { thermgov.ddr_ups++; } else { thermgov.ddr_downs++; }
++					}
++				}
++			}
++			if (tg_us(now - perf_log_at) >= 15000000ULL) {
++				int deg = valid ? temperature / 1000 : 0;
++				int frac = valid ? (temperature >= 0 ? (temperature % 1000) / 100 : ((-temperature) % 1000) / 100) : 0;
++				unsigned row = sample.row;
++				unsigned cap = *(volatile unsigned *)&thermgov.cap;
++				printf("mi8gpu: perfgov: T=%d.%dC row=%u(%uMHz) cap=%u(%uMHz) ddr=%u/16 active=%llu/%llutk boost=%llu idle=%llu ddr_sw=%llu/%llu\n",
++				    deg, frac, row, cpufreq_mhz[1][row], cap, cpufreq_mhz[1][cap], ddr_cur_vote,
++				    *(volatile uint64_t *)&thermgov.active_ticks,
++				    *(volatile uint64_t *)&thermgov.active_ticks + *(volatile uint64_t *)&thermgov.idle_ticks,
++				    *(volatile uint64_t *)&thermgov.boosts, *(volatile uint64_t *)&thermgov.idles,
++				    thermgov.ddr_ups, thermgov.ddr_downs);
++				perf_log_at = now;
++			}
++			if (profile == 1 && tg_us(now - report) >= 1000000) {
++				char text[16];
++				strlcpy(text, "NA", sizeof(text));
++				if (valid) { snprintf(text, sizeof(text), "%d", temperature); }
++				redwood_tl("pf: gov at %llu T=%s row=%u mhz=%u target=%u down=%llu up=%llu inv=%llu\n", tg_us(now),
++				    text, sample.row, cpufreq_mhz[1][sample.row], thermgov.target, sample.down, sample.up, sample.invalid - invalid);
++				invalid = sample.invalid;
++				report = now;
++			}
 +		}
 +	}
++	os_atomic_store(&perf_ddr_low, 0, release);
++	os_atomic_store(&tg_thread_alive, 0, release);
 +	thread_terminate(current_thread());
 +}
 +
@@ -4022,6 +4145,10 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +	if (!wanted) { return; }
 +	if (!tg_limits()) {
 +		redwood_tl("gov: disabled reason=lut_or_startup_row\n"); return;
++	}
++	perf_boot_at = mach_absolute_time();
++	if (os_atomic_load(&perf_last_active, acquire) == 0) {
++		os_atomic_store(&perf_last_active, perf_boot_at, release);
 +	}
 +	thermgov.valid = redwood_cpu_temperature(&thermgov.temperature);
 +	disable_preemption();
@@ -4037,9 +4164,11 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +	if (!thermgov.valid) { (void)tg_tick(0, false, mach_absolute_time(), NULL); }
 +	tg_note(tg_us(mach_absolute_time()), thermgov.temperature, thermgov.valid, thermgov.row, "start");
 +	thread_t thread;
++	os_atomic_store(&tg_thread_alive, 1, release);
 +	if (kernel_thread_start(tg_thread, NULL, &thread) == KERN_SUCCESS) {
 +		thread_deallocate(thread);
 +	} else {
++		os_atomic_store(&tg_thread_alive, 0, release);
 +		redwood_tl("gov: disabled reason=thread_start\n"); mi8_thermgov_stop();
 +	}
 +}
@@ -4500,14 +4629,16 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 + * vote_x << 14 | vote_y, each 14 bits; N is the share of the biggest vote (0x3fff) in 1/16ths, 16 = all of it.
 + * Registers and sequence as rpmh-rsc.c (version 2.7 offsets).
 + */
-+static void
-+mi8_ddr_vote(uint32_t sixteenths)
++static bool
++mi8_ddr_vote_set(uint32_t sixteenths, bool verbose)
 +{
 +	const struct cmd_db_header *db = (const struct cmd_db_header *)cmd_db_map();
 +	static vm_offset_t rsc_va;
 +	vm_offset_t base, tcs;
 +	const char *const names[2] = { "MC0", "SH0" };
-+	uint32_t address[2], vote = (0x3fffu * (sixteenths > 16 ? 16 : sixteenths)) / 16, id;
++	uint32_t clamped = sixteenths > 16 ? 16 : sixteenths;
++	uint32_t address[2], vote = (0x3fffu * clamped) / 16, id;
++	bool done = false;
 +
 +	if (rsc_va == 0) {
 +		rsc_va = (vm_offset_t)ml_io_map(0x179e0000ull, 0x10000);
@@ -4515,27 +4646,31 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +	base = rsc_va;
 +	tcs = base + 0xd00;
 +	if (base == 0) {
-+		printf("mi8gpu: ddr: no mapping of the Apps RSC\n");
-+		return;
++		if (verbose) { printf("mi8gpu: ddr: no mapping of the Apps RSC\n"); }
++		return false;
 +	}
-+	printf("mi8gpu: ddr: reading the Apps RSC (drv-2 mapped at %#lx)\n", (unsigned long)base);
-+	id = rd(base + 0);
-+	printf("mi8gpu: ddr: apps_rsc drv-2 ID %#x, PRNT_CHLD_CONFIG %#x, SOLVER %#x; TCS 0: CONTROL %#x CMD_ENABLE %#x IRQ_STATUS %#x\n", id,
-+	    rd(base + 0x0c), rd(base + 0x04), rd(tcs + 0x14), rd(tcs + 0x1c), rd(tcs + 0x04));
++	if (verbose) {
++		printf("mi8gpu: ddr: reading the Apps RSC (drv-2 mapped at %#lx)\n", (unsigned long)base);
++		id = rd(base + 0);
++		printf("mi8gpu: ddr: apps_rsc drv-2 ID %#x, PRNT_CHLD_CONFIG %#x, SOLVER %#x; TCS 0: CONTROL %#x CMD_ENABLE %#x IRQ_STATUS %#x\n", id,
++		    rd(base + 0x0c), rd(base + 0x04), rd(tcs + 0x14), rd(tcs + 0x1c), rd(tcs + 0x04));
++	}
 +	if (sixteenths >= 100) {
-+		return;         /* mi8_ddr=100: only looked */
++		return false;   /* mi8_ddr=100: only looked */
 +	}
 +	for (int i = 0; i < 2; i++) {
 +		address[i] = rpmh_address(db, names[i]);
 +		if (address[i] == 0) {
-+			printf("mi8gpu: ddr: no resource %s\n", names[i]);
-+			return;
++			if (verbose) { printf("mi8gpu: ddr: no resource %s\n", names[i]); }
++			return false;
 +		}
 +	}
 +	/* a free TCS 0: nothing enabled in it, no transfer under way */
 +	if (rd(tcs + 0x1c) != 0 || (rd(tcs + 0x14) & (1u << 24))) {
-+		printf("mi8gpu: ddr: TCS 0 is in use (CONTROL %#x CMD_ENABLE %#x): not touched\n", rd(tcs + 0x14), rd(tcs + 0x1c));
-+		return;
++		if (verbose) {
++			printf("mi8gpu: ddr: TCS 0 is in use (CONTROL %#x CMD_ENABLE %#x): not touched\n", rd(tcs + 0x14), rd(tcs + 0x1c));
++		}
++		return false;
 +	}
 +	for (int i = 0; i < 2; i++) {
 +		uint32_t command = (1u << 30) | (1u << 29) | (vote << 14) | vote;
@@ -4543,7 +4678,9 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +		wr(tcs + 0x30 + 20 * i, (1u << 16) | (1u << 8) | 8u);  /* MSGID: write, response requested, length 8 */
 +		wr(tcs + 0x34 + 20 * i, address[i]);
 +		wr(tcs + 0x38 + 20 * i, command);
-+		printf("mi8gpu: ddr: command %d: %s at %#x <- %#010x\n", i, names[i], address[i], command);
++		if (verbose) {
++			printf("mi8gpu: ddr: command %d: %s at %#x <- %#010x\n", i, names[i], address[i], command);
++		}
 +	}
 +	wr(tcs + 0x1c, 3);
 +	__asm__ volatile ("dsb sy" ::: "memory");
@@ -4553,15 +4690,28 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +	for (int t = 0; t < 20000; t++) {
 +		if (rd(tcs + 0x04) & 1u) {
++			done = true;
 +			break;
 +		}
 +		sleep_us(10);
 +	}
-+	printf("mi8gpu: ddr: IRQ_STATUS %#x, command status %#x %#x, CONTROL %#x\n", rd(tcs + 0x04), rd(tcs + 0x3c), rd(tcs + 0x3c + 20), rd(tcs + 0x14));
++	if (verbose) {
++		printf("mi8gpu: ddr: IRQ_STATUS %#x, command status %#x %#x, CONTROL %#x\n", rd(tcs + 0x04), rd(tcs + 0x3c), rd(tcs + 0x3c + 20), rd(tcs + 0x14));
++	}
 +	wr(tcs + 0x14, 0);
 +	wr(tcs + 0x1c, 0);
 +	wr(tcs + 0x08, 1u);
 +	__asm__ volatile ("dsb sy" ::: "memory");
++	if (done) {
++		ddr_cur_vote = clamped;
++	}
++	return done;
++}
++
++static void
++mi8_ddr_vote(uint32_t sixteenths)
++{
++	(void)mi8_ddr_vote_set(sixteenths, true);
 +}
 +
 +/* boot-arg mi8_cmddb=1 (EXP-0127): every resource of the command database that is a BCM (address 0x5xxxx) with its aux data. */
@@ -4656,6 +4806,10 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +		uint32_t dump = 0, ddr = 16;    /* the memory bandwidth vote is on unless mi8_ddr=0: 22 GB/s writes instead of 2 (EXP-0127) */
 +
 +		PE_parse_boot_argn("mi8_ddr", &ddr, sizeof(ddr));
++		PE_parse_boot_argn("mi8_ddr_idle", &ddr_idle_vote, sizeof(ddr_idle_vote));
++		ddr_boot_vote = ddr;
++		perf_boot_at = mach_absolute_time();
++		perf_last_active = perf_boot_at;
 +		if (ddr) {
 +			mi8_ddr_vote(ddr);
 +		}
@@ -5453,11 +5607,24 @@ index 0000000000000000000000000000000000000000..eef4036a13d9c59b8e9580a985ba2e3d
 +	bool slumber_ok, halted, rsc_ok;
 +
 +	mi8_thermgov_stop();
++	thread_wakeup((event_t)&perf_ddr_low);
 +
 +	if (!gpu_kept) {
 +		return;
 +	}
 +	gpu_kept = false;
++	for (unsigned w = 0; w < 300 && os_atomic_load(&tg_thread_alive, acquire); w++) {
++		sleep_us(1000);
++	}
++	if (!os_atomic_load(&tg_thread_alive, acquire) &&
++	    ddr_boot_vote > 0 && ddr_boot_vote <= 16 && ddr_cur_vote != ddr_boot_vote) {
++		(void)mi8_ddr_vote_set(ddr_boot_vote, false);
++	}
++	printf("mi8gpu: perfgov: stop active=%llu/%llutk boost=%llu idle=%llu ddr_sw=%llu/%llu ddr=%u/16 cap_down=%llu up=%llu\n",
++	    *(volatile uint64_t *)&thermgov.active_ticks,
++	    *(volatile uint64_t *)&thermgov.active_ticks + *(volatile uint64_t *)&thermgov.idle_ticks,
++	    *(volatile uint64_t *)&thermgov.boosts, *(volatile uint64_t *)&thermgov.idles,
++	    thermgov.ddr_ups, thermgov.ddr_downs, ddr_cur_vote, thermgov.down, thermgov.up);
 +	mi8_cpufreq_restore();
 +	while (!mi8_gpu_done(keep_fence) && waited < 5000) {
 +		sleep_us(100);
@@ -14766,10 +14933,10 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..f9c9700a79ab99ce13375990bb121fa327e62b6f
+index 0000000000000000000000000000000000000000..069306c3c6b07e6be49f950cf6c83627f35f298d
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,5013 @@
+@@ -0,0 +1,5019 @@
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -14840,6 +15007,9 @@ index 0000000000000000000000000000000000000000..f9c9700a79ab99ce13375990bb121fa3
 +#include "mi8_audio_smmu.h"
 +#include "mi8_hostsvc.h"
 +#include "mi8_wlfw.h"
++#include <sys/redwood_input.h>
++
++extern void RedwoodOLYHALStart(void);
 +#include "mi8_audio_sink.h"
 +#include "mi8_audio_ring.h"
 +#include <sys/mi8_lx.h>
@@ -19470,6 +19640,7 @@ index 0000000000000000000000000000000000000000..f9c9700a79ab99ce13375990bb121fa3
 +
 +	uint32_t audio = 0;
 +
++	RedwoodOLYHALStart();
 +	/* Set once before starting either worker; default calls take no new lock. */
 +	PE_parse_boot_argn("mi8rp_step", &shared_step, sizeof(shared_step));
 +	PE_parse_boot_argn("audio", &audio, sizeof(audio));
@@ -19512,7 +19683,7 @@ index 0000000000000000000000000000000000000000..f9c9700a79ab99ce13375990bb121fa3
 +  PE_parse_boot_argn("loader_return_after",&return_seconds,sizeof(return_seconds));
 +  PE_parse_boot_argn("mi8rp_mss",&radio,sizeof(radio));
 +  audio_wait_radio=radio!=0;
-+  audio_return_deadline=return_seconds>10?(uint64_t)(return_seconds-10)*1000000:0;
++  audio_return_deadline=return_seconds>10?now_us()+(uint64_t)(return_seconds-10)*1000000:0;
 +  if(!mi8_pcm_session_seconds(duration) || (return_seconds && return_seconds<=10)){
 +   say("mi8rp: audio=5: invalid duration/loader budget; not started\n");audio=0;audio_session_stream=false;
 +   audio_ring_stream=false;mi8_audio_set_ring(false);
@@ -19547,10 +19718,12 @@ index 0000000000000000000000000000000000000000..f9c9700a79ab99ce13375990bb121fa3
 +
 +		/* FW_READY arrives after launchd has fragmented physical memory.
 +		 * Reserve the pool now; mapping still waits for the WLFW SMMU setup. */
-+		if (mss == 6 && PE_parse_boot_argn("mi8rp_lx", &lx, sizeof(lx)) && lx != 0 &&
-+		    lx_os_reserve_radio_memory(LX_RADIO_POOL_SIZE) != 0) {
-+			say("mi8rp: no early radio memory; modem startup skipped\n");
-+			return;
++		if (mss == 6 && PE_parse_boot_argn("mi8rp_lx", &lx, sizeof(lx)) && lx != 0) {
++			if (lx_os_reserve_radio_memory(LX_RADIO_POOL_SIZE) != 0) {
++				say("mi8rp: no early radio memory; modem startup skipped\n");
++				return;
++			}
++			redwood_lx_net_early();
 +		}
 +		say("mi8rp: mss steps up to %u\n", mss);
 +		if (mss == 5 || mss == 6) {
@@ -24880,7 +25053,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  
  	if (!gpu_kept || !gpu_recover) {
 diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
-index e2674ee51149d523c6e5054a5a6fd28a91947562..aeb538db4138a58b1a3010c90fb1da0d0cf5ff93 100644
+index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e3e5e2290 100644
 --- a/bsd/dev/redwood_apple80211.c
 +++ b/bsd/dev/redwood_apple80211.c
 @@ -33,6 +33,8 @@
@@ -24892,7 +25065,15 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..aeb538db4138a58b1a3010c90fb1da0d
  #include <libkern/libkern.h>
  #include <sys/errno.h>
  #include <sys/kern_event.h>
-@@ -193,7 +195,7 @@ _Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct
+@@ -74,6 +76,7 @@ type_name(int32_t type)
+ 		{ 79, "STA_STATS" }, { 80, "ROAM_THRESH" }, { 85, "IE" }, { 86, "SCAN_REQ_MULTIPLE" }, { 87, "BTCOEX_MODE" },
+ 		{ 90, "SCANCACHE_CLEAR" }, { 94, "VIRTUAL_IF_CREATE" }, { 95, "VIRTUAL_IF_DELETE" }, { 103, "CURRENT_NETWORK" },
+ 		{ 106, "RSSI_BOUNDS" }, { 107, "ROAM" }, { 207, "CHANNELS_INFO" }, { 254, "HW_SUPPORTED_CHANNELS" },
++		{ 383, "SET_PROPERTY" },
+ 	};
+ 
+ 	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+@@ -193,7 +196,7 @@ _Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct
  
  /* Apple80211's events (APPLE80211_M_...) */
  enum { EVENT_POWER_CHANGED = 1, EVENT_SSID_CHANGED = 2, EVENT_BSSID_CHANGED = 3, EVENT_LINK_CHANGED = 4, EVENT_ASSOC_DONE = 9,
@@ -24901,7 +25082,71 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..aeb538db4138a58b1a3010c90fb1da0d
  
  static const char interface_name[16] = "en0";   /* (bsd/dev/redwood_net.c makes one interface, and that is its name) */
  
-@@ -433,6 +435,47 @@ get(struct apple80211req *request)
+@@ -201,6 +204,7 @@ static LCK_GRP_DECLARE(apple80211_lock_group, "redwood-apple80211");
+ static LCK_MTX_DECLARE(apple80211_lock, &apple80211_lock_group);
+ static unsigned result_next;                    /* which of what the last scan heard a SCAN_RESULT request gets next */
+ static uint32_t join_result;                    /* of the last join asked for: 0 while it runs, then Apple80211's number */
++static char country_code[4] = "CN";             /* reported/set country code (protected by apple80211_lock) */
+ 
+ /* ---- channels ---------------------------------------------------------------------------------------- */
+ 
+@@ -298,6 +302,55 @@ get(struct apple80211req *request)
+ 
+ 		return give(request, name, sizeof(name));
+ 	}
++	case 51: {                              /* country code: 3-byte string or {version, code[4]} */
++		struct {
++			uint32_t version;
++			char code[4];
++		} answer = { .version = 1 };
++
++		lck_mtx_lock(&apple80211_lock);
++		memcpy(answer.code, country_code, sizeof(answer.code));
++		lck_mtx_unlock(&apple80211_lock);
++		if (request->req_len <= sizeof(answer.code)) {
++			return give(request, answer.code, sizeof(answer.code));
++		}
++		return give(request, &answer, sizeof(answer));
++	}
++	case 5: {                               /* POWERSAVE: off */
++		struct {
++			uint32_t version, val;
++		} answer = { .version = 1, .val = 0 };
++
++		request->req_val = 0;
++		if (request->req_data != USER_ADDR_NULL && request->req_len > 0) {
++			return request->req_len >= sizeof(answer) ?
++			    give(request, &answer, sizeof(answer)) :
++			    give(request, &answer.val, sizeof(answer.val));
++		}
++		return 0;
++	}
++	case 6: {                               /* PROTMODE: auto */
++		struct {
++			uint32_t version, protmode, threshold;
++		} answer = { .version = 1, .protmode = 1, .threshold = 2346 };
++
++		request->req_val = 1;
++		if (request->req_data != USER_ADDR_NULL && request->req_len > 0) {
++			return give(request, &answer, sizeof(answer));
++		}
++		return 0;
++	}
++	case 18: {                              /* INT_MIT: enabled */
++		struct {
++			uint32_t version, int_mit;
++		} answer = { .version = 1, .int_mit = 1 };
++
++		request->req_val = 1;
++		if (request->req_data != USER_ADDR_NULL && request->req_len > 0) {
++			return give(request, &answer, sizeof(answer));
++		}
++		return 0;
++	}
+ 	case 12: {
+ 		/*
+ 		 * What the card can do, a bit each (apple80211_var.h: APPLE80211_CAP_*): the 13 bytes are the
+@@ -433,6 +486,47 @@ get(struct apple80211req *request)
  		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
  		break;
  	}
@@ -24949,7 +25194,41 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..aeb538db4138a58b1a3010c90fb1da0d
  	case 103:                               /* all of it, as a scan's result */
  		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give_network(request, &state->bss);
  		break;
-@@ -596,6 +639,82 @@ set(const struct apple80211req *request, char *said, size_t said_size)
+@@ -589,6 +683,33 @@ set(const struct apple80211req *request, char *said, size_t said_size)
+ 	}
+ 	case 10:
+ 		return set_scan(request, said, said_size);
++	case 51: {                              /* country code: {version=1, char code[4]} (8 B) or raw 2-3 chars */
++		uint8_t buf[8] = { 0 };
++		const char *src;
++		int error;
++
++		if (request->req_len < 2 || request->req_data == USER_ADDR_NULL) {
++			return EINVAL;
++		}
++		if ((error = copyin(request->req_data, buf, request->req_len < sizeof(buf) ? request->req_len : sizeof(buf))) != 0) {
++			return error;
++		}
++		src = (request->req_len >= 7 && buf[0] == 1 && buf[1] == 0 && buf[2] == 0 && buf[3] == 0) ?
++		    (const char *)(buf + 4) : (const char *)buf;
++		if (src[0] >= 0x20 && src[0] < 0x7f && src[1] >= 0x20 && src[1] < 0x7f) {
++			lck_mtx_lock(&apple80211_lock);
++			country_code[0] = src[0];
++			country_code[1] = src[1];
++			country_code[2] = (src[2] >= 0x20 && src[2] < 0x7f) ? src[2] : '\0';
++			country_code[3] = '\0';
++			snprintf(said, said_size, " (cc: %s)", country_code);
++			lck_mtx_unlock(&apple80211_lock);
++		}
++		return 0;
++	}
++	case 5:
++	case 383:
++		return 0;
+ 	default:
+ 		return EOPNOTSUPP;
+ 	}
+@@ -596,6 +717,100 @@ set(const struct apple80211req *request, char *said, size_t said_size)
  
  /* ---- events -------------------------------------------------------------------------------------------- */
  
@@ -24983,6 +25262,7 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..aeb538db4138a58b1a3010c90fb1da0d
 +    "the link-quality event as iOS 16.5 reads it");
 +
 +static void post(uint32_t code, const void *data, uint32_t length);
++static volatile unsigned lqm_seq;
 +
 +static void
 +post_lqm(void)
@@ -24995,13 +25275,28 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..aeb538db4138a58b1a3010c90fb1da0d
 +	}
 +	redwood_sta_state(state);
 +	if (state->phase == REDWOOD_STA_JOINED) {
-+		/* the numbers are estimates but for the RSSI, which is the join's (the bars come of that) */
++		unsigned seq = __atomic_add_fetch(&lqm_seq, 1, __ATOMIC_ACQ_REL);
++		int32_t rssi = state->bss.rssi;
++
++		if (rssi == 0 || rssi < -95 || rssi > -25) {
++			rssi = (rssi < -95 && rssi >= -110) ? -95 : -45;
++		}
++		if (seq <= 8) {
++			rssi -= (int32_t)(seq & 1u);
++		}
 +		lqm.rssi_valid = 1;
-+		lqm.rssi = state->bss.rssi;
++		lqm.rssi = rssi;
 +		lqm.snr_valid = 1;
-+		lqm.snr = 40;
++		lqm.snr = (int16_t)(rssi + 95);
++		if (lqm.snr < 5) {
++			lqm.snr = 5;
++		}
 +		lqm.noise_valid = 1;
 +		lqm.noise = -95;
++		lqm.cca_valid = 1;
++		lqm.cca = 12;
++		lqm.tx_frames = seq * 16;
++		lqm.rx_frames = seq * 24;
 +		lqm.tx_rate = lqm.tx_fallback_rate = lqm.rx_rate = 72;
 +		post(EVENT_LQM_CHANGED, &lqm, sizeof(lqm));
 +	}
@@ -25012,7 +25307,9 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..aeb538db4138a58b1a3010c90fb1da0d
 +lqm_runs(__unused void *parameter, __unused wait_result_t wr)
 +{
 +	for (;;) {
-+		delay_for_interval(3000, NSEC_PER_MSEC);
++		unsigned seq = __atomic_load_n(&lqm_seq, __ATOMIC_ACQUIRE);
++
++		delay_for_interval(seq < 8 ? 1500 : 3000, NSEC_PER_MSEC);
 +		post_lqm();
 +	}
 +}
@@ -25032,12 +25329,12 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..aeb538db4138a58b1a3010c90fb1da0d
  static void
  post(uint32_t code, const void *data, uint32_t length)
  {
-@@ -653,6 +772,10 @@ redwood_apple80211_event(enum redwood_sta_event event, int status)
+@@ -653,6 +868,10 @@ redwood_apple80211_event(enum redwood_sta_event event, int status)
  		post(EVENT_SSID_CHANGED, NULL, 0);
  		post(EVENT_BSSID_CHANGED, NULL, 0);
  		post(EVENT_LINK_CHANGED, &link, sizeof(link));
 +		if (status == 1) {
-+			post_lqm();
++			__atomic_store_n(&lqm_seq, 0, __ATOMIC_RELEASE);
 +			lqm_start();
 +		}
  		break;
@@ -27792,10 +28089,20 @@ index 69391833710f9ee7c1de3e3d283e45d545faac86..2c7ebeaad0832573fdb452eeef84b86e
 +	    (en & 0x80) == 0 && (play & 0x80) == 0 ? " (stopped)" : " (NOT STOPPED)");
  }
 diff --git a/bsd/dev/redwood_input.c b/bsd/dev/redwood_input.c
-index 8076cf00b4acad69bdcca7e4ce93c6a00496e81f..1228fa5f73b6c09d645d355d0540ca366435ff80 100644
+index 8076cf00b4acad69bdcca7e4ce93c6a00496e81f..4c43f53cf79c54da11ece7d19999aaedae463651 100644
 --- a/bsd/dev/redwood_input.c
 +++ b/bsd/dev/redwood_input.c
-@@ -218,6 +218,10 @@ redwood_input_init(void)
+@@ -131,6 +131,9 @@ touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_dri
+ 		count_fingers(type, finger);
+ 	}
+ 	lck_mtx_unlock(&touch_lock);
++	if (from_driver) {
++		mi8_perf_kick();
++	}
+ 	wakeup(&touch_queue);
+ }
+ 
+@@ -218,6 +221,10 @@ redwood_input_init(void)
  	redwood_virtio_input_init();
  	redwood_goodix_init();
  	redwood_buttons_init();
@@ -28392,10 +28699,10 @@ index eb549c3f27629257b5ff88e3954c64a868687413..558632e256cec058f8081f26b7adce88
  void redwood_audio_init(void);
  void redwood_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virtio sound device */
 diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
-index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..470bdb33c8d363ee450082c57eb39a1cb3abc475 100644
+index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..91f6c6ea2dd6cf4532d8bbef5e60b5e7cfb5d9b8 100644
 --- a/bsd/sys/redwood_input.h
 +++ b/bsd/sys/redwood_input.h
-@@ -42,6 +42,13 @@ void redwood_input_init(void);
+@@ -42,6 +42,14 @@ void redwood_input_init(void);
  void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
  void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
  void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
@@ -28404,12 +28711,13 @@ index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..470bdb33c8d363ee450082c57eb39a1c
 +void mi8_bt_stop(void);
 +void mi8_adreno_init(void);             /* boot-arg mi8gpu=N: the first N steps of waking the Mi 8 GPU (Adreno 630) */
 +void mi8_gpu_quiesce(void);             /* panic quiesce for the Mi 8 GPU */
++void mi8_perf_kick(void);               /* wake dynamic CPU/DDR boost on touch/GPU activity */
 +void mi8_rproc_init(void);              /* boot-arg mi8rp_step=N: the first N steps of the Mi 8 remote processors (SMEM, modem, ...) */
 +void mi8_rproc_stop(void);              /* orderly teardown of Mi 8 audio/rproc/modem/WCN3990 power and SMMU state */
  void redwood_ufs_init(void);           /* ufs=2 to xnuloader: the phone's storage, read only, through the loader (ufs_shared_pa=) */
  void redwood_ufs_report(const char *when); /* where reading the storage has spent its time so far */
  bool redwood_ufs_dev(dev_t dev);           /* one of the storage's devices */
-@@ -122,6 +129,24 @@ void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t
+@@ -122,6 +130,24 @@ void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t
  void redwood_gpu_report(const char *why);
  bool redwood_gpu_recover(void);
  void redwood_gpu_stop(void);
@@ -30760,10 +31068,10 @@ index 431423b069f6ab4dc98d06eb5f2969a3d50e376a..ce86f05e07ac32bda105a1619322fdf2
  /* A Mach send right for the surface in the task (what IOSurfaceCreateMachPort gives); 0 on failure. */
 diff --git a/iokit/Kernel/RedwoodBT.cpp b/iokit/Kernel/RedwoodBT.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0eae2c82946e1b51dc6768a2f7323b9e7d95a0c2
+index 0000000000000000000000000000000000000000..4581c3d8abd8cd7b9f9e1917f4738b70441b9d94
 --- /dev/null
 +++ b/iokit/Kernel/RedwoodBT.cpp
-@@ -0,0 +1,464 @@
+@@ -0,0 +1,515 @@
 +/*
 + * RedwoodBT: the Bluetooth controller as iOS's bluetoothd looks for it.
 + *
@@ -30798,6 +31106,7 @@ index 0000000000000000000000000000000000000000..0eae2c82946e1b51dc6768a2f7323b9e
 +
 +extern "C" {
 +int mi8_bt_log(const char * format, ...) __printflike(1, 2);
++void RedwoodOLYHALStart(void);
 +void RedwoodBTStart(void);
 +void mi8_bt_hci_address(uint8_t * address);
 +int mi8_bt_hci_open(void);
@@ -31185,6 +31494,55 @@ index 0000000000000000000000000000000000000000..0eae2c82946e1b51dc6768a2f7323b9e
 +	return selector == kBTRead ? ret : kIOReturnSuccess;
 +}
 +
++class AppleOLYHAL : public IOService
++{
++	OSDeclareDefaultStructors(AppleOLYHAL);
++
++public:
++	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleOLYHAL, IOService);
++
++bool
++AppleOLYHAL::start(IOService * provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty("vendor-id", "Murata");
++	setName("AppleOLYHAL");
++	registerService();
++	return true;
++}
++
++void
++RedwoodOLYHALStart(void)
++{
++	static bool started;
++	IOService * provider = IOService::getPlatform();
++	AppleOLYHAL * service;
++
++	if (started || provider == NULL) {
++		return;
++	}
++	started = true;
++	service = OSTypeAlloc(AppleOLYHAL);
++	if (service == NULL || !service->init() || !service->attach(provider)) {
++		OSSafeReleaseNULL(service);
++		mi8_bt_log("bt: shim: cannot create AppleOLYHAL\n");
++		return;
++	}
++	if (!service->start(provider)) {
++		service->detach(provider);
++		service->release();
++		mi8_bt_log("bt: shim: AppleOLYHAL did not start\n");
++		return;
++	}
++	service->release();
++	mi8_bt_log("bt: shim: AppleOLYHAL is there\n");
++}
++
 +void
 +RedwoodBTStart(void)
 +{
@@ -31192,6 +31550,7 @@ index 0000000000000000000000000000000000000000..0eae2c82946e1b51dc6768a2f7323b9e
 +	IOService * provider = IOService::getPlatform();
 +	RedwoodBTHci * service;
 +
++	RedwoodOLYHALStart();
 +	if (started) {
 +		return;
 +	}
@@ -31229,7 +31588,7 @@ index 0000000000000000000000000000000000000000..0eae2c82946e1b51dc6768a2f7323b9e
 +	OSSafeReleaseNULL(node);
 +}
 diff --git a/iokit/Kernel/RedwoodGPU.cpp b/iokit/Kernel/RedwoodGPU.cpp
-index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfaab68f07d 100644
+index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e844cc8abda 100644
 --- a/iokit/Kernel/RedwoodGPU.cpp
 +++ b/iokit/Kernel/RedwoodGPU.cpp
 @@ -45,7 +45,123 @@
@@ -31459,7 +31818,12 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  /*
   * Boot-arg touch_lat=1: a line for every wait of a program's for the GPU that took a millisecond or
   * more ("tl: f KIND US at US"), for telling apart what holds a frame up (tools/frames.py).
-@@ -395,6 +586,77 @@ struct gpu_buffer {
+@@ -391,10 +582,82 @@ struct gpu_buffer {
+ 	uint32_t                        flags;
+ 	uint32_t                        seed;           /* the surface's when it was last pushed out of the cache, */
+ 	uint64_t                        pushed;         /* ... and when that was */
++	uint64_t                        pushedGen;      /* fSyncGen at the time of that flush */
+ 	bool                            seen;           /* by the program: mapped, and from then on written by it */
  	uint32_t                        fence;          /* the last submission that names it (0: none has) */
  };
  
@@ -31537,7 +31901,23 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  /*
   * A buffer given back while the GPU is still at it: its memory and its place in the GPU's
   * address space are kept until the submission is done, and nobody waits for that. (A window
-@@ -935,6 +1197,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -450,6 +713,7 @@ class RedwoodGPUUserClient : public IOUserClient
+ 	uint32_t                fLeftCount;
+ 	struct gpu_kept         fKept[GPU_KEPT];
+ 	uint64_t                fKeptBytes;
++	uint64_t                fSyncGen;               /* bumped on CPU map / fence / cpu-prep sync boundaries */
+ 
+ 	struct gpu_buffer * buffer(uint32_t handle);
+ 	struct gpu_buffer * newBuffer(IOMemoryDescriptor * memory, uint64_t from, uint64_t size, uint32_t flags, uint32_t * handle);
+@@ -482,6 +746,7 @@ RedwoodGPUUserClient::initWithTask(task_t owningTask, void * securityID, UInt32
+ 		return false;
+ 	}
+ 	fTask = owningTask;
++	fSyncGen = 1;
+ 	return true;
+ }
+ 
+@@ -935,6 +1200,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  	uint32_t words[GPU_SUBMIT_CMDS], count = 0;
  	uint64_t began, nanos, again;
  	IOReturn ret = kIOReturnBadArgument;
@@ -31545,7 +31925,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  
  	if (request->nr_cmds == 0 || request->nr_cmds > GPU_SUBMIT_CMDS || request->nr_bos == 0 || request->nr_bos > GPU_SUBMIT_BOS) {
  		IOLog("RedwoodGPU: a submission of %u command buffers in %u buffers: not taken\n", request->nr_cmds, request->nr_bos);
-@@ -951,7 +1214,61 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -951,7 +1217,61 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  		ret = kIOReturnVMError;
  		goto out;
  	}
@@ -31607,13 +31987,15 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  	/*
  	 * The GPU reads memory and writes memory. What this processor's cache holds of an IOSurface
  	 * (somebody has written it, or has read it, as the display's driver does, and the GPU is to
-@@ -963,34 +1280,49 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -963,34 +1283,54 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  	 * has mapped, every time. The buffers made here need none of that, unless they are
  	 * ordinary memory (gpu_cached=1).
  	 */
 +	profile.next(PS_CACHE);
  	began = mach_absolute_time();
  	nanoseconds_to_absolutetime(GPU_PUSH_AGAIN_MS * NSEC_PER_MSEC, &again);
++	uint64_t seenAgain;
++	nanoseconds_to_absolutetime(2 * NSEC_PER_MSEC, &seenAgain);
  	for (uint32_t i = 0; i < request->nr_bos; i++) {
 +		uint64_t lookupBegan = profile.lookup();
  		struct gpu_buffer * b = buffer(bos[i].handle);
@@ -31629,12 +32011,16 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  		if (b->surface != NULL) {
  			uint32_t seed = b->surface->shared()->seed;
  
- 			if (seed == b->seed && !b->seen && began - b->pushed < again) {
+-			if (seed == b->seed && !b->seen && began - b->pushed < again) {
++			if (seed == b->seed && b->pushed != 0 &&
++			    ((!b->seen && began - b->pushed < again) ||
++			     (b->seen && b->pushedGen == fSyncGen && began - b->pushed < seenAgain))) {
  				continue;
  			}
 +			if (profile.enabled()) flushCause = flushReason(seed, b);
  			b->seed = seed;
  			b->pushed = began;
++			b->pushedGen = fSyncGen;
  		} else if (!b->seen || !gGPUCached) {
  			continue;
  		}
@@ -31657,7 +32043,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  		if (cmds[i].type != MSM_SUBMIT_CMD_BUF) {
  			continue;                               /* the other kinds are for a GPU shared between address spaces */
  		}
-@@ -1004,6 +1336,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -1004,6 +1344,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  		addresses[count] = b->address + cmds[i].submit_offset;
  		words[count++] = cmds[i].size / 4;
  	}
@@ -31665,7 +32051,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  	request->fence = redwood_gpu_submit(addresses, words, count);
  	/*
  	 * The ring is full and the core is not reading it: it has stopped. With gpu_recover=1 it is
-@@ -1018,13 +1351,16 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -1018,13 +1359,16 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  			request->fence = redwood_gpu_submit(addresses, words, count);
  		}
  	}
@@ -31682,7 +32068,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  
  			big += b != NULL && b->size >= (4u << 20);
  		}
-@@ -1044,7 +1380,9 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -1044,7 +1388,9 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  	 * told; the last submission of a frame names the surface the frame is drawn into.)
  	 */
  	for (uint32_t i = 0; request->fence != 0 && i < request->nr_bos; i++) {
@@ -31692,7 +32078,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  
  		if (b != NULL) {
  			b->fence = request->fence;
-@@ -1109,6 +1447,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -1109,6 +1455,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  	IOLockUnlock(gGPULock);
  	ret = request->fence != 0 ? kIOReturnSuccess : kIOReturnTimeout;
  out:
@@ -31700,7 +32086,15 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  	if (bos != NULL) {
  		IODelete(bos, struct msm_gem_submit_bo, request->nr_bos);
  	}
-@@ -1166,6 +1505,7 @@ IOReturn
+@@ -1154,6 +1501,7 @@ RedwoodGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options, I
+ 	if (b != NULL) {
+ 		b->memory->retain();
+ 		b->seen = true;
++		fSyncGen++;
+ 		*memory = b->memory;
+ 		*options = 0;
+ 		ret = kIOReturnSuccess;
+@@ -1166,6 +1514,7 @@ IOReturn
  RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
      IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
  {
@@ -31708,7 +32102,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  	union {
  		struct msm_param param;
  		struct msm_gem_new gemNew;
-@@ -1179,6 +1519,8 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
+@@ -1179,6 +1528,8 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
  		struct drm_gem_close close;
  		struct redwood_surface surface;
  		struct redwood_show show;
@@ -31717,7 +32111,23 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  		struct redwood_worked worked;
  	} r;
  	size_t size = args->structureInputSize;
-@@ -1280,6 +1622,12 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
+@@ -1219,6 +1570,7 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
+ 				waitOver(&r.cpuPrep.timeout, redwood_gpu_last());
+ 			}
+ 		}
++		fSyncGen++;
+ 		IOLockUnlock(gGPULock);
+ 		slowWait("cpu-prep", waitBegan);
+ 		break;
+@@ -1235,6 +1587,7 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
+ 				waitOver(&r.waitFence.timeout, r.waitFence.fence);
+ 			}
+ 		}
++		fSyncGen++;
+ 		IOLockUnlock(gGPULock);
+ 		slowWait("fence", waitBegan);
+ 		break;
+@@ -1280,6 +1633,12 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
  	case kRedwoodShow:
  		ret = show(&r.show);
  		break;
@@ -31730,6 +32140,54 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..99948704543444d51bddf098275c0cfa
  	default:
  		IOLog("RedwoodGPU: request %#x (%zu bytes) is not known here\n", selector, size);
  		ret = kIOReturnUnsupported;
+diff --git a/iokit/Kernel/RedwoodWLAN.cpp b/iokit/Kernel/RedwoodWLAN.cpp
+index 89d88401b91333bfbaa389d058d17cd92429163d..1859b013649f90495ff079ad37bc4266e465e376 100644
+--- a/iokit/Kernel/RedwoodWLAN.cpp
++++ b/iokit/Kernel/RedwoodWLAN.cpp
+@@ -92,23 +92,36 @@ void
+ RedwoodWLANStart(const char * interface, const uint8_t * address)
+ {
+ 	IOService * platform = IOService::getPlatform();
++	IOService * wlanNode = OSTypeAlloc(IOService);
+ 	IO80211Controller * controller = OSTypeAlloc(IO80211Controller);
+ 	RedwoodWLAN * wlan = OSTypeAlloc(RedwoodWLAN);
+ 	OSData * mac;
+ 	OSNumber * number;
+ 
+ 	if (platform == NULL || controller == NULL || wlan == NULL || !controller->init() || !wlan->init()) {
++		OSSafeReleaseNULL(wlanNode);
+ 		OSSafeReleaseNULL(controller);
+ 		OSSafeReleaseNULL(wlan);
+ 		IOLog("RedwoodWLAN: cannot create the services\n");
+ 		return;
+ 	}
++	if (wlanNode != NULL && wlanNode->init()) {
++		if ((mac = OSData::withBytes(address, 6)) != NULL) {
++			wlanNode->setProperty("local-mac-address", mac);
++			mac->release();
++		}
++		wlanNode = publish(wlanNode, platform, "wlan");
++	} else {
++		OSSafeReleaseNULL(wlanNode);
++	}
+ 	if ((mac = OSData::withBytes(address, 6)) != NULL) {
+ 		controller->setProperty("IOMACAddress", mac);
+ 		mac->release();
+ 	}
+ 	controller->setProperty("IOBuiltin", true);
+-	if ((controller = (IO80211Controller *) publish(controller, platform, "RedwoodWLANController")) == NULL) {
++	if ((controller = (IO80211Controller *) publish(controller, wlanNode != NULL ? wlanNode : platform,
++	    "RedwoodWLANController")) == NULL) {
++		OSSafeReleaseNULL(wlanNode);
+ 		wlan->release();
+ 		IOLog("RedwoodWLAN: the controller did not start\n");
+ 		return;
+@@ -134,4 +147,5 @@ RedwoodWLANStart(const char * interface, const uint8_t * address)
+ 		wlan->release();
+ 	}
+ 	controller->release();
++	OSSafeReleaseNULL(wlanNode);
+ }
 diff --git a/iokit/conf/files b/iokit/conf/files
 index 6c430c2b23c74950cee9b8d54affe69b961cd627..39cfe78cb24abb54f83652589f0a0200bb9e6d94 100644
 --- a/iokit/conf/files

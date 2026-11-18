@@ -1230,10 +1230,41 @@ index 0000000000000000000000000000000000000000..eefefc0fb1ae86b8551d4adc096fabf2
 +}
 +#endif
 diff --git a/wifi/lx/src/lx_80211.c b/wifi/lx/src/lx_80211.c
-index ea753f2711805ee81c47580a054e6cb633842c97..1575af9e2392c09c7d0e6c3fd890bda6a79739d9 100644
+index ea753f2711805ee81c47580a054e6cb633842c97..d757937bad6dedb55590b43c427cdeb9a450a2d6 100644
 --- a/wifi/lx/src/lx_80211.c
 +++ b/wifi/lx/src/lx_80211.c
-@@ -1217,8 +1217,11 @@ station_abilities(struct lx_radio *radio, const uint8_t *elements, unsigned leng
+@@ -574,6 +574,9 @@ heard(struct lx_radio *radio, const uint8_t *frame, unsigned length, unsigned fr
+ 		radio->target.elements_length = length - 36;
+ 		memcpy(radio->target.elements, elements, length - 36);
+ 	}
++	if (radio->sta != NULL && memcmp(radio->target.address, frame + 16, ETH_ALEN) == 0) {
++		radio->signal = (int8_t)signal;
++	}
+ 	for (unsigned i = 0; i < radio->heard_count && network == NULL; i++) {
+ 		if (memcmp(radio->heard[i].sender, frame + 16, ETH_ALEN) == 0) {
+ 			network = &radio->heard[i];
+@@ -598,9 +601,6 @@ heard(struct lx_radio *radio, const uint8_t *frame, unsigned length, unsigned fr
+ 		network->elements_length = (uint16_t)(length - 36);
+ 		memcpy(network->elements, elements, length - 36);
+ 	}
+-	if (radio->sta != NULL && memcmp(radio->target.address, frame + 16, ETH_ALEN) == 0) {
+-		radio->signal = (int8_t)signal;
+-	}
+ 	if (signal > network->signal) {
+ 		network->signal = (int8_t)signal;
+ 		network->frequency = (uint16_t)frequency;
+@@ -903,6 +903,10 @@ linuxkpi_ieee80211_rx(struct ieee80211_hw *hw, struct sk_buff *skb, struct ieee8
+ 	const struct ieee80211_rx_status *status = IEEE80211_SKB_RXCB(skb);
+ 
+ 	radio->frames++;
++	if (radio->joined && !(status->flag & RX_FLAG_NO_SIGNAL_VAL) &&
++	    status->signal <= -10 && status->signal >= -100) {
++		radio->signal = (int8_t)status->signal;
++	}
+ 	if (status->flag & RX_FLAG_8023) {
+ 		ethernet_received(radio, skb);
+ 	} else if (skb->len >= 36 && (skb->data[0] == 0x80 || skb->data[0] == 0x50)) {	/* a beacon, an answer to a probe */
+@@ -1217,8 +1221,11 @@ station_abilities(struct lx_radio *radio, const uint8_t *elements, unsigned leng
  	if ((e = element(elements, length, 50)) != NULL) {
  		rates |= rates_of(band, e + 2, e[1], &basic);
  	}
@@ -1247,7 +1278,7 @@ index ea753f2711805ee81c47580a054e6cb633842c97..1575af9e2392c09c7d0e6c3fd890bda6
  	sta->wme = conf->qos = vendor_element(elements, length, wmm) != NULL;
  	sta->deflink.bandwidth = radio->width == 80 ? IEEE80211_STA_RX_BW_80 : radio->width == 40 ? IEEE80211_STA_RX_BW_40 :
  	    IEEE80211_STA_RX_BW_20;
-@@ -1557,6 +1560,40 @@ station_width(struct lx_radio *radio, struct linuxkpi_ieee80211_channel *primary
+@@ -1557,6 +1564,40 @@ station_width(struct lx_radio *radio, struct linuxkpi_ieee80211_channel *primary
  	}
  }
  
@@ -1288,7 +1319,7 @@ index ea753f2711805ee81c47580a054e6cb633842c97..1575af9e2392c09c7d0e6c3fd890bda6
  /*
   * Join the network of that name with that passphrase, in the order mac80211 goes through
   * (net/mac80211/mlme.c of Linux: ieee80211_mgd_auth(), ieee80211_mgd_assoc(), and what the
-@@ -1580,7 +1617,8 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
+@@ -1580,7 +1621,8 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
  	const uint8_t *e;
  	const char *obstacle;
  	unsigned long long began;
@@ -1298,7 +1329,7 @@ index ea753f2711805ee81c47580a054e6cb633842c97..1575af9e2392c09c7d0e6c3fd890bda6
  	int ret, error = 0, answer = ANSWER_NONE;
  
  	if (name_length == 0 || name_length > sizeof(radio->want)) {
-@@ -1594,241 +1632,252 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
+@@ -1594,241 +1636,252 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
  		station_leave(radio);
  		lx_tell("lx: the network joined before is left\n");
  	}

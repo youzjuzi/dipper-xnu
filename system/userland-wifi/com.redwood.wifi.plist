@@ -10,7 +10,7 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/redwood/bin/net_test</string>
-		<string>restartconfd</string>
+		<string>wifi</string>
 		<string>waitaddr</string>
 		<string>en0</string>
 		<string>540</string>
