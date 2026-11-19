@@ -24,7 +24,7 @@
       "upstream_file_exists": false,
       "license": "UNRESOLVED",
       "basis": "Direct #include and execution of GPL-derived table established; no MIT relicense or combination compatibility claim",
-      "sha256": "cda3420e1e486e0162e94fe804d8a0abd8518c9355b86dd4b7f17f14aae0cff7"
+      "sha256": "0f9dd7223d32c8e413c53cedc2e140952f1b4029f900e2a2c87ed67bbfe24692"
     },
     {
       "component": "xnu-mi8",
@@ -40,7 +40,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "New driver for the WCN3990 Bluetooth UART, modelled on mi8_fts.c and mi8_rproc.c (same RPMh/command-database/clock structure); register offsets are hardware facts taken from Linux headers, no GPL code is copied; maintainer to confirm the file's licence",
-      "sha256": "28b9ca54996d9ef438e075d95350b3eec36ddac784b9f59f7cf7434979e94a92"
+      "sha256": "180d96c9c9d16caec1ba95554b4773d998a1b35288a8ce0d4855b811b777c5d3"
     },
     {
       "component": "xnu-mi8",
@@ -88,7 +88,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "7510cc1878f1651178b5d7bb903281b69cc26b12e88ca562d8c7ec137d72837d"
+      "sha256": "907334955bae93d75475a93f74e65c82761745f218f7724744af8851e864c349"
     },
     {
       "component": "xnu-mi8",
@@ -136,7 +136,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "37f205855b3356c9577f17fa41e4f590316198486d9a67c261e1787c4ca537cd"
+      "sha256": "728e8d4db9627586eebe42a4c7e351f40092b5c24a2295360012394354155fc8"
     },
     {
       "component": "xnu-mi8",
@@ -144,7 +144,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "03a45956e6b65a543f9ad27c1492071625ebf9851fb97b9fe2bb9b5e35edcf04"
+      "sha256": "b7babce88d919792aa1118271ea5fef83e017ee8138862e0ded939aa8424e7ac"
     },
     {
       "component": "xnu-mi8",
@@ -176,7 +176,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "caf4068ad0c023257ac26e0768affd0a9de74f8ff92009a35fd816a8ce872c93"
+      "sha256": "05ee732b1e08e8a558fb3185f3ff834ed39f19c058229166ed0a83e96ecdc705"
     },
     {
       "component": "xnu-mi8",
@@ -184,7 +184,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "41b02f616aba22c6257caad8206e543fb00c56fcd8ba82db27a5c49c5e399749"
+      "sha256": "daee57b7fadea0246203bda5def7a445f599077713169e33e4156636de6eb298"
     },
     {
       "component": "xnu-mi8",
@@ -216,7 +216,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original modules; third-party portions excluded",
-      "sha256": "a47ea5fcd10cefb4cc1ddd08409af6058914f8a93c349cc5720423a5b5b3bc33"
+      "sha256": "71cca9cb0ae79f6b8081c9c740e01e21be298966cfaa7ae01d85b7766a43c77f"
     },
     {
       "component": "xnu-mi8",
@@ -224,7 +224,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "49f16603f0b1ee9cd256c901d464d097395ac0c9a9733aa15edddc8b7cfaf5ee"
+      "sha256": "f166749159d738b4b7695187b2f78b803a4fffe143c6822dfb1d13410c55b744"
     },
     {
       "component": "xnu-mi8",
@@ -256,7 +256,15 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "08771e80db344bc06378afb1efbbae43a3202e11f79ddafa23b9b3b7d9571cb2"
+      "sha256": "044e4abe44913239ed09213d8733fe2dee6b42d2244cfcf8fced1e6525022843"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "iokit/Kernel/RedwoodWLAN.cpp",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
+      "sha256": "f30c794b13c395acb05051fe0ccb6fdfb43cd08da87b84bc8a3d513f85bfe23f"
     },
     {
       "component": "xnu-mi8",
@@ -280,7 +288,7 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "HackiOS/XNU derivative; inherited file notices continue to apply",
-      "sha256": "f8b541132f807fa66bbab6237e4786fde5f72c89c143fa7b4b640711a3518445"
+      "sha256": "d36a637f19c4c6aa94b33e0e85f36d2018e9917783ef045e02fa1508c4b99d8f"
     },
     {
       "component": "hackios-kernel",
@@ -424,7 +432,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original compatibility/glue code",
-      "sha256": "5c41ba07216f41b345d24ae578aec20021231697c9994e30ec66a82a77358344"
+      "sha256": "e6caaec100bbf4e6f3b1d3610f2c28ac400fdf941a974ea2b4c313a973ca27df"
     },
     {
       "component": "hackios-kernel",
@@ -480,7 +488,7 @@
       "upstream_file_exists": true,
       "license": "MIT",
       "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "2289caa6a3a0f9eaab1fcb8909604f93c74199d17d94baaf2b62ed8477be73ac"
+      "sha256": "77991ededa56af7141c1f6a15bca38444789443b1f648b414b33c339fb35b8e3"
     },
     {
       "component": "hackios-userland",
@@ -488,7 +496,7 @@
       "upstream_file_exists": true,
       "license": "MIT",
       "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "5bdc28cac47021fa5af6ba759ab86a02ca125891e1f52b26943635a932307e02"
+      "sha256": "462a637136112ee84659ac1967e1a116b691fb3dbae91dd37885b09de30198da"
     },
     {
       "component": "hackios-userland",
@@ -504,7 +512,7 @@
       "upstream_file_exists": true,
       "license": "MIT",
       "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "2ccf00fa21017bacfc24868990cf6eaffd2ff6a23a3d65374f00be116d98b565"
+      "sha256": "378fe8ccdfbd72804109864242e099a7fa9bf969a62e6473ff8fb3a8310ccd4f"
     },
     {
       "component": "hackios-userland",
@@ -512,7 +520,7 @@
       "upstream_file_exists": true,
       "license": "MIT",
       "basis": "Pinned userland root MIT license; redwood_drm.c is the userland IOKit adapter, not the whole Mesa source tree",
-      "sha256": "7c8dcdcd644581b41d790778dea85c0f2de1a97de7e79e8bd6a6da14521fca96"
+      "sha256": "17b2d60b46ef2ff55c20961f4aad44c8fd569317cd39512c7ba3ab65de79eeff"
     },
     {
       "component": "hackios-userland",
@@ -600,7 +608,15 @@
       "upstream_file_exists": true,
       "license": "APSL-2.0",
       "basis": "Pinned HackiOS kernel repository license; existing source modifications",
-      "sha256": "7dc8c996c5e684af4435831eb553274e85294668a5651c73a6993153a1073aca"
+      "sha256": "a433f47321678e25282f15a6ceb948e347f2e6bd80a7ea16795f60c04ac2ce06"
+    },
+    {
+      "component": "hackios-kernel",
+      "path": "wifi/lx/src/lx_80211.c",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "Pinned HackiOS kernel repository license; existing source modifications",
+      "sha256": "9e1828dc438104b19d875aa594bd7ff6caef004622a5698a65bf0c976a881880"
     },
     {
       "component": "hackios-userland",
@@ -639,8 +655,8 @@
       "path": "userland/src/init.c",
       "upstream_file_exists": true,
       "license": "MIT",
-      "basis": "Pinned userland root MIT license; one bind of /etc/bluetool added",
-      "sha256": "04b40b62dbcb7a0538e50967011473ab0685fb5a65c0895bf74f32176ff30516"
+      "basis": "Pinned userland root MIT license; /apps union mount and /etc/bluetool bind added",
+      "sha256": "3d93751c3d2f35aeed21af79f8dc7c1f33c18562e3230447f08482f2614293be"
     },
     {
       "component": "xnu-mi8",
@@ -696,7 +712,7 @@
       "upstream_file_exists": false,
       "license": "APSL-2.0",
       "basis": "New IOKit shim (AppleBTHci, AppleBTMgmt and the \"bluetooth\" node) in the HackiOS/XNU tree, modelled on RedwoodGPU.cpp; the interface is described from observed behaviour and disassembly of iOS bluetoothd/BlueTool, no Apple code copied",
-      "sha256": "1f34a7237cb865b400a79d3e8e84b2ca1c4402043979f74ba1f7f5c51bc57bab"
+      "sha256": "02076aee3ff87f781339b9d2d628ece0f01675d0ee4d00fa78104e39a85e8f2d"
     },
     {
       "component": "xnu-mi8",
@@ -728,7 +744,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写的有界 SMMU 诊断与软件走表；寄存器/描述符字段参考 ARM SMMUv2、Linux 定义及现有适配器，未复制驱动实现",
-      "sha256": "19f131d5d22fdbe8f64551370a3f9fa6905c35997cc17342dd10bf816cc5c9e5"
+      "sha256": "38a1686c4f7d1d1027c4340f32c9646ef6b0d01e7ac78fddb07cab59d98ba7f3"
     },
     {
       "component": "xnu-mi8",
@@ -744,7 +760,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "dcf44c42a01670d6127a2d25583f133cf28ec261518b5f9e9863950bdabcd6f9"
+      "sha256": "86624206fec683a417265320ad16d6fafa2886255aa28a6764e8fd9731ee093e"
     },
     {
       "component": "xnu-mi8",
@@ -752,7 +768,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "Maintainer-confirmed original protocol exerciser; independently encoded wire formats and state machine, no reference driver implementation copied",
-      "sha256": "64a3981a74832a16705580bbe469febe872e80929e50d7f1cc45840cb40979d0"
+      "sha256": "4048b7c45cc00ce5892a85cb331ee6bfa2322d8a7b8239bd5fc201812e9d7cd9"
     },
     {
       "component": "xnu-mi8",
@@ -760,7 +776,7 @@
       "upstream_file_exists": false,
       "license": "MIT",
       "basis": "本项目新写，参考 TI tas2557 驱动的固件格式，未复制代码",
-      "sha256": "495ed7db3a8c76a620c43a4000d21172eed5be5787323891289af1bff5fd8c9d"
+      "sha256": "8dbbd9ac6bff1f795f56d71733ad8f9e3859e807eded4817415b3cd6482e7afa"
     },
     {
       "component": "xnu-mi8",
@@ -809,6 +825,14 @@
       "license": "MIT",
       "basis": "Original bounded PCM ring implementation; no reference driver implementation copied",
       "sha256": "36a3b77f5283f7f4ec17452d693804a7cc9b2898b770c7d7dfd2d51e798c5e30"
+    },
+    {
+      "component": "xnu-mi8",
+      "path": "bsd/vfs/vfs_attrlist.c",
+      "upstream_file_exists": true,
+      "license": "APSL-2.0",
+      "basis": "Pinned Apple XNU derivative (APSL-2.0 with SPARTA 2005 clause 2.2(b) notice retained); no relicense",
+      "sha256": "aa41cad2b67a0ca2986092906f1650e7862ee805a7dfde9ac5b388a7f25f6da5"
     },
     {
       "component": "xnu-mi8",

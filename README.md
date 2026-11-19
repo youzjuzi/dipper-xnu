@@ -10,13 +10,13 @@ Built on the [HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) foundati
 
 This project is still under active development and is **not** ready for daily use.
 
-## Recent Updates · 2026-11-12
+## Recent Updates · 2026-11-19
 
-- **Internal speaker audio works**: iOS ringtones, keyboard clicks, and media audio play from the Mi 8 speaker and respond to the iOS volume slider. Audio wakes in ~40 ms with fade-in/fade-out and pop-free idle shutdown; verified in a 10-minute 0 dB continuous playback run with amp health checks passing and CPU at 41–43 °C.
-- **How it works**: The kernel consumes PCM from iOS audio services and routes it through the Qualcomm ADSP (`GLINK`/`APR` -> `ASM`/`ADM`/`AFE` over Quaternary MI2S) to a native `TAS2557` SmartAmp driver (firmware loading, power-up, health verification, soft mute/shutdown when idle, and emergency reset on kernel panic).
-- **Bluetooth, audio, battery, haptics, and torch enabled by default**: Packaging with `--wifi` now turns them on without extra boot arguments (`--bluetooth` / `--peripherals` are no longer required; pass `bt=0`, `audio=0`, etc. to disable).
-- **Current audio & network limits**: Speaker output becomes ready ~1 minute after boot once Wi-Fi initializes; acoustic tuning is incomplete; Bluetooth audio, earpiece, microphone, and voice calls are not implemented; the volume button HUD shows a mute icon; intermittent browser/Wi-Fi RX stalls remain under investigation; long-term power consumption is untested.
-- **User-supplied amp firmware**: `TAS2557` firmware must be extracted from your own phone (ADSP firmware is read directly by the kernel from the phone's `modem` partition). See [Configuration, Rebuild & Boot](docs/install/STARTUP.md#speaker-audio-and-peripherals-enabled-by-default).
+- **Native Wi-Fi & Bluetooth kernel integration (no UI shims)**: Replaced the userspace Bluetooth shim (`libredwood-bt.dylib`) with native IOKit `AppleOLYHAL` (`RedwoodBT.cpp`); removed the SpringBoard Wi-Fi status bar hook (`inject_sb.c`); exposed the `"wlan"` parent node (`RedwoodWLAN.cpp`) + early `en0`; fixed `EVENT_LQM_CHANGED` sizing (`0xc0` -> `0xb4`, `220 <= MLEN 224`) + RSSI clamping + `com.apple.wifi.manager` Mach pre-declaration so native SpringBoard Wi-Fi signal bars light up cleanly on join; added Wi-Fi DMA `dsb sy` barriers, recycled RX slot head zeroing, bounded `rx_confused` recovery, and multi-AP join fallback.
+- **Dynamic CPU/DDR governor & GPU flush coalescing**: Added touch- and GPU-activity-driven CPU/DDR frequency scaling (idling down to `825 MHz` / DDR `2/16` under the `66 °C` thermal ceiling) and `RedwoodGPU` 2 ms intra-frame `IOSurface` cache-flush coalescing.
+- **Speaker audio bit-bang timing fix**: Switched short `<= 50 us` bit-bang I2C delays in `mi8_tas2557.c` to busy-spin (avoiding scheduler sleeps on every `3 us` half-clock when `cpu_idle_latency == 0`), cutting post-mute Y-RAM verification from `~486–1000+ ms` down to `~207–208 ms` and warmup to `~31 ms`, and preventing spurious `latched=coefficient` lockouts under load.
+- **Volume HUD, sideload, teardown & live logging**: Fixed the muted Volume HUD via standard HID Telephony Ring Switch (`0x0b`/`0x2e`); settled `/apps` `MNT_UNION` sideload; added orderly warm teardown for resident `audio=5`, BT, Wi-Fi, and GPU plus read-only `tools/tests/device-log.py`.
+- **Remaining limits**: Cold reboot is still required between baseband runs (`halt port modem` does not idle); DPU zero-copy scanout, render-thread big-core affinity, Bluetooth audio, microphone, cellular data, and native Adreno 630 Metal remain unimplemented.
 - Hardware results above are from maintainer testing and device logs rather than an automated full regression; details in [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](docs/validation/VALIDATION.md).
 
 ## Hardware & Boot Chain
@@ -37,25 +37,25 @@ Boot flow:
 Stock dipper bootloaders -> edk2-sdm845 UEFI -> xnuloader -> XNU -> iOS 16.5 userspace
 ```
 
-## Feature Status (2026-11-12)
+## Feature Status (2026-11-19)
 
-Most peripheral checks below were recorded on the pre-repartition test layout, with newer items (Bluetooth, speaker audio, optional render scaling, persistent `/private/var`) verified separately in recent boots; full post-repartition regression, teardown/exit recovery, and long-term stability remain to be tested.
+Most peripheral checks below were recorded on the pre-repartition test layout, with newer items (Bluetooth, speaker audio, native Wi-Fi status bar/LQM, dynamic CPU/DDR scaling, optional render scaling, persistent `/private/var`) verified separately in recent boots; full post-repartition regression and long-term stability remain to be tested.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
 | System boot | Works | Reaches iOS 16.5 SpringBoard home screen |
-| Display & GPU | Partly | Mesa / freedreno drives A630; UI stutter, power draw, and exit recovery need work |
+| Display & GPU | Partly | Mesa / freedreno drives A630 with dynamic CPU/DDR governor and flush coalescing; zero-copy scanout, render-thread affinity, and exit recovery need work |
 | Touch | Works | FTS touch input working |
 | Brightness & Lock/Wake | Works | Settings / Control Center brightness and lock/wake verified |
-| Volume buttons | Partly | Buttons and slider adjust volume; HUD overlay displays muted icon |
+| Volume buttons | Works | Standard HID Telephony Ring Switch (`0x0b`/`0x2e`) fixes the muted HUD overlay; buttons and slider adjust volume |
 | Torch & Haptics | Works | Torch toggle and haptics work; torch brightness steps are subtle |
 | Battery gauge | Partly | Battery percentage/status reported; full charge/discharge cycle unverified |
-| Wi-Fi | Partly | Joins networks and acquires IP (`en0`); status bar icon is placeholder; intermittent RX stalls |
-| Safari / Web | Partly | Loads and refreshes pages over Wi-Fi; sometimes stalls on `SYN_SENT` |
-| Bluetooth | Partly | Enabled by default; toggles, scans, pairs, and connects to headphones/phones; no BT audio; pairings do not persist across reboots |
+| Wi-Fi | Partly | Native status bar signal bars via kernel LQM events; DMA barriers, `rx_confused` recovery, and multi-AP fallback added; long-term stability under test |
+| Safari / Web | Partly | Loads and refreshes pages over Wi-Fi; extended stability and video decoding need work |
+| Bluetooth | Partly | Enabled by default via native `AppleOLYHAL` (no userspace shim); toggles, scans, pairs, and connects headphones/phones; no BT audio; pairings need `--persist` |
 | Reduced render scale (`fbscale=2`) | Partly | Optional (`fbscale=2 fb_dpu=1`); smoother UI with status bar fix and static wallpaper; some apps crash |
 | Static wallpaper | Works | User-supplied image (`/redwood/etc/wallpaper.jpg`); changing wallpaper in Settings has no effect |
-| Internal speaker audio | Partly | Enabled by default; iOS audio plays via ADSP + TAS2557; uncalibrated EQ; long-term power untested |
+| Internal speaker audio | Partly | Enabled by default; iOS audio plays via ADSP + TAS2557 (~31 ms warmup, ~207 ms idle coeff check); uncalibrated EQ; long-term power untested |
 | Persistent `/private/var` (`--persist`) | Partly | First save/restore test verified under `--persist`; crash/periodic saving untested |
 | Cellular / Mobile data | Not tested | Not yet verified working |
 | Bluetooth audio / Mic / Calls | No | Not yet implemented |
@@ -115,11 +115,11 @@ Developed on **Ubuntu 26.04.1 LTS (`x86_64`)**. Rather than tracking a full XNU 
 
 ## Known Issues
 
-- Home screen stutter remains under heavy load (reduced render scale helps, though some apps crash in that mode); dynamic CPU/GPU power management and long-term stability need tuning.
+- Home screen stutter remains under heavy load (zero-copy DPU scanout and render-thread big-core affinity remain unimplemented; `fbscale=2` helps though some apps crash in that mode).
 - Bluetooth headphones receive no audio yet, pairings are not saved across reboots without `--persist`, and Bluetooth initializes ~70 s after boot.
-- Internal speaker activates ~1 minute after boot (after Wi-Fi setup); sound quality is uncalibrated; volume button HUD reports mute; long-term power draw is unmeasured.
-- Safari / networking occasionally stalls after boot or extended browsing (Wi-Fi stays associated, TCP stops at `SYN_SENT`).
-- GPU SMMU and modem teardown/exit recovery remain incomplete; devices generally need a full reboot between test runs.
+- Internal speaker activates ~1 minute after boot (after Wi-Fi setup); sound quality is uncalibrated and long-term power draw is unmeasured.
+- Long-term Wi-Fi stability and extended web video playback need further testing.
+- Baseband `halt port modem` does not idle on warm stop; devices still require a full reboot between modem/baseband runs.
 - Storage configuration targets an experimental layout (`darwin` partition) and does not yet ship as a generic one-click installer.
 
 ## Contributing

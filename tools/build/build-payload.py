@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import secrets
 from pathlib import Path
@@ -121,7 +122,7 @@ def main():
                 raise SystemExit('Bluetooth firmware missing or stale in flashboot.apfs: ' + name)
             bt_firmware[name] = sha256(source)
         for path in ('/LaunchDaemons/com.apple.bluetoothd.plist', '/LaunchDaemons/com.apple.BlueTool.plist',
-                     '/lib/libredwood-bt.dylib', '/etc/bluetool/BCM4357B1_placeholder.hcd'):
+                     '/etc/bluetool/BCM4357B1_placeholder.hcd'):
             if subprocess.run([str(reader), 'stat', str(inputs['root.apfs']), path],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
                 raise SystemExit('root.apfs has no ' + path + '; rebuild userland with BT=1')

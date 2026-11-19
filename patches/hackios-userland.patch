@@ -101,7 +101,7 @@ index 4f0aa3944cc2b3fd647e6693f6fb605455e01333..027a28f9e83bcd08baf302f0d292d858
  	install_name_tool -id /redwood/lib/libredwoodair.dylib out/libredwoodair.dylib
  	echo "mk-mesa.sh: $B/out/libredwoodair.dylib ($(stat -c %s out/libredwoodair.dylib) bytes," \
 diff --git a/userland/build.sh b/userland/build.sh
-index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383399ca8f1 100755
+index 582866f82497f32c86226f6a095e0a8e0c9dc791..8da08222e337f2e9274af2774fa221614d22f212 100755
 --- a/userland/build.sh
 +++ b/userland/build.sh
 @@ -17,6 +17,10 @@
@@ -161,13 +161,8 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  # The programs (file names) started with a library of ours inside them: "LIBRARY NAME..." per line
  # (src/inject.c is libredwood.dylib, src/inject_sb.c is libredwood-sb.dylib, src/inject_media.c is
  # libredwood-media.dylib).
-@@ -138,9 +148,15 @@ INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd cont
- [ -n "$STOREFRONT" ] && INJECT="$INJECT
- /redwood/lib/libredwood-store.dylib appstored AppStore
+@@ -140,7 +150,10 @@ INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd cont
  /redwood/lib/libredwood-fairplay.dylib fairplayd.H2"
-+# BT=1: BlueTool and bluetoothd with src/inject_bt.c, which tells BlueTool the module's maker it boots by.
-+[ -n "$BT" ] && INJECT="$INJECT
-+/redwood/lib/libredwood-bt.dylib BlueTool bluetoothd"
  mkdir -p obj
  
 -if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
@@ -178,7 +173,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  if [ -n "$PREBUILT" ]; then
  	echo "build.sh: not compiling, using the programs in prebuilt/userland"
  	for f in ../prebuilt/userland/*; do
-@@ -270,7 +286,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+@@ -270,7 +283,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
  		$DYN -o obj/vol_ls src/vol_ls.c
  		$DYN -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o obj/snap_test src/snap_test.c
  		$DYN -framework CoreFoundation -framework CoreGraphics -framework CoreText -o obj/font_test src/font_test.c
@@ -187,7 +182,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  		# (the account database answers only a client with the entitlements its own daemons hold: src/store_test.m)
  		$DYN -fobjc-arc -framework Foundation -framework Accounts -o obj/store_test src/store_test.m &&
  			{ ${LDID:-ldid} -Ssrc/store_test.entitlements obj/store_test 2>/dev/null ||
-@@ -296,6 +312,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+@@ -296,6 +309,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
  		# program either as the one library the kernel inserts or opened by a library of ours
  		$DYN -dynamiclib -install_name /redwood/lib/libredwood-tweaks.dylib -framework CoreFoundation -lobjc \
  			-o obj/libredwood-tweaks.dylib src/inject_tweaks.c
@@ -197,7 +192,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  		# ... and inside an application, to say what killed it (src/inject_app.c)
  		$DYN -dynamiclib -install_name /redwood/lib/libredwood-app.dylib -lobjc \
  			-o obj/libredwood-app.dylib src/inject_app.c
-@@ -362,7 +381,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+@@ -362,7 +378,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
  		fi
  	fi
  	# (drawable_test is built in the same block as surf_test, so it is copied with it)
@@ -207,12 +202,11 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  	[ -f obj/cpu_test ] && cp obj/cpu_test root/bin/        # (a prebuilt/ from before this program has none)
  	[ -f obj/cow_test ] && cp obj/cow_test root/bin/
  	[ -f obj/cg_test ] && cp obj/cg_test root/bin/
-@@ -449,6 +469,15 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+@@ -449,6 +466,14 @@ if [ -d $IOS/rootfs/usr/lib ]; then
  	[ -f obj/libredwood-fairplay.dylib ] && cp obj/libredwood-fairplay.dylib root/lib/
  	[ -f obj/libredwood-app.dylib ] && cp obj/libredwood-app.dylib root/lib/
  	[ -f obj/libredwood-tweaks.dylib ] && cp obj/libredwood-tweaks.dylib root/lib/
 +	if [ -n "$BT" ]; then
-+		[ -f obj/libredwood-bt.dylib ] && cp obj/libredwood-bt.dylib root/lib/
 +		# BlueTool sends the controller the firmware file of its chip's name from /etc/bluetool (init binds this
 +		# directory there). The Broadcom file of the iPhone means nothing to the Qualcomm chip, and the kernel
 +		# answers BlueTool's vendor commands itself: one Launch RAM command (0xfc4e, address 0xffffffff) is
@@ -223,7 +217,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  	[ -f obj/libredwoodmetal.dylib ] && cp obj/libredwoodmetal.dylib root/lib/
  	[ -f obj/libredwoodair.dylib ] && cp obj/libredwoodair.dylib root/lib/
  	if [ -f obj/RedwoodAudio ]; then
-@@ -491,7 +520,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
+@@ -491,7 +516,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
  	cp $IOS/var.skel root/etc/var.skel              # the directories init creates in /private/var
  	# time zones: the template's links go in a circle until the time zone daemon has run (/usr/share/zoneinfo
  	# points back into /var); point them at the data that ships with the system, and use this machine's zone
@@ -234,7 +228,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  	sed -i -e 's|^l\t/usr/share/zoneinfo\t/private/var/db/timezone/zoneinfo$|l\t/usr/share/zoneinfo.default\t/private/var/db/timezone/zoneinfo|' \
  		-e "s|^l\t/var/db/timezone/zoneinfo/[^\t]*\t/private/var/db/timezone/localtime\$|l\t/var/db/timezone/zoneinfo/$zone\t/private/var/db/timezone/localtime|" root/etc/var.skel
  	# ... and the files of ours it puts there (var/): those under mobile/ belong to the user mobile
-@@ -548,6 +579,12 @@ if [ -d ../fw-gpu ]; then
+@@ -548,6 +575,12 @@ if [ -d ../fw-gpu ]; then
  	mkdir -p root/fw
  	cp ../fw-gpu/* root/fw/
  fi
@@ -247,7 +241,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  # ... and the image of the Wi-Fi DSP, from /vendor/firmware_mnt/image of the same Android into ../fw-wifi
  # (bsd/dev/redwood_wifi.c; 7.6 MB), with what the radio's firmware is sent once it runs: this phone's
  # board data and the regulatory database (image/qca6750 there; 60 and 24 KB)
-@@ -675,6 +712,18 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+@@ -675,6 +708,18 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
  		mkdir -p flashboot/fw
  		cp ../fw-audio/aw882xx_acf.bin flashboot/fw/
  	fi
@@ -266,7 +260,27 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  	# the package manager's prefix, when tools/mk-jb.sh has fetched one: /jb of the boot volume, which is
  	# /private/preboot/jb once the iOS volume is the root -- the volume where a rootless jailbreak keeps its
  	# Procursus on an iPhone as well; init grafts it onto /var/jb (src/init.c, mount_writable)
-@@ -708,7 +757,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+@@ -688,6 +733,19 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
+ 		done
+ 		echo "  the package manager's prefix: $(du -sh flashboot/jb | cut -f1) as /jb of the boot volume"
+ 	fi
++	# Applications from outside this tree: every .app in ../apps goes into /apps of the boot volume, which init lays
++	# over the iOS volume's /Applications as a union (src/init.c, flash_root). The iOS volume is Apple's and is
++	# not written to. The boot volume is the resident RAM disk (fastboot oem ramdisk; up to the loader's memory
++	# window, not the payload's 64 MB), so what goes here costs RAM at every boot, hundreds of MB for a large one.
++	# cp -aL for the reason given at the system image below (a bundle of links is refused).
++	if [ "${APPS-1}" != 0 ] && [ -n "$SKIP_SYSTEM" ]; then
++		for app in ../apps/*.app; do
++			[ -d "$app" ] || continue
++			mkdir -p flashboot/apps
++			cp -aL "$app" flashboot/apps/
++			echo "  ${app##*/} in the boot volume's /apps ($(du -sm "$app" | cut -f1) MB from ../apps)"
++		done
++	fi
+ 	python3 ../tools/apfs/mkapfs.py -z --plain fw -o flashboot.boot.apfs Boot=flashboot | tail -1
+ 	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh flashboot.boot.apfs Boot=flashboot
+ 	# the third container: Apple's App cryptex as it is (10 MB; fetch.sh), for the boot volume's Cryptexes/App
+@@ -708,7 +766,7 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
  fi
  
  # --- the system image -----------------------------------------------------------------------------
@@ -276,7 +290,7 @@ index 582866f82497f32c86226f6a095e0a8e0c9dc791..2253139bccbee29ce0f08bdc5f262383
  	  [ $IOS/cryptex -nt system.apfs ] || [ $IOS/cryptex-app -nt system.apfs ] || [ -n "$SYSTEM" ]; }; then
  	# what ios165/select-system.py has chosen since ios165/rootfs was extracted is not in it, and would not be
 diff --git a/userland/mkjobs.py b/userland/mkjobs.py
-index a92a4efa73630c2c13570ec98fd09f07462bbad3..a2cefb950a26625d93278a63e99105e557a91ea0 100755
+index a92a4efa73630c2c13570ec98fd09f07462bbad3..c4149dc3d1cd9a3fcf39c14133617dae79381be3 100755
 --- a/userland/mkjobs.py
 +++ b/userland/mkjobs.py
 @@ -222,8 +222,15 @@ DENY = ('watchdog', 'CommCenter', 'wifi', 'WiFi', 'bluetooth', 'BTServer', 'loca
@@ -307,16 +321,23 @@ index a92a4efa73630c2c13570ec98fd09f07462bbad3..a2cefb950a26625d93278a63e99105e5
  src = f'{src_root}/System/Library/LaunchDaemons'
  # A program in a cryptex -- on a device a volume of its own, grafted at /System/Cryptexes/NAME (eight of
  # Safari's daemons are in the App cryptex) -- is looked for where fetch.sh unpacked that cryptex, beside
-@@ -287,6 +298,8 @@ for label in labels:
+@@ -287,6 +298,15 @@ for label in labels:
      # a job that is named is wanted, whatever hardware it says it is for: wifid's asks for a node "wlan" in the
      # device tree, which the loader's tree does not have yet
      job.pop('_LimitLoadToDeviceTree', None)
++    if label == 'com.apple.wifid':
++        # wifid checks in com.apple.wifi.manager at runtime (bootstrap_check_in) without listing it in its stock
++        # plist. Because SpringBoard spawns alongside wifid here, SBWiFiManager's one-shot lookup otherwise races
++        # wifid's startup and permanently caches a disconnected WiFiManagerClient (serverPort == 0), leaving the
++        # status bar Wi-Fi icon at 0 active bars. Pre-declaring the Mach service lets launchd create and queue the
++        # port upfront, and ResetAtClose delivers MACH_NOTIFY_DEAD_NAME if wifid ever restarts.
++        job.setdefault('MachServices', {})['com.apple.wifi.manager'] = {'ResetAtClose': True}
 +    if label in JOB_ENV:
 +        job.setdefault('EnvironmentVariables', {}).update(JOB_ENV[label])
      if 'all' in oslog or label in oslog:
          job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
      with open(f'{dest}/{label}.plist', 'wb') as f:
-@@ -322,9 +335,12 @@ if rest:
+@@ -322,9 +342,12 @@ if rest:
          # it. The boot of 22 October showed what declining costs: SpringBoard's icons stopped being
          # drawn, because its layers ask for one of those formats and a refused texture is a layer
          # that never appears.
@@ -1887,7 +1908,7 @@ index b7c280c147faeb151dc731626cbc2b32d178f781..272c24a16c98f227c9cdbfa48de3a497
 +	return good;
 +}
 diff --git a/userland/src/init.c b/userland/src/init.c
-index f21bca0250ffc17f3aabf6a66462a8b6c3db6121..a9b8c2e4018d4a1b058b656d24ea097980e20468 100644
+index f21bca0250ffc17f3aabf6a66462a8b6c3db6121..d85fb0d012b13c7d3109628b73a89b904202e95b 100644
 --- a/userland/src/init.c
 +++ b/userland/src/init.c
 @@ -202,6 +202,15 @@ flash_root(const char *dev)
@@ -1906,8 +1927,30 @@ index f21bca0250ffc17f3aabf6a66462a8b6c3db6121..a9b8c2e4018d4a1b058b656d24ea0979
  	if (stat("/jb-bin", &fw_st) == 0) {
  		/*
  		 * The package manager's prefix is in the boot volume (/jb), and Sileo runs mv, cp, rm, mkdir
+@@ -246,6 +255,21 @@ flash_root(const char *dev)
+ 	printf("  %d applications waiting to be installed, %d of them in /Applications\n", apps, bound);
+ 	check(apps > 0 && bound == apps, "the first boot's applications in /Applications");
+ 
++	if (stat("/apps", &fw_st) == 0) {
++		/*
++		 * Applications from outside, carried in the boot volume (userland/build.sh, ../apps): a union
++		 * mount of them over the volume's /Applications, after the aliases above -- a synthetic entry
++		 * needs its parent to be the volume's own directory. What the volume has stays visible through
++		 * it: lookup falls through to the covered directory, and getdirentries and getattrlistbulk
++		 * go on into it when the top layer is read to its end.
++		 */
++		ok = mount("bindfs", "/flash/Applications", MNT_RDONLY | MNT_UNION, (void *)"/apps") == 0;
++		if (!ok) {
++			printf("  bindfs /apps on /flash/Applications, union: %s\n", strerror(errno));
++		}
++		check(ok, "the boot volume's applications over the volume's /Applications, as a union");
++	}
++
+ 	ok = sysctlbyname("kern.redwood_switch_root", NULL, NULL, "/flash private/preboot", 22) == 0;
+ 	if (!ok) {
+ 		printf("  switching the root: %s\n", strerror(errno));
 diff --git a/userland/src/inject.c b/userland/src/inject.c
-index c5e9d9020cc05b698313e88984117c43df8d141e..37eaa73f23525deb7653ce944ad5585aec6ec32b 100644
+index c5e9d9020cc05b698313e88984117c43df8d141e..76ebd84c2f5e7db7142633b832b55cceab11cc3b 100644
 --- a/userland/src/inject.c
 +++ b/userland/src/inject.c
 @@ -30,6 +30,7 @@
@@ -2008,7 +2051,109 @@ index c5e9d9020cc05b698313e88984117c43df8d141e..37eaa73f23525deb7653ce944ad5585a
  /* ---- backboardd: the touch screen and the buttons ---------------------------------------------- */
  
  /* IOKit's HID event system, the part that has no public header on iOS (prototypes checked against 20F66) */
-@@ -1252,6 +1336,7 @@ redwood_init(void)
+@@ -739,6 +823,7 @@ extern IOHIDEventRef IOHIDEventCreateKeyboardEvent(CFAllocatorRef allocator, uin
+     Boolean down, uint32_t options);
+ extern void IOHIDEventAppendEvent(IOHIDEventRef parent, IOHIDEventRef child, uint32_t options);
+ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, CFIndex value);
++extern CFIndex IOHIDEventGetIntegerValue(IOHIDEventRef event, uint32_t field);
+ 
+ #define HID_CLIENT_SIMPLE               4       /* a client that only sends */
+ #define HID_CLIENT_RATE_CONTROLLED      3       /* what IOHIDEventSystemClientCreate() makes */
+@@ -750,6 +835,11 @@ extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, CFInd
+ #define HID_USAGE_MENU                  0x40    /* the home button */
+ #define HID_USAGE_VOLUME_UP             0xe9
+ #define HID_USAGE_VOLUME_DOWN           0xea
++#define HID_PAGE_TELEPHONY              0x0b
++#define HID_USAGE_TFON_RING             0x2e    /* the ringer / silent switch (1 = ring, 0 = silent) */
++#define HID_EVENT_TYPE_KEYBOARD         3
++#define FIELD_KEYBOARD_USAGE_PAGE       0x30000
++#define FIELD_KEYBOARD_USAGE            0x30001
+ #define DIGITIZER_HAND                  3       /* kIOHIDDigitizerTransducerTypeHand */
+ #define DIGITIZER_RANGE                 0x1     /* event mask: what has changed */
+ #define DIGITIZER_TOUCH                 0x2
+@@ -785,6 +875,7 @@ number(int value)
+ /* A service of ours (the callbacks' refcon): what it says of itself, and whether the event server has taken it. */
+ struct service {
+ 	CFMutableDictionaryRef properties;
++	bool has_ringer;
+ 	volatile bool opened;
+ };
+ 
+@@ -864,9 +955,31 @@ service_notification(__unused void *target, __unused void *refcon, __unused IOHI
+ {
+ }
+ 
++static IOHIDEventRef
++service_copy_event(__unused void *target, void *refcon, __unused IOHIDServiceClientRef service, uint32_t type,
++    IOHIDEventRef matching, __unused uint32_t options)
++{
++	const struct service *s = refcon;
++	IOHIDEventRef event;
++
++	if (s == NULL || !s->has_ringer || type != HID_EVENT_TYPE_KEYBOARD) {
++		return NULL;
++	}
++	if (matching != NULL &&
++	    (IOHIDEventGetIntegerValue(matching, FIELD_KEYBOARD_USAGE_PAGE) != HID_PAGE_TELEPHONY ||
++	     IOHIDEventGetIntegerValue(matching, FIELD_KEYBOARD_USAGE) != HID_USAGE_TFON_RING)) {
++		return NULL;
++	}
++	event = IOHIDEventCreateKeyboardEvent(NULL, mach_absolute_time(), HID_PAGE_TELEPHONY, HID_USAGE_TFON_RING, true, 0);
++	if (event != NULL) {
++		IOHIDEventSetIntegerValue(event, FIELD_IS_BUILT_IN, 1);
++	}
++	return event;
++}
++
+ static const struct virtual_service_callbacks service_callbacks = {
+ 	.version = 2, .notification = service_notification, .setProperty = service_set_property,
+-	.copyProperty = service_copy_property,
++	.copyProperty = service_copy_property, .copyEvent = service_copy_event,
+ };
+ 
+ /*
+@@ -895,7 +1008,22 @@ make_service(IOHIDEventSystemClientRef client, const char *product, int page, in
+ 
+ 	CFDictionarySetValue(pair, CFSTR("DeviceUsagePage"), page_number);
+ 	CFDictionarySetValue(pair, CFSTR("DeviceUsage"), usage_number);
+-	pairs = CFArrayCreate(NULL, (const void **)&pair, 1, &kCFTypeArrayCallBacks);
++	if (page == HID_PAGE_CONSUMER && usage == HID_USAGE_CONSUMER_CONTROL) {
++		CFMutableDictionaryRef ringer_pair = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
++		    &kCFTypeDictionaryValueCallBacks);
++		CFNumberRef ringer_page = number(HID_PAGE_TELEPHONY), ringer_usage = number(HID_USAGE_TFON_RING);
++		const void *pair_list[2] = { pair, ringer_pair };
++
++		CFDictionarySetValue(ringer_pair, CFSTR("DeviceUsagePage"), ringer_page);
++		CFDictionarySetValue(ringer_pair, CFSTR("DeviceUsage"), ringer_usage);
++		pairs = CFArrayCreate(NULL, pair_list, 2, &kCFTypeArrayCallBacks);
++		made->has_ringer = true;
++		CFRelease(ringer_page);
++		CFRelease(ringer_usage);
++		CFRelease(ringer_pair);
++	} else {
++		pairs = CFArrayCreate(NULL, (const void **)&pair, 1, &kCFTypeArrayCallBacks);
++	}
+ 	CFDictionarySetValue(properties, CFSTR("PrimaryUsagePage"), page_number);
+ 	CFDictionarySetValue(properties, CFSTR("PrimaryUsage"), usage_number);
+ 	CFDictionarySetValue(properties, CFSTR("DeviceUsagePage"), page_number);
+@@ -1067,6 +1195,16 @@ input_thread(__unused void *arg)
+ 	if (screen != NULL) {
+ 		buttons = make_service(client, "Redwood buttons", HID_PAGE_CONSUMER, HID_USAGE_CONSUMER_CONTROL, false);
+ 	}
++	if (buttons != NULL) {
++		/* Report the unmuted ringer position once opened (Mi 8 has no hardware mute switch). */
++		IOHIDEventRef ringer = IOHIDEventCreateKeyboardEvent(NULL, mach_absolute_time(), HID_PAGE_TELEPHONY,
++		    HID_USAGE_TFON_RING, true, 0);
++		if (ringer != NULL) {
++			IOHIDEventSetIntegerValue(ringer, FIELD_IS_BUILT_IN, 1);
++			IOHIDVirtualServiceClientDispatchEvent(buttons, ringer);
++			CFRelease(ringer);
++		}
++	}
+ 	say("redwood: input: touch screen service %p, buttons %p\n", (void *)screen, (void *)buttons);
+ 	dispatch_semaphore_signal(input_services_made); /* see wait_for_als_arrival() */
+ 	if (screen == NULL) {
+@@ -1252,6 +1390,7 @@ redwood_init(void)
  		}
  		opengl_es();
  		window_server_fixes();
@@ -2077,7 +2222,7 @@ index 0000000000000000000000000000000000000000..3005a33286ba50c98adae0d35c9a8396
 +	ours = name != NULL && (strcmp(name, "BlueTool") == 0 || strcmp(name, "bluetoothd") == 0);
 +}
 diff --git a/userland/src/inject_sb.c b/userland/src/inject_sb.c
-index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..b2d02bf74f34122347c7adbf82cd149c465ffd35 100644
+index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..c5f1e599b0808e6f071df411693d111b770e181d 100644
 --- a/userland/src/inject_sb.c
 +++ b/userland/src/inject_sb.c
 @@ -35,7 +35,11 @@
@@ -2579,250 +2724,10 @@ index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..b2d02bf74f34122347c7adbf82cd149c
  /*
   * Open the tweak loader of the package manager's prefix, when there is one. Nothing here depends on
   * it: without a prefix (or without ElleKit in it) the file is not there and this does nothing.
-@@ -1071,6 +1529,440 @@ load_tweaks(void)
+@@ -1071,6 +1529,200 @@ load_tweaks(void)
  	}
  }
  
-+/*
-+ * The Wi-Fi bars of the status bar are drawn by UIKit's signal view (_UIStatusBarWifiSignalView, of the base class
-+ * _UIStatusBarSignalView), whose "signal mode" says how: 0 inactive (every bar grey), 1 searching, 2 active (the bars that
-+ * count dark). The cellular view stays inactive here for want of CommCenter (hakios, upstream, replaces its setSignalMode:);
-+ * the Wi-Fi view is fed by wifid's link-quality events, and with the radio joined and en0 given an address it is still grey
-+ * (EXP-0221..0230). So, while en0 has an IPv4 address, the Wi-Fi view is made active -- and what it is asked, and how many
-+ * bars it is told, is said in the log once each, to see what the system itself wanted (EXP-0231).
-+ */
-+static bool wifi_has_address(void);
-+extern id objc_loadWeak(id *location);
-+extern id objc_storeWeak(id *location, id obj);
-+static void (*original_wifi_signal_mode)(id self, SEL sel, long mode);
-+static void (*original_wifi_active_bars)(id self, SEL sel, long bars);
-+static long (*original_bar_count)(id self, SEL sel, id update);
-+
-+static long
-+wifi_bar_count(id self, SEL sel, id update)
-+{
-+	static unsigned said;
-+	long count = original_bar_count(self, sel, update);
-+
-+	if (said < 6) {
-+		said++;
-+		say("redwood: wifi: the item counts %ld bars (address %s)\n", count, wifi_has_address() ? "there" : "not there");
-+	}
-+	return count < 3 && wifi_has_address() ? 3 : count;
-+}
-+
-+static bool
-+wifi_has_address(void)
-+{
-+	static time_t checked;
-+	static bool has;
-+	time_t now = time(NULL);
-+	struct ifaddrs *list = NULL, *a;
-+
-+	if (now == checked) {
-+		return has;
-+	}
-+	checked = now;
-+	has = false;
-+	if (getifaddrs(&list) == 0) {
-+		for (a = list; a != NULL; a = a->ifa_next) {
-+			if (a->ifa_addr != NULL && a->ifa_addr->sa_family == AF_INET && strcmp(a->ifa_name, "en0") == 0) {
-+				has = true;
-+			}
-+		}
-+		freeifaddrs(list);
-+	}
-+	return has;
-+}
-+
-+static void
-+wifi_set_signal_mode(id self, SEL sel, long mode)
-+{
-+	static unsigned said_modes;
-+	const char *name = object_getClassName(self);
-+	bool wifi = name != NULL && strstr(name, "Wifi") != NULL;
-+	long wanted = mode;
-+
-+	if (wifi && mode >= 0 && mode < 8 && !(said_modes & (1u << mode))) {
-+		said_modes |= 1u << mode;
-+		say("redwood: wifi: %s asked for signal mode %ld\n", name, mode);
-+	}
-+	if (wifi && mode != 2 && wifi_has_address()) {
-+		wanted = 2;
-+	}
-+	original_wifi_signal_mode(self, sel, wanted);
-+}
-+
-+static void
-+wifi_set_active_bars(id self, SEL sel, long bars)
-+{
-+	static unsigned said_bars;
-+	const char *name = object_getClassName(self);
-+
-+	bool wifi = name != NULL && strstr(name, "Wifi") != NULL;
-+
-+	if (wifi && bars >= 0 && bars < 8 && !(said_bars & (1u << bars))) {
-+		said_bars |= 1u << bars;
-+		say("redwood: wifi: %s told %ld active bars\n", name, bars);
-+	}
-+	if (wifi && bars < 3 && wifi_has_address()) {
-+		bars = 3;
-+	}
-+	original_wifi_active_bars(self, sel, bars);
-+}
-+
-+
-+/* what the Wi-Fi bars' classes offer (names only), once: to find the method that really sets their look (EXP-0232) */
-+static void
-+wifi_classes_dump(void)
-+{
-+	unsigned count = 0, i;
-+	Class *list = objc_copyClassList(&count);
-+
-+	for (i = 0; i < count; i++) {
-+		const char *name = class_getName(list[i]);
-+
-+		if (name != NULL && (strstr(name, "StatusBarWifi") != NULL || strcmp(name, "_UIStatusBarSignalView") == 0)) {
-+			unsigned n = 0, m;
-+			Method *methods = class_copyMethodList(list[i], &n);
-+			char line[1100];
-+			size_t used = (size_t)snprintf(line, sizeof(line), "redwood: wifi: class %s (super %s):", name,
-+			    class_getSuperclass(list[i]) ? class_getName(class_getSuperclass(list[i])) : "-");
-+
-+			for (m = 0; m < n && used < sizeof(line) - 80; m++) {
-+				used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", sel_getName(method_getName(methods[m])));
-+			}
-+			say("%s\n", line);
-+			free(methods);
-+		}
-+	}
-+	free(list);
-+}
-+
-+
-+/*
-+ * The views as they are, not as they are told (EXP-0233): on the home screen the Wi-Fi icon is all dim while the control
-+ * centre's own status bar draws it bright, so the data is right and the home screen's view did not take it (an update that
-+ * never came, or its own mode). Every _UIStatusBarWifiSignalView that gets a window is kept (weakly), and once a second, with
-+ * en0 given an address, each is set active with 3 bars; what it had is said in the log (a few times).
-+ */
-+#define WIFI_VIEWS 12
-+static id wifi_views[WIFI_VIEWS];
-+static void (*original_wifi_move_to_window)(id self, SEL sel);
-+
-+static void
-+wifi_view_move_to_window(id self, SEL sel)
-+{
-+	bool known = false;
-+	unsigned i;
-+
-+	original_wifi_move_to_window(self, sel);
-+	for (i = 0; i < WIFI_VIEWS; i++) {
-+		known |= objc_loadWeak(&wifi_views[i]) == self;
-+	}
-+	for (i = 0; i < WIFI_VIEWS && !known; i++) {
-+		if (objc_loadWeak(&wifi_views[i]) == NULL) {
-+			objc_storeWeak(&wifi_views[i], self);
-+			known = true;
-+		}
-+	}
-+}
-+
-+static void
-+wifi_views_tick(void)
-+{
-+	static unsigned said;
-+	unsigned i, alive = 0;
-+	bool address = wifi_has_address();
-+
-+	for (i = 0; i < WIFI_VIEWS; i++) {
-+		id view = objc_loadWeak(&wifi_views[i]);
-+
-+		if (view == NULL) {
-+			continue;
-+		}
-+		alive++;
-+		if (said < 8) {
-+			long mode = ((long (*)(id, SEL))objc_msgSend)(view, sel_registerName("signalMode"));
-+			long bars = ((long (*)(id, SEL))objc_msgSend)(view, sel_registerName("numberOfActiveBars"));
-+			long total = ((long (*)(id, SEL))objc_msgSend)(view, sel_registerName("numberOfBars"));
-+
-+			said++;
-+			say("redwood: wifi: view %p: mode %ld, %ld of %ld bars, address %s\n", (void *)view, mode, bars, total, address ? "there" : "not there");
-+		}
-+		if (address && original_wifi_active_bars != NULL && original_wifi_signal_mode != NULL) {
-+			original_wifi_signal_mode(view, sel_registerName("setSignalMode:"), 2);
-+			original_wifi_active_bars(view, sel_registerName("setNumberOfActiveBars:"), 3);
-+		}
-+	}
-+	if (said < 8 && alive == 0) {
-+		said++;
-+		say("redwood: wifi: no Wi-Fi signal view with a window yet\n");
-+	}
-+}
-+
-+static void
-+wifi_signal_view_hook(void)
-+{
-+	static const char *const classes[] = { "_UIStatusBarWifiSignalView", "_UIStatusBarSignalView" };
-+	static int tries;
-+	bool done = false;
-+
-+	for (unsigned c = 0; c < sizeof(classes) / sizeof(classes[0]) && !done; c++) {
-+		Class cls = objc_getClass(classes[c]);
-+		Method mode = cls ? class_getInstanceMethod(cls, sel_registerName("setSignalMode:")) : NULL;
-+		Method bars = cls ? class_getInstanceMethod(cls, sel_registerName("setNumberOfActiveBars:")) : NULL;
-+
-+		if (mode != NULL) {
-+			original_wifi_signal_mode = (void (*)(id, SEL, long))method_getImplementation(mode);
-+			method_setImplementation(mode, (IMP)wifi_set_signal_mode);
-+			say("redwood: wifi: -[%s setSignalMode:] replaced (types \"%s\")\n", classes[c], method_getTypeEncoding(mode));
-+			done = true;
-+		}
-+		if (bars != NULL) {
-+			original_wifi_active_bars = (void (*)(id, SEL, long))method_getImplementation(bars);
-+			method_setImplementation(bars, (IMP)wifi_set_active_bars);
-+			say("redwood: wifi: -[%s setNumberOfActiveBars:] replaced\n", classes[c]);
-+		}
-+	}
-+	if (done) {
-+		Class wifi_view = objc_getClass("_UIStatusBarWifiSignalView");
-+		Method move = wifi_view ? class_getInstanceMethod(wifi_view, sel_registerName("didMoveToWindow")) : NULL;
-+		static dispatch_source_t timer;
-+
-+		if (move != NULL && original_wifi_move_to_window == NULL) {
-+			original_wifi_move_to_window = (void (*)(id, SEL))method_getImplementation(move);
-+			method_setImplementation(move, (IMP)wifi_view_move_to_window);
-+		}
-+		if (timer == NULL) {
-+			timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-+			dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 10);
-+			dispatch_source_set_event_handler(timer, ^{
-+				wifi_views_tick();
-+			});
-+			dispatch_resume(timer);
-+		}
-+	}
-+	if (done) {
-+		Class item = objc_getClass("_UIStatusBarWifiItem");
-+		Method count = item ? class_getInstanceMethod(item, sel_registerName("_barCountForUpdate:")) : NULL;
-+
-+		if (count != NULL) {
-+			original_bar_count = (long (*)(id, SEL, id))method_getImplementation(count);
-+			method_setImplementation(count, (IMP)wifi_bar_count);
-+			say("redwood: wifi: -[_UIStatusBarWifiItem _barCountForUpdate:] replaced (types \"%s\")\n", method_getTypeEncoding(count));
-+		}
-+	}
-+	if (!done && tries++ < 6) {
-+		/* UIKit's classes may not be there yet: look again soon */
-+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-+			wifi_signal_view_hook();
-+		});
-+	} else if (!done) {
-+		say("redwood: wifi: no signal view class found\n");
-+	}
-+}
-+
 +/*
 + * The status bar at a screen UIKit has no layout for (fbscale=2: the iPhone X's 375 x 812 points at two pixels a point). UIKit asks
 + * which "visual provider" draws the bar on this screen, finds none and puts up its fallback, a red bar that says "rdar:45025538". The
@@ -3020,17 +2925,16 @@ index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..b2d02bf74f34122347c7adbf82cd149c
  __attribute__((constructor))
  static void
  redwood_springboard_init(void)
-@@ -1097,6 +1989,9 @@ redwood_springboard_init(void)
+@@ -1097,6 +1749,8 @@ redwood_springboard_init(void)
  		});
  		return;
  	}
-+	wifi_signal_view_hook();
 +	status_bar_fallback_hook();
 +	wallpaper_still_hook();
  	/*
  	 * The tweaks of the package manager's prefix, if one is installed: ElleKit's loader
  	 * (/var/jb/usr/lib/TweakLoader.dylib) reads /var/jb/usr/lib/TweakInject and opens the tweaks
-@@ -1196,6 +2091,7 @@ redwood_springboard_init(void)
+@@ -1196,6 +1850,7 @@ redwood_springboard_init(void)
  		if (device && class_getInstanceMethod(object_getClass(device), monitoring)) {
  			((void (*)(id, SEL, BOOL))objc_msgSend)(device, monitoring, YES);
  		}
@@ -3038,7 +2942,7 @@ index 3773115bb3eafe52a3bd0871070b5876fdbdaec6..b2d02bf74f34122347c7adbf82cd149c
  		watch_main_loop();
  		{
  			char arguments[1024] = "";
-@@ -1203,6 +2099,8 @@ redwood_springboard_init(void)
+@@ -1203,6 +1858,8 @@ redwood_springboard_init(void)
  
  			if (sysctlbyname("kern.bootargs", arguments, &size, NULL, 0) == 0) {
  				control_center_fades(arguments);

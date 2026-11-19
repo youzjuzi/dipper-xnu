@@ -460,15 +460,16 @@ index 0000000000000000000000000000000000000000..cb48668ee1eca942b72bff755ba4e30a
 +#endif
 diff --git a/wifi/lx/src-ath10k/lx_ath10k_bus.c b/wifi/lx/src-ath10k/lx_ath10k_bus.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c02b66a1ae
+index 0000000000000000000000000000000000000000..5b9719d505bef6023b624aabd82ff1040a5caf6c
 --- /dev/null
 +++ b/wifi/lx/src-ath10k/lx_ath10k_bus.c
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,532 @@
 +#include <linux/platform_device.h>
 +#include <linux/of.h>
 +#include <linux/of_reserved_mem.h>
 +#include <linux/clk.h>
 +#include <linux/regulator/consumer.h>
++#include <linux/timer.h>
 +#include "core.h"
 +#include "snoc.h"
 +#include "debug.h"
@@ -477,12 +478,13 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +
 +void lx_ath10k_qmi_arm(struct ath10k *);
 +void lx_ath10k_qmi_cancel(struct ath10k *);
++uint32_t lx_pool_free_slots(void);
 +
 +static struct {
 +	struct platform_device pdev;
 +	struct platform_driver *drv;
 +	struct mutex service;
-+	bool initialized, up, mission, fallback, worker, run;
++	bool initialized, up, starting, stopping, stop_requested, mission, fallback, worker, run;
 +	struct napi_struct *napi;
 +	bool napi_enabled, pending;
 +	struct {
@@ -491,6 +493,10 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +		unsigned vector;
 +		bool attached, enabled;
 +	} irq[12];
++	uint64_t irq_dispatches, napi_polls, napi_exhausted, prev_polls;
++	uint32_t prev_pending_tx, prev_confused;
++	unsigned confused_seen, confused_recovered, health_lines;
++	unsigned long long last_health_ns;
 +} bus;
 +
 +/* sdm845.dtsi wifi@18800000; vector n is wired to SPI 414+n by the kernel. */
@@ -581,8 +587,10 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +{
 +	unsigned v = *(unsigned *)arg;
 +	mutex_lock(&bus.service);
-+	if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE) && __atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].fn)
++	if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE) && __atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].fn) {
++		bus.irq_dispatches++;
 +		bus.irq[v].fn(v, bus.irq[v].arg);
++	}
 +	if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE) && __atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].attached)
 +		lx_os_irq_enable(v);
 +	mutex_unlock(&bus.service);
@@ -650,6 +658,70 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +		}
 +}
 +
++static void bus_rx_health(struct ath10k *ar)
++{
++	bool confused, need_refill = false, recovered = false, changed;
++	int fill_cnt, fill_level, mpdus, pending_tx;
++	uint32_t sw_rd, fw_idx, free_slots, tx_cur;
++	unsigned long long now;
++
++	if (ar == NULL || !test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags))
++		return;
++
++	spin_lock_bh(&ar->htt.rx_ring.lock);
++	confused = ar->htt.rx_confused;
++	fill_cnt = ar->htt.rx_ring.fill_cnt;
++	fill_level = ar->htt.rx_ring.fill_level;
++	sw_rd = ar->htt.rx_ring.sw_rd_idx.msdu_payld;
++	fw_idx = ar->htt.rx_ring.alloc_idx.vaddr != NULL ?
++	    __le32_to_cpu(*ar->htt.rx_ring.alloc_idx.vaddr) : 0;
++	if (confused) {
++		bus.confused_seen++;
++		if (lx_os_option("wifi_no_recover") == 0) {
++			ar->htt.rx_confused = false;
++			recovered = true;
++			bus.confused_recovered++;
++			need_refill = fill_cnt < fill_level;
++		}
++	}
++	spin_unlock_bh(&ar->htt.rx_ring.lock);
++
++	if (need_refill)
++		mod_timer(&ar->htt.rx_ring.refill_retry_timer, jiffies);
++
++	free_slots = lx_pool_free_slots();
++	mpdus = atomic_read(&ar->htt.num_mpdus_ready);
++	pending_tx = ar->htt.num_pending_tx;
++	if (confused && bus.confused_seen <= 16) {
++		lx_tell("lx-ath10k: rx_confused#%u fill=%d/%d sw_rd=%u fw_idx=%u mpdus=%d free_slots=%u irqs=%llu polls=%llu recover=%u\n",
++		    bus.confused_seen, fill_cnt, fill_level, sw_rd, (unsigned)fw_idx, mpdus, (unsigned)free_slots,
++		    (unsigned long long)bus.irq_dispatches, (unsigned long long)bus.napi_polls,
++		    recovered ? 1u : 0u);
++	}
++
++	now = lx_os_nanoseconds();
++	if (bus.last_health_ns == 0) {
++		bus.last_health_ns = now;
++		return;
++	}
++	if (now - bus.last_health_ns < 30000000000ull || bus.health_lines >= 60)
++		return;
++	bus.last_health_ns = now;
++	tx_cur = pending_tx < 0 ? 0u : (uint32_t)pending_tx;
++	changed = bus.napi_polls != bus.prev_polls ||
++	    tx_cur != bus.prev_pending_tx ||
++	    bus.confused_seen != bus.prev_confused;
++	if (!changed)
++		return;
++	bus.prev_polls = bus.napi_polls;
++	bus.prev_pending_tx = tx_cur;
++	bus.prev_confused = bus.confused_seen;
++	bus.health_lines++;
++	lx_tell("lx-ath10k: health fill=%d/%d sw_rd=%u fw_idx=%u mpdus=%d ptx=%d free_slots=%u irqs=%llu polls=%llu rec=%u\n",
++	    fill_cnt, fill_level, sw_rd, (unsigned)fw_idx, mpdus, pending_tx, (unsigned)free_slots,
++	    (unsigned long long)bus.irq_dispatches, (unsigned long long)bus.napi_polls, bus.confused_recovered);
++}
++
 +static void rings(void *unused)
 +{
 +	for (;;) {
@@ -661,17 +733,25 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +		if (__atomic_load_n(&bus.mission, __ATOMIC_ACQUIRE)) {
 +			if (bus.fallback)
 +				for (unsigned v = 0; v < 12; v++)
-+					if (__atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].fn)
++					if (__atomic_load_n(&bus.irq[v].enabled, __ATOMIC_ACQUIRE) && bus.irq[v].fn) {
++						bus.irq_dispatches++;
 +						bus.irq[v].fn(v, bus.irq[v].arg);
++					}
 +			lx_os_lock();
 +			bool poll = bus.napi_enabled && bus.pending;
 +			bus.pending = false;
 +			lx_os_unlock();
-+			if (poll && bus.napi && bus.napi->poll(bus.napi, 64) >= 64) {
-+				lx_os_lock();
-+				bus.pending = true;
-+				lx_os_unlock();
++			if (poll && bus.napi) {
++				int done = bus.napi->poll(bus.napi, 64);
++				bus.napi_polls++;
++				if (done >= 64) {
++					bus.napi_exhausted++;
++					lx_os_lock();
++					bus.pending = true;
++					lx_os_unlock();
++				}
 +			}
++			bus_rx_health(platform_get_drvdata(&bus.pdev));
 +		}
 +		mutex_unlock(&bus.service);
 +		lx_pause_ms(1);
@@ -775,12 +855,31 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +int lx_prepare(void) { return lx_base_init() || lx_pool_init() ? ENOMEM : 0; }
 +void lx_stop(void)
 +{
-+	if (!bus.initialized) return;
++	unsigned waited = 0;
++
++	__atomic_store_n(&bus.stop_requested, true, __ATOMIC_RELEASE);
++	while (waited < 15000) {
++		lx_os_lock();
++		bool starting = bus.starting;
++		lx_os_unlock();
++		if (!starting)
++			break;
++		lx_pause_ms(10);
++		waited += 10;
++	}
 +	lx_os_lock();
-+	bool active = bus.up || bus.worker;
++	bool active = bus.initialized && !bus.stopping && (bus.up || bus.worker);
++	if (active)
++		bus.stopping = true;
 +	lx_os_unlock();
 +	if (!active) return;
++
 +	if (bus.up) {
++		lx_station_say();
++		lx_memory_say();
++		lx_tell("lx-ath10k: stop summary irqs=%llu polls=%llu exhausted=%llu rx_confused=%u recovered=%u\n",
++		    (unsigned long long)bus.irq_dispatches, (unsigned long long)bus.napi_polls,
++		    (unsigned long long)bus.napi_exhausted, bus.confused_seen, bus.confused_recovered);
 +		lx_station_withdraw();
 +		lx_station_leave();
 +		lx_ath10k_platform_stop();
@@ -792,41 +891,70 @@ index 0000000000000000000000000000000000000000..d2b5789bcb9cded7c24001ef030c88c0
 +		lx_pause_ms(1);
 +	}
 +	lx_os_irq_detach_all();
++	lx_os_lock();
++	bus.stopping = false;
++	bus.stop_requested = false;
++	lx_os_unlock();
 +}
 +int lx_start(void)
 +{
 +	int ret;
-+	if (bus.up) return EBUSY;
-+	if ((ret = lx_prepare())) return ret;
++
++	lx_os_lock();
++	if (bus.up || bus.starting || bus.stopping) {
++		lx_os_unlock();
++		return EBUSY;
++	}
++	bus.starting = true;
++	bus.stop_requested = false;
++	lx_os_unlock();
++
++	if ((ret = lx_prepare())) goto out_not_up;
 +	if (lx_os_option("wifi_lx") < 2) {
 +		lx_tell("lx-ath10k: FAIL snoc requires wifi_lx=2\n");
-+		return EINVAL;
++		ret = EINVAL;
++		goto out_not_up;
 +	}
 +	if (!bus.initialized) { mutex_init(&bus.service); bus.initialized = true; }
 +	memset(bus.irq, 0, sizeof(bus.irq));
 +	bus.fallback = false; bus.mission = false; bus.pending = false;
++	bus.irq_dispatches = bus.napi_polls = bus.napi_exhausted = bus.prev_polls = 0;
++	bus.prev_pending_tx = bus.prev_confused = 0;
++	bus.confused_seen = bus.confused_recovered = bus.health_lines = 0;
++	bus.last_health_ns = 0;
 +	bus.run = bus.worker = true;
 +	ret = lx_os_thread("ath10k-rings", rings, NULL);
-+	if (ret) { bus.worker = bus.run = false; return ret; }
++	if (ret) { bus.worker = bus.run = false; goto out_not_up; }
 +	ath10k_debug_mask = lx_os_option("wifi_quiet") ? 0 : ATH10K_DBG_BOOT | ATH10K_DBG_QMI | ATH10K_DBG_SNOC;
 +	ret = lx_ath10k_platform_start();
-+	if (ret) { lx_tell("lx-ath10k: FAIL probe %d\n", ret); lx_stop(); return -ret; }
++	if (ret) { lx_tell("lx-ath10k: FAIL probe %d\n", ret); ret = -ret; goto fail; }
 +	struct ath10k *ar = platform_get_drvdata(&bus.pdev);
 +	unsigned long long began = lx_os_nanoseconds();
-+	while (!test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags) && lx_os_nanoseconds() - began < 60000000000ull)
++	while (!__atomic_load_n(&bus.stop_requested, __ATOMIC_ACQUIRE) &&
++	    !test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags) &&
++	    lx_os_nanoseconds() - began < 60000000000ull)
 +		lx_pause_ms(10);
++	if (__atomic_load_n(&bus.stop_requested, __ATOMIC_ACQUIRE)) { ret = EINTR; goto fail; }
 +	if (!test_bit(ATH10K_FLAG_CORE_REGISTERED, &ar->dev_flags)) { ret = ETIMEDOUT; goto fail; }
 +	if (lx_os_option("wifi_station")) ret = lx_station_offer();
 +	else if (lx_os_option("wifi_join")) ret = lx_station_join();
 +	else {
 +		ret = lx_os_option("wifi_scan") ? lx_station_scan() : 0;
++		lx_os_lock(); bus.starting = false; lx_os_unlock();
 +		lx_stop();
 +		return ret;
 +	}
-+	if (!ret) return 0;
++	if (!ret) {
++		lx_os_lock(); bus.starting = false; lx_os_unlock();
++		return 0;
++	}
 +fail:
 +	lx_tell("lx-ath10k: FAIL start %d\n", ret);
++	lx_os_lock(); bus.starting = false; lx_os_unlock();
 +	lx_stop();
++	return ret;
++out_not_up:
++	lx_os_lock(); bus.starting = false; lx_os_unlock();
 +	return ret;
 +}
 +int lx_transmit(const unsigned char *frame, unsigned long size) { return bus.up ? lx_station_send(frame, size) : ENETDOWN; }
@@ -1101,8 +1229,583 @@ index 0000000000000000000000000000000000000000..eefefc0fb1ae86b8551d4adc096fabf2
 +	return 0;
 +}
 +#endif
+diff --git a/wifi/lx/src/lx_80211.c b/wifi/lx/src/lx_80211.c
+index ea753f2711805ee81c47580a054e6cb633842c97..d757937bad6dedb55590b43c427cdeb9a450a2d6 100644
+--- a/wifi/lx/src/lx_80211.c
++++ b/wifi/lx/src/lx_80211.c
+@@ -574,6 +574,9 @@ heard(struct lx_radio *radio, const uint8_t *frame, unsigned length, unsigned fr
+ 		radio->target.elements_length = length - 36;
+ 		memcpy(radio->target.elements, elements, length - 36);
+ 	}
++	if (radio->sta != NULL && memcmp(radio->target.address, frame + 16, ETH_ALEN) == 0) {
++		radio->signal = (int8_t)signal;
++	}
+ 	for (unsigned i = 0; i < radio->heard_count && network == NULL; i++) {
+ 		if (memcmp(radio->heard[i].sender, frame + 16, ETH_ALEN) == 0) {
+ 			network = &radio->heard[i];
+@@ -598,9 +601,6 @@ heard(struct lx_radio *radio, const uint8_t *frame, unsigned length, unsigned fr
+ 		network->elements_length = (uint16_t)(length - 36);
+ 		memcpy(network->elements, elements, length - 36);
+ 	}
+-	if (radio->sta != NULL && memcmp(radio->target.address, frame + 16, ETH_ALEN) == 0) {
+-		radio->signal = (int8_t)signal;
+-	}
+ 	if (signal > network->signal) {
+ 		network->signal = (int8_t)signal;
+ 		network->frequency = (uint16_t)frequency;
+@@ -903,6 +903,10 @@ linuxkpi_ieee80211_rx(struct ieee80211_hw *hw, struct sk_buff *skb, struct ieee8
+ 	const struct ieee80211_rx_status *status = IEEE80211_SKB_RXCB(skb);
+ 
+ 	radio->frames++;
++	if (radio->joined && !(status->flag & RX_FLAG_NO_SIGNAL_VAL) &&
++	    status->signal <= -10 && status->signal >= -100) {
++		radio->signal = (int8_t)status->signal;
++	}
+ 	if (status->flag & RX_FLAG_8023) {
+ 		ethernet_received(radio, skb);
+ 	} else if (skb->len >= 36 && (skb->data[0] == 0x80 || skb->data[0] == 0x50)) {	/* a beacon, an answer to a probe */
+@@ -1217,8 +1221,11 @@ station_abilities(struct lx_radio *radio, const uint8_t *elements, unsigned leng
+ 	if ((e = element(elements, length, 50)) != NULL) {
+ 		rates |= rates_of(band, e + 2, e[1], &basic);
+ 	}
+-	sta->deflink.supp_rates[band->band] = rates;
+-	conf->basic_rates = basic;
++	/* Assoc responses can omit Element 1/50 or carry membership selectors only; preserve Beacon rates when empty. */
++	if (rates != 0) {
++		sta->deflink.supp_rates[band->band] = rates;
++		conf->basic_rates = basic;
++	}
+ 	sta->wme = conf->qos = vendor_element(elements, length, wmm) != NULL;
+ 	sta->deflink.bandwidth = radio->width == 80 ? IEEE80211_STA_RX_BW_80 : radio->width == 40 ? IEEE80211_STA_RX_BW_40 :
+ 	    IEEE80211_STA_RX_BW_20;
+@@ -1557,6 +1564,40 @@ station_width(struct lx_radio *radio, struct linuxkpi_ieee80211_channel *primary
+ 	}
+ }
+ 
++static bool
++pick_target(struct lx_radio *radio, const struct redwood_sta_join *what, const uint8_t tried[][ETH_ALEN], unsigned tried_count)
++{
++	struct lx_target *target = &radio->target;
++
++	lx_os_lock();
++	bzero(target, sizeof(*target));
++	for (unsigned i = 0; i < radio->heard_count; i++) {
++		const struct lx_heard *network = &radio->heard[i];
++		bool seen = false;
++
++		for (unsigned k = 0; k < tried_count; k++) {
++			if (memcmp(tried[k], network->sender, ETH_ALEN) == 0) {
++				seen = true;
++				break;
++			}
++		}
++		if (!seen && network->name_length == what->ssid_length && memcmp(network->name, what->ssid, what->ssid_length) == 0 &&
++		    network->elements_length != 0 && (is_zero_ether_addr(what->bssid) || memcmp(what->bssid, network->sender, ETH_ALEN) == 0) &&
++		    (!target->found || network->signal > target->signal)) {
++			target->found = true;
++			memcpy(target->address, network->sender, ETH_ALEN);
++			target->frequency = network->frequency;
++			target->interval = network->interval;
++			target->capability = network->capability;
++			target->signal = network->signal;
++			target->elements_length = network->elements_length;
++			memcpy(target->elements, network->elements, network->elements_length);
++		}
++	}
++	lx_os_unlock();
++	return (target->found);
++}
++
+ /*
+  * Join the network of that name with that passphrase, in the order mac80211 goes through
+  * (net/mac80211/mlme.c of Linux: ieee80211_mgd_auth(), ieee80211_mgd_assoc(), and what the
+@@ -1580,7 +1621,8 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
+ 	const uint8_t *e;
+ 	const char *obstacle;
+ 	unsigned long long began;
+-	unsigned group_cipher = 0, length;
++	unsigned group_cipher = 0, length, tried_count = 0;
++	uint8_t tried[3][ETH_ALEN];
+ 	int ret, error = 0, answer = ANSWER_NONE;
+ 
+ 	if (name_length == 0 || name_length > sizeof(radio->want)) {
+@@ -1594,241 +1636,252 @@ station_join(struct lx_radio *radio, const struct redwood_sta_join *what)
+ 		station_leave(radio);
+ 		lx_tell("lx: the network joined before is left\n");
+ 	}
+-	INIT_WORK(&radio->group_work, group_rekey);
+-	INIT_WORK(&radio->ba_work, ba_handle);
+-	radio->ba_asked = 0;
+-	bzero(radio->ba, sizeof(radio->ba));
+-	memcpy(radio->want, name, name_length);
+-	radio->want_length = (uint8_t)name_length;
+-	bzero(target, sizeof(*target));
+ 	if ((ret = station_up(radio)) != 0) {
+ 		return (ret);
+ 	}
+ 	vif = radio->vif;
+-	lx_os_lock();
+-	for (unsigned i = 0; i < radio->heard_count; i++) {
+-		const struct lx_heard *network = &radio->heard[i];
+-
+-		if (network->name_length == name_length && memcmp(network->name, name, name_length) == 0 && network->elements_length != 0 &&
+-		    (is_zero_ether_addr(what->bssid) || memcmp(what->bssid, network->sender, ETH_ALEN) == 0) &&
+-		    (!target->found || network->signal > target->signal)) {
+-			target->found = true;
+-			memcpy(target->address, network->sender, ETH_ALEN);
+-			target->frequency = network->frequency;
+-			target->interval = network->interval;
+-			target->capability = network->capability;
+-			target->signal = network->signal;
+-			target->elements_length = network->elements_length;
+-			memcpy(target->elements, network->elements, network->elements_length);
+-		}
+-	}
+-	lx_os_unlock();
+-	for (unsigned attempt = 0; attempt < 3 && !target->found; attempt++) {
+-		station_scan(radio, name, name_length, false, NULL);
+-	}
+-	if (!target->found) {
+-		lx_tell("lx: THE NETWORK THAT IS WANTED WAS NOT HEARD (a name of %u bytes), in three scans\n", name_length);
+-		return (ENOENT);
+-	}
+-	channel = linuxkpi_ieee80211_get_channel(hw->wiphy, target->frequency);
+-	if ((e = element(target->elements, target->elements_length, 3)) != NULL && e[1] == 1 && channel != NULL &&
+-	    linuxkpi_ieee80211_get_channel(hw->wiphy, linuxkpi_ieee80211_channel_to_frequency(e[2], channel->band)) != NULL) {
+-		/* (a beacon can be heard on the channel next to its own: where it says it is counts) */
+-		channel = linuxkpi_ieee80211_get_channel(hw->wiphy, linuxkpi_ieee80211_channel_to_frequency(e[2], channel->band));
+-	}
+-	obstacle = protection(target, &group_cipher);
+-	lx_tell("lx: the network that is wanted: an access point on channel %u (%u MHz) at %d dBm, capabilities %#x, beacons every "
+-	    "%u units; HT %s, VHT %s, WMM %s; %s%s\n", channel != NULL ? channel_of(channel->center_freq) : 0, channel != NULL ?
+-	    channel->center_freq : 0, target->signal, target->capability, target->interval, element(target->elements,
+-	    target->elements_length, 45) ? "yes" : "no", element(target->elements, target->elements_length, 191) ? "yes" : "no",
+-	    vendor_element(target->elements, target->elements_length, wmm) ? "yes" : "no", obstacle == NULL ? "WPA2 with a "
+-	    "passphrase and CCMP: it can be joined" : "IT CANNOT BE JOINED: ", obstacle == NULL ? "" : obstacle);
+-	if (obstacle != NULL || channel == NULL || (channel->flags & IEEE80211_CHAN_DISABLED)) {
+-		return (ENOTSUP);
+-	}
+-
+-	/* the key of the name and the passphrase, and what the handshake needs besides */
+-	began = lx_os_nanoseconds();
+-	bzero(&radio->wpa, sizeof(radio->wpa));
+-	if (what->passphrase_length != 0) {
+-		lx_wpa_pmk(what->passphrase, what->passphrase_length, name, name_length, radio->wpa.pmk);
+-	} else {
+-		memcpy(radio->wpa.pmk, what->pmk, sizeof(radio->wpa.pmk));
+-	}
+-	memcpy(radio->wpa.own, vif->addr, ETH_ALEN);
+-	memcpy(radio->wpa.peer, target->address, ETH_ALEN);
+-	get_random_bytes(radio->wpa.own_nonce, sizeof(radio->wpa.own_nonce));
+-	radio->wpa.rsn = radio->rsn;
+-	radio->wpa.rsn_length = 22;
+-	radio->handshake = LX_WPA_NOTHING;
+-	printf("lx: the key of the name (%u bytes) and the passphrase (%u bytes; 0: the key itself was given) is there: %llu ms\n",
+-	    name_length, what->passphrase_length, (lx_os_nanoseconds() - began) / 1000000ull);
+-
+-	/* the access point's address, and its channel, 20 MHz wide */
+-	vif->bss_conf.bssid = target->address;
+-	vif->bss_conf.beacon_int = target->interval;
+-	vif->bss_conf.assoc_capability = target->capability;
+-	vif->bss_conf.dtim_period = 1;
+-	vif->bss_conf.use_short_slot = (target->capability & 0x0400) != 0 || channel->band != NL80211_BAND_2GHZ;
+-	vif->bss_conf.use_short_preamble = (target->capability & 0x0020) != 0;
+-	memcpy(vif->cfg.ap_addr, target->address, ETH_ALEN);
+-	memcpy(vif->cfg.ssid, name, name_length);
+-	vif->cfg.ssid_len = name_length;
+-	bss_changed(radio, BSS_CHANGED_BSSID);
+-	radio->channel = kzalloc(sizeof(*radio->channel) + hw->chanctx_data_size + 64, GFP_KERNEL);
+-	radio->sta_memory = kzalloc(64 + sizeof(*radio->sta) + hw->sta_data_size, GFP_KERNEL);
+-	if (radio->channel == NULL || radio->sta_memory == NULL) {
+-		error = ENOMEM;
+-		goto out;
+-	}
+-	station_width(radio, channel, &radio->channel->def);
+-	radio->channel->min_def = radio->channel->def;
+-	radio->channel->rx_chains_static = radio->channel->rx_chains_dynamic = 2;
+-	vif->bss_conf.chanreq.oper = radio->channel->def;
+-	mutex_lock(&hw->wiphy->mtx);
+-	ret = radio->ops->add_chanctx(hw, radio->channel);
+-	if (ret == 0) {
+-		vif->bss_conf.chanctx_conf = radio->channel;
+-		ret = radio->ops->assign_vif_chanctx(hw, vif, &vif->bss_conf, radio->channel);
+-	}
+-	mutex_unlock(&hw->wiphy->mtx);
+-	lx_tell("lx: the channel is taken, %u MHz wide around %u MHz: %d\n", radio->width, radio->channel->def.center_freq1, ret);
+-	if (ret != 0) {
+-		error = -ret;
+-		goto out;
+-	}
+-
+-	/* the access point as a station of the driver's: the firmware learns of it, and the radio goes to its channel */
+-	radio->sta = (struct ieee80211_sta *)roundup2((uintptr_t)radio->sta_memory, 64);
+-	memcpy(radio->sta->addr, target->address, ETH_ALEN);
+-	memcpy(radio->sta->deflink.addr, target->address, ETH_ALEN);
+-	radio->sta->deflink.sta = radio->sta;
+-	radio->sta->link[0] = &radio->sta->deflink;
+-	station_abilities(radio, target->elements, target->elements_length);
+-	ret = station_state(radio, IEEE80211_STA_NOTEXIST, IEEE80211_STA_NONE);
+-	printf("lx: the access point is made known to the driver: %d\n", ret);
+-	if (ret != 0) {
+-		kfree(radio->sta_memory);
+-		radio->sta_memory = radio->sta = NULL;
+-		error = -ret;
+-		goto out;
+-	}
+-	radio->reached = IEEE80211_STA_NONE;
+-
+-	/* authentication, of the kind that asks nothing ("open system": the passphrase is proved in the handshake) */
+-	for (unsigned attempt = 0; attempt < 3 && answer == ANSWER_NONE; attempt++) {
++	bzero(tried, sizeof(tried));
++
++	for (;;) {
++		answer = ANSWER_NONE;
++		error = 0;
++		group_cipher = 0;
++		INIT_WORK(&radio->group_work, group_rekey);
++		INIT_WORK(&radio->ba_work, ba_handle);
++		radio->ba_asked = 0;
++		bzero(radio->ba, sizeof(radio->ba));
++		memcpy(radio->want, name, name_length);
++		radio->want_length = (uint8_t)name_length;
+ 		radio->answer = ANSWER_NONE;
+-		if ((skb = frame_new(radio, 30, &frame)) == NULL) {
+-			break;
++		radio->answer_status = 0;
++		radio->answer_length = 0;
++		radio->handshake = LX_WPA_NOTHING;
++		radio->eapol = 0;
++		radio->ba_sessions = radio->ba_refused = 0;
++		if (!pick_target(radio, what, tried, tried_count) && tried_count == 0) {
++			for (unsigned attempt = 0; attempt < 3 && !pick_target(radio, what, tried, tried_count); attempt++) {
++				station_scan(radio, name, name_length, false, NULL);
++			}
++		}
++		if (!target->found) {
++			lx_tell("lx: THE NETWORK THAT IS WANTED WAS NOT HEARD (a name of %u bytes), in three scans\n", name_length);
++			return (ENOENT);
++		}
++		memcpy(tried[tried_count++], target->address, ETH_ALEN);
++		channel = linuxkpi_ieee80211_get_channel(hw->wiphy, target->frequency);
++		if ((e = element(target->elements, target->elements_length, 3)) != NULL && e[1] == 1 && channel != NULL &&
++		    linuxkpi_ieee80211_get_channel(hw->wiphy, linuxkpi_ieee80211_channel_to_frequency(e[2], channel->band)) != NULL) {
++			/* (a beacon can be heard on the channel next to its own: where it says it is counts) */
++			channel = linuxkpi_ieee80211_get_channel(hw->wiphy, linuxkpi_ieee80211_channel_to_frequency(e[2], channel->band));
++		}
++		obstacle = protection(target, &group_cipher);
++		lx_tell("lx: the network that is wanted: an access point on channel %u (%u MHz) at %d dBm, capabilities %#x, beacons every "
++		    "%u units; HT %s, VHT %s, WMM %s; %s%s\n", channel != NULL ? channel_of(channel->center_freq) : 0, channel != NULL ?
++		    channel->center_freq : 0, target->signal, target->capability, target->interval, element(target->elements,
++		    target->elements_length, 45) ? "yes" : "no", element(target->elements, target->elements_length, 191) ? "yes" : "no",
++		    vendor_element(target->elements, target->elements_length, wmm) ? "yes" : "no", obstacle == NULL ? "WPA2 with a "
++		    "passphrase and CCMP: it can be joined" : "IT CANNOT BE JOINED: ", obstacle == NULL ? "" : obstacle);
++		if (obstacle != NULL || channel == NULL || (channel->flags & IEEE80211_CHAN_DISABLED)) {
++			error = ENOTSUP;
++			goto out;
+ 		}
+-		frame = management(radio, frame, 0xb0);
+-		memcpy(frame, "\x00\x00\x01\x00\x00\x00", 6);	/* algorithm 0, step 1, status 0 */
+-		frame_send(radio, skb);
+-		answer = answer_wait(radio, 500);
+-	}
+-	lx_tell("lx: AUTHENTICATION: %s (status %u)\n", answer == ANSWER_AUTHENTICATED ? "the access point accepts" : answer ==
+-	    ANSWER_NONE ? "NO ANSWER from the access point to three requests" : "THE ACCESS POINT REFUSES", radio->answer_status);
+-	if (answer != ANSWER_AUTHENTICATED || (ret = station_state(radio, IEEE80211_STA_NONE, IEEE80211_STA_AUTH)) != 0) {
+-		error = answer == ANSWER_NONE ? ETIMEDOUT : ECONNREFUSED;
+-		goto out;
+-	}
+-	radio->reached = IEEE80211_STA_AUTH;
+ 
+-	/* association: what we can do, and that we want its protection */
+-	answer = ANSWER_NONE;
+-	for (unsigned attempt = 0; attempt < 3 && answer == ANSWER_NONE; attempt++) {
+-		radio->answer = ANSWER_NONE;
+-		if ((skb = frame_new(radio, 28 + 300, &frame)) == NULL) {
+-			break;
++		/* the key of the name and the passphrase, and what the handshake needs besides */
++		began = lx_os_nanoseconds();
++		bzero(&radio->wpa, sizeof(radio->wpa));
++		if (what->passphrase_length != 0) {
++			lx_wpa_pmk(what->passphrase, what->passphrase_length, name, name_length, radio->wpa.pmk);
++		} else {
++			memcpy(radio->wpa.pmk, what->pmk, sizeof(radio->wpa.pmk));
+ 		}
+-		frame = management(radio, frame, 0x00);
+-		/* capabilities: an infrastructure network, protected, and of the access point's own what a station repeats */
+-		frame[0] = (uint8_t)(0x01 | 0x10 | (target->capability & 0x20));
+-		frame[1] = (uint8_t)((target->capability & 0x0500) >> 8);
+-		frame[2] = 10;				/* we listen at least every tenth beacon */
+-		frame[3] = 0;
+-		length = request_elements(radio, frame + 4, group_cipher);
+-		skb_trim(skb, 28 + length);
+-		frame_send(radio, skb);
+-		answer = answer_wait(radio, 500);
+-	}
+-	lx_tell("lx: ASSOCIATION: %s (status %u); we are its station number %u; its answer has %u bytes of elements\n", answer ==
+-	    ANSWER_ASSOCIATED ? "THE ACCESS POINT ACCEPTS" : answer == ANSWER_NONE ? "NO ANSWER from the access point to three "
+-	    "requests" : "THE ACCESS POINT REFUSES", radio->answer_status, radio->aid, radio->answer_length);
+-	if (answer != ANSWER_ASSOCIATED) {
+-		error = answer == ANSWER_NONE ? ETIMEDOUT : ECONNREFUSED;
+-		goto out;
+-	}
+-	station_abilities(radio, radio->answer_elements, radio->answer_length);
+-	radio->sta->aid = radio->aid;
+-	if ((ret = station_state(radio, IEEE80211_STA_AUTH, IEEE80211_STA_ASSOC)) != 0) {
+-		error = -ret;
+-		goto out;
+-	}
+-	radio->reached = IEEE80211_STA_ASSOC;
+-	vif->cfg.assoc = true;
+-	vif->cfg.aid = radio->aid;
+-	bss_changed(radio, BSS_CHANGED_ASSOC | BSS_CHANGED_BEACON_INT | BSS_CHANGED_ERP_SLOT | BSS_CHANGED_ERP_PREAMBLE |
+-	    BSS_CHANGED_QOS);
+-	if ((e = vendor_element(radio->answer_elements, radio->answer_length, wmm)) != NULL && e[1] >= 24 && e[6] == 1) {
+-		/* WMM's parameters: for each of the four classes how long to wait and how long to hold the air */
++		memcpy(radio->wpa.own, vif->addr, ETH_ALEN);
++		memcpy(radio->wpa.peer, target->address, ETH_ALEN);
++		get_random_bytes(radio->wpa.own_nonce, sizeof(radio->wpa.own_nonce));
++		radio->wpa.rsn = radio->rsn;
++		radio->wpa.rsn_length = 22;
++		radio->handshake = LX_WPA_NOTHING;
++		printf("lx: the key of the name (%u bytes) and the passphrase (%u bytes; 0: the key itself was given) is there: %llu ms\n",
++		    name_length, what->passphrase_length, (lx_os_nanoseconds() - began) / 1000000ull);
++
++		/* the access point's address, and its channel, 20 MHz wide */
++		vif->bss_conf.bssid = target->address;
++		vif->bss_conf.beacon_int = target->interval;
++		vif->bss_conf.assoc_capability = target->capability;
++		vif->bss_conf.dtim_period = 1;
++		vif->bss_conf.use_short_slot = (target->capability & 0x0400) != 0 || channel->band != NL80211_BAND_2GHZ;
++		vif->bss_conf.use_short_preamble = (target->capability & 0x0020) != 0;
++		memcpy(vif->cfg.ap_addr, target->address, ETH_ALEN);
++		memcpy(vif->cfg.ssid, name, name_length);
++		vif->cfg.ssid_len = name_length;
++		bss_changed(radio, BSS_CHANGED_BSSID);
++		radio->channel = kzalloc(sizeof(*radio->channel) + hw->chanctx_data_size + 64, GFP_KERNEL);
++		radio->sta_memory = kzalloc(64 + sizeof(*radio->sta) + hw->sta_data_size, GFP_KERNEL);
++		if (radio->channel == NULL || radio->sta_memory == NULL) {
++			error = ENOMEM;
++			goto out;
++		}
++		station_width(radio, channel, &radio->channel->def);
++		radio->channel->min_def = radio->channel->def;
++		radio->channel->rx_chains_static = radio->channel->rx_chains_dynamic = 2;
++		vif->bss_conf.chanreq.oper = radio->channel->def;
+ 		mutex_lock(&hw->wiphy->mtx);
+-		for (unsigned i = 0; i < 4; i++) {
+-			const uint8_t *record = e + 10 + 4 * i;
+-			static const uint8_t classes[4] = { IEEE80211_AC_BE, IEEE80211_AC_BK, IEEE80211_AC_VI, IEEE80211_AC_VO };
+-			struct ieee80211_tx_queue_params params = { .aifs = record[0] & 0x0f, .cw_min = (uint16_t)((1u << (record[1] &
+-				                                    0x0f)) - 1), .cw_max = (uint16_t)((1u << (record[1] >> 4)) - 1),
+-				                                    .txop = (uint16_t)(record[2] | record[3] << 8), .acm = record[0] >> 4 &
+-				                                    1 };
+-
+-			radio->ops->conf_tx(hw, vif, 0, classes[record[0] >> 5 & 3], &params);
++		ret = radio->ops->add_chanctx(hw, radio->channel);
++		if (ret == 0) {
++			vif->bss_conf.chanctx_conf = radio->channel;
++			ret = radio->ops->assign_vif_chanctx(hw, vif, &vif->bss_conf, radio->channel);
+ 		}
+ 		mutex_unlock(&hw->wiphy->mtx);
+-	}
+-	printf("lx: the driver is told of the association (rates %#x, HT %s, VHT %s, %u streams)\n",
+-	    radio->sta->deflink.supp_rates[channel->band], radio->sta->deflink.ht_cap.ht_supported ? "yes" : "no",
+-	    radio->sta->deflink.vht_cap.vht_supported ? "yes" : "no", radio->sta->deflink.rx_nss);
++		lx_tell("lx: the channel is taken, %u MHz wide around %u MHz: %d\n", radio->width, radio->channel->def.center_freq1, ret);
++		if (ret != 0) {
++			error = -ret;
++			goto out;
++		}
+ 
+-	/* the handshake: the access point begins it; its messages come in as frames and are answered where they come in */
+-	began = lx_os_nanoseconds();
+-	lx_os_lock();
+-	while (radio->handshake != LX_WPA_KEYS && radio->handshake != LX_WPA_BAD && radio->answer != ANSWER_GONE &&
+-	    lx_os_nanoseconds() - began < 8000000000ull) {
+-		lx_os_sleep(&radio->handshake, 20 * 1000000ull);
+-	}
+-	lx_os_unlock();
+-	if (radio->handshake != LX_WPA_KEYS) {
+-		lx_tell("lx: THE HANDSHAKE DID NOT COME THROUGH in %llu ms: %s%s (%u of its messages came)\n", (lx_os_nanoseconds() - began) /
+-		    1000000ull, radio->answer == ANSWER_GONE ? "the access point has shown us the door (a wrong passphrase gives this)" :
+-		    radio->handshake == LX_WPA_BAD ? "a message was not good: " : radio->handshake == LX_WPA_ANSWER ? "our message 2 was "
+-		    "not answered (a wrong passphrase gives this)" : "the access point did not begin it", radio->handshake == LX_WPA_BAD ?
+-		    radio->handshake_why : "", radio->eapol);
+-		error = EAUTH;
+-		goto out;
+-	}
+-	lx_pause_ms(30);			/* (for message 4 to have left unciphered, before there is a key to cipher with) */
+-	radio->pairwise_key = key_set(radio, radio->wpa.pairwise, 0, true, &ret);
+-	if (ret == 0) {
+-		radio->group_key = key_set(radio, radio->wpa.group, radio->wpa.group_index, false, &ret);
+-	}
+-	lx_tell("lx: THE KEYS ARE GIVEN TO THE DRIVER, %llu ms after the association: ours with the access point, and the group's "
+-	    "(number %u, %u bytes): %d\n", (lx_os_nanoseconds() - began) / 1000000ull, radio->wpa.group_index,
+-	    radio->wpa.group_length, ret);
+-	if (ret != 0 || (ret = station_state(radio, IEEE80211_STA_ASSOC, IEEE80211_STA_AUTHORIZED)) != 0) {
+-		error = -ret;
+-		goto out;
+-	}
+-	radio->reached = IEEE80211_STA_AUTHORIZED;
+-	radio->sent = radio->sent_lost = radio->received = radio->received_group = radio->rekeys = 0;
+-	radio->joined_at = lx_os_nanoseconds();
+-	radio->signal = target->signal;
+-	radio->joined = true;
+-	lx_os_net_link(1);
+-	lx_tell("lx: THE NETWORK IS JOINED: frames can pass\n");
+-	return (0);
++		/* the access point as a station of the driver's: the firmware learns of it, and the radio goes to its channel */
++		radio->sta = (struct ieee80211_sta *)roundup2((uintptr_t)radio->sta_memory, 64);
++		memcpy(radio->sta->addr, target->address, ETH_ALEN);
++		memcpy(radio->sta->deflink.addr, target->address, ETH_ALEN);
++		radio->sta->deflink.sta = radio->sta;
++		radio->sta->link[0] = &radio->sta->deflink;
++		station_abilities(radio, target->elements, target->elements_length);
++		ret = station_state(radio, IEEE80211_STA_NOTEXIST, IEEE80211_STA_NONE);
++		printf("lx: the access point is made known to the driver: %d\n", ret);
++		if (ret != 0) {
++			kfree(radio->sta_memory);
++			radio->sta_memory = radio->sta = NULL;
++			error = -ret;
++			goto out;
++		}
++		radio->reached = IEEE80211_STA_NONE;
++
++		/* authentication, of the kind that asks nothing ("open system": the passphrase is proved in the handshake) */
++		for (unsigned attempt = 0; attempt < 3 && answer == ANSWER_NONE; attempt++) {
++			radio->answer = ANSWER_NONE;
++			if ((skb = frame_new(radio, 30, &frame)) == NULL) {
++				break;
++			}
++			frame = management(radio, frame, 0xb0);
++			memcpy(frame, "\x00\x00\x01\x00\x00\x00", 6);	/* algorithm 0, step 1, status 0 */
++			frame_send(radio, skb);
++			answer = answer_wait(radio, 500);
++		}
++		lx_tell("lx: AUTHENTICATION: %s (status %u)\n", answer == ANSWER_AUTHENTICATED ? "the access point accepts" : answer ==
++		    ANSWER_NONE ? "NO ANSWER from the access point to three requests" : "THE ACCESS POINT REFUSES", radio->answer_status);
++		if (answer != ANSWER_AUTHENTICATED || (ret = station_state(radio, IEEE80211_STA_NONE, IEEE80211_STA_AUTH)) != 0) {
++			error = answer == ANSWER_NONE ? ETIMEDOUT : ECONNREFUSED;
++			goto out;
++		}
++		radio->reached = IEEE80211_STA_AUTH;
++
++		/* association: what we can do, and that we want its protection */
++		answer = ANSWER_NONE;
++		for (unsigned attempt = 0; attempt < 3 && answer == ANSWER_NONE; attempt++) {
++			radio->answer = ANSWER_NONE;
++			if ((skb = frame_new(radio, 28 + 300, &frame)) == NULL) {
++				break;
++			}
++			frame = management(radio, frame, 0x00);
++			/* capabilities: an infrastructure network, protected, and of the access point's own what a station repeats */
++			frame[0] = (uint8_t)(0x01 | 0x10 | (target->capability & 0x20));
++			frame[1] = (uint8_t)((target->capability & 0x0500) >> 8);
++			frame[2] = 10;				/* we listen at least every tenth beacon */
++			frame[3] = 0;
++			length = request_elements(radio, frame + 4, group_cipher);
++			skb_trim(skb, 28 + length);
++			frame_send(radio, skb);
++			answer = answer_wait(radio, 500);
++		}
++		lx_tell("lx: ASSOCIATION: %s (status %u); we are its station number %u; its answer has %u bytes of elements\n", answer ==
++		    ANSWER_ASSOCIATED ? "THE ACCESS POINT ACCEPTS" : answer == ANSWER_NONE ? "NO ANSWER from the access point to three "
++		    "requests" : "THE ACCESS POINT REFUSES", radio->answer_status, radio->aid, radio->answer_length);
++		if (answer != ANSWER_ASSOCIATED) {
++			error = answer == ANSWER_NONE ? ETIMEDOUT : ECONNREFUSED;
++			goto out;
++		}
++		station_abilities(radio, radio->answer_elements, radio->answer_length);
++		radio->sta->aid = radio->aid;
++		if ((ret = station_state(radio, IEEE80211_STA_AUTH, IEEE80211_STA_ASSOC)) != 0) {
++			error = -ret;
++			goto out;
++		}
++		radio->reached = IEEE80211_STA_ASSOC;
++		vif->cfg.assoc = true;
++		vif->cfg.aid = radio->aid;
++		bss_changed(radio, BSS_CHANGED_ASSOC | BSS_CHANGED_BEACON_INT | BSS_CHANGED_ERP_SLOT | BSS_CHANGED_ERP_PREAMBLE |
++		    BSS_CHANGED_QOS);
++		if ((e = vendor_element(radio->answer_elements, radio->answer_length, wmm)) != NULL && e[1] >= 24 && e[6] == 1) {
++			/* WMM's parameters: for each of the four classes how long to wait and how long to hold the air */
++			mutex_lock(&hw->wiphy->mtx);
++			for (unsigned i = 0; i < 4; i++) {
++				const uint8_t *record = e + 10 + 4 * i;
++				static const uint8_t classes[4] = { IEEE80211_AC_BE, IEEE80211_AC_BK, IEEE80211_AC_VI, IEEE80211_AC_VO };
++				struct ieee80211_tx_queue_params params = { .aifs = record[0] & 0x0f, .cw_min = (uint16_t)((1u << (record[1] &
++					                                    0x0f)) - 1), .cw_max = (uint16_t)((1u << (record[1] >> 4)) - 1),
++					                                    .txop = (uint16_t)(record[2] | record[3] << 8), .acm = record[0] >> 4 &
++					                                    1 };
++
++				radio->ops->conf_tx(hw, vif, 0, classes[record[0] >> 5 & 3], &params);
++			}
++			mutex_unlock(&hw->wiphy->mtx);
++		}
++		printf("lx: the driver is told of the association (rates %#x, HT %s, VHT %s, %u streams)\n",
++		    radio->sta->deflink.supp_rates[channel->band], radio->sta->deflink.ht_cap.ht_supported ? "yes" : "no",
++		    radio->sta->deflink.vht_cap.vht_supported ? "yes" : "no", radio->sta->deflink.rx_nss);
++
++		/* the handshake: the access point begins it; its messages come in as frames and are answered where they come in */
++		began = lx_os_nanoseconds();
++		lx_os_lock();
++		while (radio->handshake != LX_WPA_KEYS && radio->handshake != LX_WPA_BAD && radio->answer != ANSWER_GONE &&
++		    lx_os_nanoseconds() - began < 8000000000ull) {
++			lx_os_sleep(&radio->handshake, 20 * 1000000ull);
++		}
++		lx_os_unlock();
++		if (radio->handshake != LX_WPA_KEYS) {
++			lx_tell("lx: THE HANDSHAKE DID NOT COME THROUGH in %llu ms: %s%s (%u of its messages came)\n", (lx_os_nanoseconds() - began) /
++			    1000000ull, radio->answer == ANSWER_GONE ? "the access point has shown us the door (a wrong passphrase gives this)" :
++			    radio->handshake == LX_WPA_BAD ? "a message was not good: " : radio->handshake == LX_WPA_ANSWER ? "our message 2 was "
++			    "not answered (a wrong passphrase gives this)" : "the access point did not begin it", radio->handshake == LX_WPA_BAD ?
++			    radio->handshake_why : "", radio->eapol);
++			error = radio->answer == ANSWER_GONE && radio->eapol >= 2 ? ECONNREFUSED : EAUTH;
++			goto out;
++		}
++		lx_pause_ms(30);		/* (for message 4 to have left unciphered, before there is a key to cipher with) */
++		radio->pairwise_key = key_set(radio, radio->wpa.pairwise, 0, true, &ret);
++		if (ret == 0) {
++			radio->group_key = key_set(radio, radio->wpa.group, radio->wpa.group_index, false, &ret);
++		}
++		lx_tell("lx: THE KEYS ARE GIVEN TO THE DRIVER, %llu ms after the association: ours with the access point, and the group's "
++		    "(number %u, %u bytes): %d\n", (lx_os_nanoseconds() - began) / 1000000ull, radio->wpa.group_index,
++		    radio->wpa.group_length, ret);
++		if (ret != 0 || (ret = station_state(radio, IEEE80211_STA_ASSOC, IEEE80211_STA_AUTHORIZED)) != 0) {
++			error = -ret;
++			goto out;
++		}
++		radio->reached = IEEE80211_STA_AUTHORIZED;
++		/* APs that enforce a client-cap often deauthenticate right after message 4 / key install. */
++		lx_pause_ms(40);
++		if (radio->answer == ANSWER_GONE) {
++			lx_tell("lx: THE ACCESS POINT DROPPED US RIGHT AFTER KEY INSTALL (reason %u)\n", radio->answer_status);
++			error = ECONNREFUSED;
++			goto out;
++		}
++		radio->sent = radio->sent_lost = radio->received = radio->received_group = radio->rekeys = 0;
++		radio->joined_at = lx_os_nanoseconds();
++		radio->signal = target->signal;
++		radio->joined = true;
++		lx_os_net_link(1);
++		lx_tell("lx: THE NETWORK IS JOINED: frames can pass\n");
++		return (0);
+ out:
+-	station_leave(radio);
+-	return (error);
++		station_leave(radio);
++		if (tried_count < 3 && is_zero_ether_addr(what->bssid) &&
++		    (error == ECONNREFUSED || error == ETIMEDOUT || error == EAUTH) &&
++		    pick_target(radio, what, tried, tried_count)) {
++			lx_tell("lx: trying another access point for the same network (attempt %u)\n", tried_count + 1);
++			continue;
++		}
++		return (error);
++	}
+ }
+ 
+ /* ---- for the rest of the layer ---------------------------------------------------------------------------- */
 diff --git a/wifi/lx/src/lx_base.c b/wifi/lx/src/lx_base.c
-index df4daeea097697f1ceb0957f48128fc5abdc49c9..01af3111fafa6c4a6fffda724286707c6f184171 100644
+index df4daeea097697f1ceb0957f48128fc5abdc49c9..924b62669fbb7550971e80fca487a5b008bd7972 100644
 --- a/wifi/lx/src/lx_base.c
 +++ b/wifi/lx/src/lx_base.c
 @@ -755,7 +755,7 @@ iounmap(void *address)
@@ -1114,6 +1817,56 @@ index df4daeea097697f1ceb0957f48128fc5abdc49c9..01af3111fafa6c4a6fffda724286707c
  #define POOL_RINGS	(12u << 20)		/* (the data path's rings and link descriptors come to about 6 MB) */
  #define POOL_SLOT	4096u
  #define POOL_SLOTS	((POOL_SIZE - POOL_RINGS) / POOL_SLOT)
+@@ -852,17 +852,22 @@ lkpi_dma_map_phys(struct device *dev, vm_paddr_t address, size_t length, enum dm
+ 		printf("lx: memory is given to the radio that it cannot reach (%zu bytes)\n", length);
+ 		return (DMA_MAPPING_ERROR);
+ 	}
++	/* Order CPU writes to VM_WIMG_WCOMB pool memory before descriptor/doorbell publication. */
++	__asm__ volatile ("dsb sy" ::: "memory");
+ 	return (address);
+ }
+ 
+ void
+ lkpi_dma_unmap(struct device *dev, dma_addr_t address, size_t length, enum dma_data_direction direction, unsigned long attributes)
+ {
++	/* Order device DMA writes to VM_WIMG_WCOMB pool memory before CPU reads. */
++	__asm__ volatile ("dsb sy" ::: "memory");
+ }
+ 
+ void
+ linuxkpi_dma_sync(struct device *dev, dma_addr_t address, size_t length, bus_dmasync_op_t op)
+ {
++	__asm__ volatile ("dsb sy" ::: "memory");
+ }
+ 
+ /* ---- socket buffers --------------------------------------------------------------------------- */
+@@ -899,6 +904,8 @@ linuxkpi_dev_alloc_skb(size_t size, gfp_t gfp)
+ 	skb->shinfo = (struct skb_shared_info *)((uint8_t *)skb + roundup2(sizeof(struct sk_buff), 64));
+ 	skb->truesize = size + NET_SKB_PAD;
+ 	skb->head = skb->data = pool.memory + POOL_RINGS + (size_t)slot * POOL_SLOT;
++	/* Recycled slots may hold stale RX descriptors (e.g. LAST_MSDU) from prior use. */
++	bzero(skb->head, 512 < POOL_SLOT ? 512 : POOL_SLOT);
+ 	skb_reset_tail_pointer(skb);
+ 	skb->end = skb->head + size + NET_SKB_PAD;
+ 	skb_reserve(skb, NET_SKB_PAD);
+@@ -1222,6 +1229,17 @@ lx_memory_say(void)
+ 	    allocations, allocated >> 10, POOL_SIZE >> 20, pool.rings_used >> 10, POOL_SLOTS - pool.free_count, POOL_SLOTS);
+ }
+ 
++uint32_t
++lx_pool_free_slots(void)
++{
++	uint32_t count;
++
++	lx_os_lock();
++	count = pool.free_count;
++	lx_os_unlock();
++	return (count);
++}
++
+ int
+ lx_base_init(void)
+ {
 diff --git a/xnu-build.sh b/xnu-build.sh
 index 8f851bbb22e20eea041bcd34d4cd3c297b87f2d4..9d1337f6e346764939c3e678305fd87aba13b30a 100755
 --- a/xnu-build.sh

@@ -4,6 +4,25 @@
 
 记录影响使用和构建的变化。详细测试过程见 [复现记录](docs/validation/REPRODUCTION.md)，当前支持范围见 [功能状态](docs/STATUS.md)。
 
+## 2026-11-19
+
+- **原生 Wi-Fi 状态栏信号格修复（LQM 事件长度收敛 + Mach 服务预声明）**：
+  - 定位出连网后状态栏可见扇形但 `0` 格全灰的根因：`bsd/dev/redwood_apple80211.c` 中的 `struct apple80211_lqm_event` 为 `0xc0`（192 B），拼上 `KEV_MSG_HEADER_SIZE (24)` 与 `interface_name (16)` 后总长 `232 B > MLEN (224 B)`，导致 `kev_post_msg()` 将所有 `EVENT_LQM_CHANGED (39)` 以 `EMSGSIZE` 静默丢弃。
+  - 将结构体收敛至 `0xb4`（180 B，总长 `220 <= 224`）并加入编译期 `MLEN` `_Static_assert`，通过 `clamp_rssi()` 归一化信号值、通过 `redwood_wifi_tell()` 输出 `kev_post_msg()` 失败及首次 LQM 投递日志，并在 `userland/mkjobs.py` 为 `com.apple.wifid` 预声明 `com.apple.wifi.manager`（`ResetAtClose`）消除 `SpringBoard` 启动查端口竞态。
+  - 小米 8 实机验证（900 s Wi-Fi 运行）：`wifid` 连续收到 `218` 次 `linkQualityDidChange`，`kev_post_msg` 失败 `0` 次，`com.apple.wifi.manager` 查找失败 `0` 次，无 UI hook 下原生状态栏信号格正常点亮。
+- **TAS2557 bit-bang I2C 忙等修复与校验诊断**：
+  - 定位偶发休眠后无声（`latched=coefficient`）：因 `dipper` 未设置 `cpu_idle_latency`（值恒为 `0`），`bsd/dev/mi8_tas2557.c` 原 `native_delay()` 调用 `delay_for_interval()` 会在每个 `3 us` 软件 I2C 半周期发生阻塞与线程切换，高负载时将 `session_check()`（`486–1000+ ms`）拖过 `1000 ms` 预算并触发安全锁死。
+  - 将 `native_delay()` 中 `<= 50 us` 的短延迟改回基于 `mach_absolute_time()` 的忙等自旋（与 `bsd/dev/mi8_fts.c` 一致），并将 `check_us`、`check_y`、`check_err` 持久写入 `mi8_tas_session_report()`；保持 `Y == 0x5d` 与 `1000 ms` 硬件保护门限不变。
+  - 小米 8 实机多轮铃声唤醒/静音/再唤醒验证通过：`session_check()` 耗时由 `486–1000+ ms` 降至 `207–208 ms`（`checks=2/2`），唤醒总预热缩至 `31 ms`（`startup=4`、`health=2`、`unmute=3 ms`），`latched=no`、`cleanup=complete`。
+
+## 2026-11-18
+
+- **Wi-Fi DMA 屏障、`rx_confused` 恢复与退出汇总**（已在小米 8 18 分钟 `0 panic` 实机测试中与音量 HUD、`/apps` 侧载一并验证）：在 `wifi/lx/src/lx_base.c` 的 DMA 映射/同步函数补充 `dsb sy` 内存屏障并对复用 RX 池槽前 512 字节清零；在 `wifi/lx/src-ath10k/lx_ath10k_bus.c` 加入有界 `rx_confused` 现场诊断与定时器重补恢复（可用 `wifi_no_recover=1` 关闭）、30 秒活跃健康日志、无竞态起停同步与 `lx_stop()` 统计汇总；在 `bsd/dev/redwood_lx.c` 与 `osfmk/arm64/loader_return.c` 接入 `mi8_wifi_stop()`。
+- **音量键“声音关闭”HUD 修复**：在 `userland/src/inject.c` 的 `Redwood buttons` 虚拟 HID 服务声明并响应标准 Telephony Ring Switch（`0x0b` / `0x2e`），从输入源消除静音误报且零 `SpringBoard` hook。
+- **用户应用联合挂载侧载收敛与实时日志工具**：导出 `bsd/vfs/vfs_attrlist.c`（`getattrlistbulk` `MNT_UNION` 穿透）、`userland/build.sh`（默认 `APPS=1`）与 `userland/src/init.c`（干净 `/apps` 联合挂载）；新增只读 `tools/tests/device-log.py`（`snapshot` / `watch` / `stop` 及 `returned <bytes> 0` 终态保护），并修复 `build-payload.py --link-inputs` 缺失 `import os`。
+- **子系统热退出收尾与跨轮恢复**：补充 `mi8_pcm_session_stop_request()`（`bsd/dev/mi8_audio_pcm.c`）、`mi8_bt_stop()`（`bsd/dev/mi8_bt.c`）、`mi8_rproc_stop()`（`bsd/dev/mi8_rproc.c`，热停跳过 `WLFW` MSA 主机回收）、`mi8_gpu_quiesce()`（`bsd/dev/mi8_adreno.c` / `redwood_adreno.c`），以及 Wi-Fi Beacon 速率保留与多 AP 入网回退（`wifi/lx/src/lx_80211.c`）。实机 `oem stop` 约 5 秒退回 `xnuloader`（`returned <bytes> 0`），因 `halt port modem` 未归闲，含基带轮次间仍需冷重启。
+- **移除 BT/Wi-Fi 用户态 UI 补丁、动态 CPU/DDR 调频与 GPU 刷新合并**（已实机验证）：`iokit/Kernel/RedwoodBT.cpp` 原生发布 `AppleOLYHAL` 并移除 `libredwood-bt.dylib`；`iokit/Kernel/RedwoodWLAN.cpp` + `bsd/dev/redwood_net.c` 暴露 `"wlan"` 父节点并提前注册 `en0`，删除 `inject_sb.c` 状态栏 Wi-Fi hook；加入由触摸/GPU 触发的 `mi8_perf_kick()` 动态 CPU/DDR 调度（空闲自动降至 `825 MHz` / DDR `2/16`，保留 `66 °C` 温控上限）与 `iokit/Kernel/RedwoodGPU.cpp` 内 `2 ms` 帧内 `IOSurface` 刷新合并（`fSyncGen` / `pushedGen`）。
+
 ## 2026-11-12
 
 - **扬声器有声音了，且缺省开启**：iOS 的铃声、键盘音、视频等声音经音频 DSP 和 TAS2557 功放从扬声器播放；蓝牙、电量、震动与手电也改为缺省开启，载荷无需额外参数。一次设备试用全部正常；音质未调校，功耗与长时间运行未验收。下文按时间记录各步骤。

@@ -9,7 +9,7 @@ Run commands from the repository root. Public tools are grouped by purpose; loca
 | `prepare/` | Pinned source preparation, patch export/replay/scan, workspace status/cleanup, SDK checks, IPSW extraction | [prepare.py](prepare/prepare.py), [patchtool.py](prepare/patchtool.py), [status.py](prepare/status.py), [check-sdk.py](prepare/check-sdk.py), [prepare-ios.py](prepare/prepare-ios.py) |
 | `build/` | Kernel, loader/UEFI, and userspace builds; `darwin.img` and payload packaging | [build-kernel.sh](build/build-kernel.sh), [build-loader-uefi.sh](build/build-loader-uefi.sh), [build-userland.sh](build/build-userland.sh), [build-payload.py](build/build-payload.py), [pack-darwin.py](build/pack-darwin.py) |
 | `partition/` | Offline GPT partition/restore plan generation and readback checks | [partition-darwin.py](partition/partition-darwin.py), [restore-android-layout.py](partition/restore-android-layout.py) |
-| `tests/` | Unified host test runner, clean replay, synthetic GPT, CLI, audio, and workflow tests | [run-tests.py](tests/run-tests.py), [test-patchtool.py](tests/test-patchtool.py), [test-workflow-tools.py](tests/test-workflow-tools.py), [test-partition-darwin.py](tests/test-partition-darwin.py), [test-restore-android-layout.py](tests/test-restore-android-layout.py) |
+| `tests/` | Unified host test runner, clean replay, synthetic GPT, CLI, audio, and workflow tests | [run-tests.py](tests/run-tests.py), [test-patchtool.py](tests/test-patchtool.py), [test-workflow-tools.py](tests/test-workflow-tools.py), [test-partition-darwin.py](tests/test-partition-darwin.py), [test-restore-android-layout.py](tests/test-restore-android-layout.py), [device-log.py](tests/device-log.py) |
 
 `build/cc-gnu17/cc` is a compiler compatibility wrapper kept in place for the UEFI build entry point. Partition tools generate host plans only; generated device scripts are reviewed and run by the owner and never touch a phone automatically.
 
@@ -43,6 +43,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py prune-runs [--apply
 - `prune-runs`: runs in dry-run mode by default; with `--apply`, removes leftover `replay-tree*` directories and build intermediates (`.o`, `.cpo`, `.d`, `.a`, `*.dSYM`, `mach.*.unstripped*`, while preserving `mach.development.bcm2837` and `kernel.macho`) inside `obj/`, `sym/`, `dst/`, hard-links identical large images (`.apfs`, `.img`, `.macho`, `.efi`) on the same filesystem, and logs deleted entries to `_pruned-YYYYMMDD.tsv`.
 
 `bash tools/build/build-kernel.sh [-j N] [--with-ath10k] [--out DIR]` runs from the repository root, auto-detects `THEOS` (`THEOS` env, `local/theos`, or `../dependencies/theos`), passes `SOURCE_DIR="$XNU_SRC"` explicitly to build incrementally in the standard `BUILD/` directory, and optionally copies `kernel.macho`, `kernel.sha256`, and `kernel-build.log` to `--out DIR`. `build-userland.sh` shares the same `THEOS` fallback detection, and `build-payload.py --link-inputs` hard-links read-only inputs on the same filesystem to save disk space.
+
+`PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/device-log.py {snapshot,watch,stop} --out <path>` reads logs (`oem log` + `get_staged`) or requests an orderly return (`oem stop`) only after verifying `getvar product == xnuloader`; `watch` streams incremental lines while handling loader ring wrap to avoid losing middle-session logs to the final 32 KiB tail cap.
 
 ## Patch Export and Replay
 

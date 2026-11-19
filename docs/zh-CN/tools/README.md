@@ -9,7 +9,7 @@
 | prepare/ | 固定源码准备、补丁维护、状态与清理、SDK 校验、IPSW 提取 | [prepare.py](../../../tools/prepare/prepare.py)、[patchtool.py](../../../tools/prepare/patchtool.py)、[status.py](../../../tools/prepare/status.py)、[check-sdk.py](../../../tools/prepare/check-sdk.py)、[prepare-ios.py](../../../tools/prepare/prepare-ios.py) |
 | build/ | 内核、loader/UEFI、用户态编译及镜像/载荷打包 | [build-kernel.sh](../../../tools/build/build-kernel.sh)、[build-loader-uefi.sh](../../../tools/build/build-loader-uefi.sh)、[build-userland.sh](../../../tools/build/build-userland.sh)、[build-payload.py](../../../tools/build/build-payload.py)、[pack-darwin.py](../../../tools/build/pack-darwin.py) |
 | partition/ | 离线生成分区/恢复方案，核验回读 | [partition-darwin.py](../../../tools/partition/partition-darwin.py)、[restore-android-layout.py](../../../tools/partition/restore-android-layout.py) |
-| tests/ | 统一主机测试入口、合成 GPT、CLI、音频与工作流回归测试 | [run-tests.py](../../../tools/tests/run-tests.py)、[test-patchtool.py](../../../tools/tests/test-patchtool.py)、[test-workflow-tools.py](../../../tools/tests/test-workflow-tools.py)、[test-partition-darwin.py](../../../tools/tests/test-partition-darwin.py)、[test-restore-android-layout.py](../../../tools/tests/test-restore-android-layout.py) |
+| tests/ | 统一主机测试入口、合成 GPT、CLI、音频与工作流回归测试 | [run-tests.py](../../../tools/tests/run-tests.py)、[test-patchtool.py](../../../tools/tests/test-patchtool.py)、[test-workflow-tools.py](../../../tools/tests/test-workflow-tools.py)、[test-partition-darwin.py](../../../tools/tests/test-partition-darwin.py)、[test-restore-android-layout.py](../../../tools/tests/test-restore-android-layout.py)、[device-log.py](../../../tools/tests/device-log.py) |
 
 `build/cc-gnu17/cc` 是构建兼容包装器，保留原位置，由 UEFI 构建入口使用。分区工具只在主机生成方案；生成的设备脚本由持有人核对后执行，不会自动操作手机。
 
@@ -43,6 +43,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B tools/prepare/status.py prune-runs [--apply
 - `prune-runs`：默认只读预览（dry-run），加 `--apply` 时清理 `work/runs/` 下残留的 `replay-tree*` 目录及 `obj/`、`sym/`、`dst/` 编译中间产物（`.o`、`.cpo`、`.d`、`.a`、`*.dSYM`、`mach.*.unstripped*`，保留 `mach.development.bcm2837` 与 `kernel.macho`），并将同文件系统下的重复大镜像（`.apfs`、`.img`、`.macho`、`.efi`）替换为硬链接，结果写入 `_pruned-YYYYMMDD.tsv`。
 
 `bash tools/build/build-kernel.sh [-j N] [--with-ath10k] [--out DIR]` 在仓库根目录执行，自动探测 `THEOS`（依次检查环境变量 `THEOS`、`local/theos`、`../dependencies/theos`），显式传入 `SOURCE_DIR="$XNU_SRC"` 调用标准 `BUILD` 目录增量编译内核；指定 `--out DIR` 时把日志、内核及 `.sha256` 写入新建运行目录。`build-userland.sh` 同样支持上述 `THEOS` 回退探测；`build-payload.py --link-inputs` 支持在同一文件系统下以硬链接复用只读输入以节省运行目录空间。
+
+`PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/device-log.py {snapshot,watch,stop} --out <路径>` 在确认 `getvar product == xnuloader` 后执行只读日志抓取（`oem log` + `get_staged`）或优雅退回（`oem stop`）；其中 `watch` 支持在内核环形日志滚动时增量追加实时输出，避免返回阶段只剩 32 KiB 尾部摘要。
 
 ## 补丁导出与重放
 

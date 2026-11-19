@@ -15,7 +15,7 @@
       },
       {
         "path": "bsd/dev/mi8_adreno.c",
-        "sha256": "cda3420e1e486e0162e94fe804d8a0abd8518c9355b86dd4b7f17f14aae0cff7",
+        "sha256": "0f9dd7223d32c8e413c53cedc2e140952f1b4029f900e2a2c87ed67bbfe24692",
         "mode": "0o664"
       },
       {
@@ -30,12 +30,12 @@
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.c",
-        "sha256": "dcf44c42a01670d6127a2d25583f133cf28ec261518b5f9e9863950bdabcd6f9",
+        "sha256": "86624206fec683a417265320ad16d6fafa2886255aa28a6764e8fd9731ee093e",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.h",
-        "sha256": "64a3981a74832a16705580bbe469febe872e80929e50d7f1cc45840cb40979d0",
+        "sha256": "4048b7c45cc00ce5892a85cb331ee6bfa2322d8a7b8239bd5fc201812e9d7cd9",
         "mode": "0o664"
       },
       {
@@ -60,7 +60,7 @@
       },
       {
         "path": "bsd/dev/mi8_audio_smmu.c",
-        "sha256": "19f131d5d22fdbe8f64551370a3f9fa6905c35997cc17342dd10bf816cc5c9e5",
+        "sha256": "38a1686c4f7d1d1027c4340f32c9646ef6b0d01e7ac78fddb07cab59d98ba7f3",
         "mode": "0o664"
       },
       {
@@ -70,7 +70,7 @@
       },
       {
         "path": "bsd/dev/mi8_bt.c",
-        "sha256": "28b9ca54996d9ef438e075d95350b3eec36ddac784b9f59f7cf7434979e94a92",
+        "sha256": "180d96c9c9d16caec1ba95554b4773d998a1b35288a8ce0d4855b811b777c5d3",
         "mode": "0o664"
       },
       {
@@ -105,12 +105,12 @@
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "7510cc1878f1651178b5d7bb903281b69cc26b12e88ca562d8c7ec137d72837d",
+        "sha256": "907334955bae93d75475a93f74e65c82761745f218f7724744af8851e864c349",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_tas2557.c",
-        "sha256": "495ed7db3a8c76a620c43a4000d21172eed5be5787323891289af1bff5fd8c9d",
+        "sha256": "8dbbd9ac6bff1f795f56d71733ad8f9e3859e807eded4817415b3cd6482e7afa",
         "mode": "0o664"
       },
       {
@@ -145,12 +145,12 @@
       },
       {
         "path": "bsd/dev/redwood_adreno.c",
-        "sha256": "37f205855b3356c9577f17fa41e4f590316198486d9a67c261e1787c4ca537cd",
+        "sha256": "728e8d4db9627586eebe42a4c7e351f40092b5c24a2295360012394354155fc8",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/redwood_apple80211.c",
-        "sha256": "03a45956e6b65a543f9ad27c1492071625ebf9851fb97b9fe2bb9b5e35edcf04",
+        "sha256": "b7babce88d919792aa1118271ea5fef83e017ee8138862e0ded939aa8424e7ac",
         "mode": "0o664"
       },
       {
@@ -180,12 +180,12 @@
       },
       {
         "path": "bsd/dev/redwood_input.c",
-        "sha256": "caf4068ad0c023257ac26e0768affd0a9de74f8ff92009a35fd816a8ce872c93",
+        "sha256": "05ee732b1e08e8a558fb3185f3ff834ed39f19c058229166ed0a83e96ecdc705",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/redwood_lx.c",
-        "sha256": "41b02f616aba22c6257caad8206e543fb00c56fcd8ba82db27a5c49c5e399749",
+        "sha256": "daee57b7fadea0246203bda5def7a445f599077713169e33e4156636de6eb298",
         "mode": "0o664"
       },
       {
@@ -210,7 +210,7 @@
       },
       {
         "path": "bsd/sys/mi8_lx.h",
-        "sha256": "a47ea5fcd10cefb4cc1ddd08409af6058914f8a93c349cc5720423a5b5b3bc33",
+        "sha256": "71cca9cb0ae79f6b8081c9c740e01e21be298966cfaa7ae01d85b7766a43c77f",
         "mode": "0o664"
       },
       {
@@ -220,12 +220,17 @@
       },
       {
         "path": "bsd/sys/redwood_input.h",
-        "sha256": "49f16603f0b1ee9cd256c901d464d097395ac0c9a9733aa15edddc8b7cfaf5ee",
+        "sha256": "f166749159d738b4b7695187b2f78b803a4fffe143c6822dfb1d13410c55b744",
         "mode": "0o664"
       },
       {
         "path": "bsd/sys/redwood_lx.h",
         "sha256": "ea95d98a326dead7651d386e0495186fcb195ec82ff4e966e2172aaa8caee391",
+        "mode": "0o664"
+      },
+      {
+        "path": "bsd/vfs/vfs_attrlist.c",
+        "sha256": "aa41cad2b67a0ca2986092906f1650e7862ee805a7dfde9ac5b388a7f25f6da5",
         "mode": "0o664"
       },
       {
@@ -245,12 +250,17 @@
       },
       {
         "path": "iokit/Kernel/RedwoodBT.cpp",
-        "sha256": "1f34a7237cb865b400a79d3e8e84b2ca1c4402043979f74ba1f7f5c51bc57bab",
+        "sha256": "02076aee3ff87f781339b9d2d628ece0f01675d0ee4d00fa78104e39a85e8f2d",
         "mode": "0o664"
       },
       {
         "path": "iokit/Kernel/RedwoodGPU.cpp",
-        "sha256": "08771e80db344bc06378afb1efbbae43a3202e11f79ddafa23b9b3b7d9571cb2",
+        "sha256": "044e4abe44913239ed09213d8733fe2dee6b42d2244cfcf8fced1e6525022843",
+        "mode": "0o664"
+      },
+      {
+        "path": "iokit/Kernel/RedwoodWLAN.cpp",
+        "sha256": "f30c794b13c395acb05051fe0ccb6fdfb43cd08da87b84bc8a3d513f85bfe23f",
         "mode": "0o664"
       },
       {
@@ -270,7 +280,7 @@
       },
       {
         "path": "osfmk/arm64/loader_return.c",
-        "sha256": "f8b541132f807fa66bbab6237e4786fde5f72c89c143fa7b4b640711a3518445",
+        "sha256": "d36a637f19c4c6aa94b33e0e85f36d2018e9917783ef045e02fa1508c4b99d8f",
         "mode": "0o664"
       },
       {
@@ -386,7 +396,7 @@
       },
       {
         "path": "wifi/lx/src-ath10k/lx_ath10k_bus.c",
-        "sha256": "5c41ba07216f41b345d24ae578aec20021231697c9994e30ec66a82a77358344",
+        "sha256": "e6caaec100bbf4e6f3b1d3610f2c28ac400fdf941a974ea2b4c313a973ca27df",
         "mode": "0o664"
       },
       {
@@ -400,8 +410,13 @@
         "mode": "0o664"
       },
       {
+        "path": "wifi/lx/src/lx_80211.c",
+        "sha256": "9e1828dc438104b19d875aa594bd7ff6caef004622a5698a65bf0c976a881880",
+        "mode": "0o664"
+      },
+      {
         "path": "wifi/lx/src/lx_base.c",
-        "sha256": "7dc8c996c5e684af4435831eb553274e85294668a5651c73a6993153a1073aca",
+        "sha256": "a433f47321678e25282f15a6ceb948e347f2e6bd80a7ea16795f60c04ac2ce06",
         "mode": "0o664"
       },
       {
@@ -437,12 +452,12 @@
       },
       {
         "path": "userland/build.sh",
-        "sha256": "2289caa6a3a0f9eaab1fcb8909604f93c74199d17d94baaf2b62ed8477be73ac",
+        "sha256": "77991ededa56af7141c1f6a15bca38444789443b1f648b414b33c339fb35b8e3",
         "mode": "0o755"
       },
       {
         "path": "userland/mkjobs.py",
-        "sha256": "5bdc28cac47021fa5af6ba759ab86a02ca125891e1f52b26943635a932307e02",
+        "sha256": "462a637136112ee84659ac1967e1a116b691fb3dbae91dd37885b09de30198da",
         "mode": "0o755"
       },
       {
@@ -457,12 +472,12 @@
       },
       {
         "path": "userland/src/init.c",
-        "sha256": "04b40b62dbcb7a0538e50967011473ab0685fb5a65c0895bf74f32176ff30516",
+        "sha256": "3d93751c3d2f35aeed21af79f8dc7c1f33c18562e3230447f08482f2614293be",
         "mode": "0o664"
       },
       {
         "path": "userland/src/inject.c",
-        "sha256": "2ccf00fa21017bacfc24868990cf6eaffd2ff6a23a3d65374f00be116d98b565",
+        "sha256": "378fe8ccdfbd72804109864242e099a7fa9bf969a62e6473ff8fb3a8310ccd4f",
         "mode": "0o644"
       },
       {
@@ -472,7 +487,7 @@
       },
       {
         "path": "userland/src/inject_sb.c",
-        "sha256": "7c8dcdcd644581b41d790778dea85c0f2de1a97de7e79e8bd6a6da14521fca96",
+        "sha256": "17b2d60b46ef2ff55c20961f4aad44c8fd569317cd39512c7ba3ab65de79eeff",
         "mode": "0o644"
       },
       {
