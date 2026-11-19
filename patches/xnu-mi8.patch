@@ -19958,10 +19958,10 @@ index 0000000000000000000000000000000000000000..069306c3c6b07e6be49f950cf6c83627
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..12dbfdba00542c562fbd0acfb5c32c40e005a327
+index 0000000000000000000000000000000000000000..d464a5221f7d53db8ec183bc53fcdc1de9020db6
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,1136 @@
+@@ -0,0 +1,1156 @@
 +/* SPDX-License-Identifier: MIT
 + * TAS2557 firmware probe and bounded hard-muted power check. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
@@ -20730,7 +20730,8 @@ index 0000000000000000000000000000000000000000..12dbfdba00542c562fbd0acfb5c32c40
 + uint64_t live_start,live_total,max_warmup,mute_at;
 + struct mi8_tas_block coeff;
 + uint64_t warming_at,next_health,limit,check_us;
-+ uint8_t int1,int2,puf;
++ uint8_t int1,int2,puf,check_y;
++ const char *check_err;
 + unsigned phase,verified,idle_wakes;
 + uint64_t startup_us,wait_us,health_us,unmute_us,health_at,retry_at;
 + bool health_retryable;
@@ -20815,11 +20816,15 @@ index 0000000000000000000000000000000000000000..12dbfdba00542c562fbd0acfb5c32c40
 + bool ok=commands(&session.coeff,session_y_read,&d);
 + if (!select_page(t,book,page)) ok=false;
 + __atomic_fetch_add(&session.checks,1,__ATOMIC_RELAXED);
++ const char *err=t->r->error;
 + ok=ok && session.coeff.y_present && session.coeff.y_crc==0x5d && d.y==0x5d;
 + SP(session.verified,ok);
 + if(ok) __atomic_fetch_add(&session.checks_ok,1,__ATOMIC_RELAXED);
-+ session.check_us=now(t)-start;
-+ if(t->io->log)t->io->log(t->io->ctx,"audio: coefficient check Y=%02x expected=5d time=%llu ms %s\n",d.y,(unsigned long long)((now(t)-start)/1000),ok?"ok":"FAILED");
++ uint64_t elapsed=now(t)-start;
++ SP(session.check_us,elapsed);
++ SP(session.check_y,d.y);
++ if(!ok) SP(session.check_err,err?err:"crc");
++ if(t->io->log)t->io->log(t->io->ctx,"audio: coefficient check Y=%02x expected=5d time=%llu ms%s%s %s\n",d.y,(unsigned long long)(elapsed/1000),err?" err=":"",err?err:"",ok?"ok":"FAILED");
 + return ok;
 +}
 +/* TI SLASEC2B section 9.6.2.34/table 56: INT_DET_2 bit1 is Reserved,
@@ -20920,6 +20925,8 @@ index 0000000000000000000000000000000000000000..12dbfdba00542c562fbd0acfb5c32c40
 + static const char *const reasons[]={"no","prepare","coefficient","startup","health","mute","stream","budget","controller-timeout"};
 + snprintf(out,size,"wakes=%u mutes=%u live_total=%llu ms max_warmup=%llu ms out_peak=%u checks=%u/%u idle_wakes=%u last_trigger=%s startup=%llu wait=%llu health=%llu unmute=%llu ms latched=%s final reset=%s controller=%s",
 + c.wakes,c.mutes,(unsigned long long)(c.live_total/1000),(unsigned long long)(c.max_warmup/1000),c.peak,c.checks_ok,c.checks,c.idle_wakes,c.write_trigger?"write":"peak",(unsigned long long)(c.startup_us/1000),(unsigned long long)(c.wait_us/1000),(unsigned long long)(c.health_us/1000),(unsigned long long)(c.unmute_us/1000),c.reason<9?reasons[c.reason]:"unknown",c.reset_low?"low":"Pending",c.done?"finished":SA(session.expired)?"retained FAILED":"running");
++ if(c.checks){size_t used=strlen(out);if(used<size)snprintf(out+used,size-used," check=%llu ms",(unsigned long long)(SA(session.check_us)/1000));}
++ if(c.reason==2){const char *err=SA(session.check_err);size_t used=strlen(out);if(used<size)snprintf(out+used,size-used," check_y=%02x check_err=%s",SA(session.check_y),err?err:"unknown");}
 + if(session_resident){size_t used=strlen(out);if(used<size)snprintf(out+used,size-used," resident");}
 + if(!session_resident && c.wakes>=200){size_t used=strlen(out);if(used<size)snprintf(out+used,size-used," wake budget exhausted");}
 +}
@@ -20993,7 +21000,20 @@ index 0000000000000000000000000000000000000000..12dbfdba00542c562fbd0acfb5c32c40
 + __asm__ volatile("dsb sy":::"memory");
 +}
 +static uint64_t native_now(void *ctx) { uint64_t n;(void)ctx;absolutetime_to_nanoseconds(mach_absolute_time(),&n);return n/1000; }
-+static void native_delay(void *ctx,unsigned us) { (void)ctx;delay_for_interval(us,NSEC_PER_USEC); }
++/* Short bit-bang I2C waits must busy-spin: cpu_idle_latency is 0 on dipper,
++ * so delay_for_interval() blocks and context-switches on every 3 us half-clock. */
++static void native_delay(void *ctx,unsigned us) {
++ (void)ctx;
++ if (us <= 50) {
++  uint64_t ticks, deadline;
++  nanoseconds_to_absolutetime((uint64_t)us * NSEC_PER_USEC, &ticks);
++  deadline = mach_absolute_time() + ticks;
++  while (mach_absolute_time() < deadline) {
++  }
++  return;
++ }
++ delay_for_interval(us,NSEC_PER_USEC);
++}
 +static void native_log(void *ctx,const char *fmt,...) {
 +	char line[600];va_list ap;(void)ctx;va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);
 +	for (const char *p=line;*p;p++) loader_log_putc(*p);printf("%s",line);

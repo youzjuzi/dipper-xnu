@@ -110,7 +110,7 @@
       },
       {
         "path": "bsd/dev/mi8_tas2557.c",
-        "sha256": "495ed7db3a8c76a620c43a4000d21172eed5be5787323891289af1bff5fd8c9d",
+        "sha256": "8dbbd9ac6bff1f795f56d71733ad8f9e3859e807eded4817415b3cd6482e7afa",
         "mode": "0o664"
       },
       {
