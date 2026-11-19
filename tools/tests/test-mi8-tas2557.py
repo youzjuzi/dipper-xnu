@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Exercise real TAS parser, SE5 FIFO and open-drain GPIO code using private firmware and prior read-only decode.
 
 No firmware bytes, decoded register data, or hardware observations are committed.

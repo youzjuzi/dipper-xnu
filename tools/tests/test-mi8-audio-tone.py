@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Real GLINK/APR/PCM and TAS driver together, against independent synthetic peers."""
 import math
 import struct

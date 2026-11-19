@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Offline dipper partition planner. Generates a holder-operated GPT script only."""
 import argparse
 import importlib.util

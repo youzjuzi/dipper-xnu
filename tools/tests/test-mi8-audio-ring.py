@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Real SPSC ring, forced-zero DMA stream and bounded teardown against synthetic peers."""
 import argparse
 import os

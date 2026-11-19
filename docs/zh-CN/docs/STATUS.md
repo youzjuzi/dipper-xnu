@@ -17,7 +17,7 @@
 | 模块 | 已验证结果 | 验证边界 |
 |---|---|---|
 | 构建与启动 | 内核 `build`、ath10k、Mesa、用户空间和 UEFI 构建通过，实机进入 SpringBoard | 使用已装依赖的 Ubuntu；复用已核验系统区 |
-| 显示与输入 | A630 桌面渲染、触摸、两处亮度控制、锁屏/唤醒 3 次、动态 CPU/DDR 调频（66 °C 上限内空闲 825 MHz / DDR 2/16）、`IOSurface` 2 ms 刷新合并 | 短时测试；DPU 零拷贝翻页与渲染线程绑大核尚未实现 |
+| 显示与输入 | A630 GMEM 桌面渲染（移除默认 `sysmem` 强制软件回退）、`fb_native=2` WC 零拷贝直扫（活跃 `59 FPS`，`5698/5700` 零拷贝，翻页均值 `6.87 us`）、TE 精准等帧、O(1) 批量 SMMU 映射（`0.12–0.18 ms`/表面）、动态 CPU/DDR 调频、触摸及亮度调节 | 有界 300 s 实机轮次验证通过；默认表更新后的无覆写开机冒烟与渲染线程绑大核待完成 |
 | Wi-Fi / Safari | 驱动启动、`en0` 获地址、原生 LQM 投递（`wifid` 收到 `218` 次事件并点亮状态栏信号格）、DMA 屏障/`rx_confused` 恢复、Safari 打开并刷新网页 | 未单独验收吞吐、IPv6 外网或长时间运行 |
 | 外设与界面 | 手电筒开关、震动、音量键/音量条、标准 HID 振铃开关（`0x0b`/`0x2e` 已修 HUD 静音提示）、电量、`/apps` 联合挂载、壁纸与小组件正常 | 手电筒分档不明显；音量 UI 不代表音频输出 |
 | 持久保存（可选） | 加 `--persist` 后 `/private/var` 存进 darwin、下次启动读回：主屏图标、文件夹和设置开关重启后保留；存档校验通过 | 仅一次存、一次读；只在有序结束时保存，长按电源不保存；周期保存、第二次保存、长期稳定性未测 |
@@ -29,7 +29,7 @@
 
 - 完整 XNU `all` 的导出检查和工具生成仍失败；尚无全新 Ubuntu 安装验证。
 - 通用设备配置和充电全过程未验收；用户状态持久保存只完成首测（见上表），异常退出会丢上次保存之后的改动。
-- 重负载桌面卡顿（DPU 零拷贝翻页与渲染线程绑大核待做）、长期功耗与基带退出恢复（`halt port modem` 热停未归闲，含基带轮次间仍需冷重启）仍需处理。
+- 渲染线程绑大核、长期功耗与基带退出恢复（`halt port modem` 热停未归闲，含基带轮次间仍需冷重启）仍需处理。
 - 电话、移动数据、蓝牙音频、麦克风、摄像头、定位及其他未覆盖硬件不列为可用。
 - Wi-Fi 长时间稳定性与浏览器视频解码仍待持续验证。
 - GPU 初始化表与 APSL 内核组合的分发条件仍未解决，见 [GPU 许可说明](legal/GPU_LICENSE.md)。
@@ -51,7 +51,7 @@ Android 布局恢复、重新划出约 24 GiB darwin、两次 Format Data 与 An
 
 ## 工具维护
 
-2026-11-19：小米 8 实机验收通过并导出合入：原生 Wi-Fi 状态栏信号格修复（`EVENT_LQM_CHANGED` `0xb4`/`220 <= MLEN 224`、`clamp_rssi()`、`kev_post_msg()` 错误上报、`com.apple.wifi.manager` 预声明）、`TAS2557` 短延迟忙等修复（`native_delay` `<= 50 us` 自旋与 `check_us`/`check_y`/`check_err` 汇总上报）、内核原生 `AppleOLYHAL` / `RedwoodWLAN` 与动态 CPU/DDR 调频及 GPU 刷新合并、各子系统有序热退出及 2026-11-18 稳定性修复包。
+2026-11-19：小米 8 实机验收通过并导出合入：A630 GMEM 渲染与 `fb_native=2` 零拷贝扫描输出优化（`MSM_PARAM_GMEM_BASE` `0x00100000`、WC 4 槽池、TE 精准等待、`evictSurface` 无回读放锁、`gpu_push_ms=100` 与 O(1) 批量页表映射，表面映射 `0.12–0.18 ms`、`gGPULock` 峰值 `0.20 ms`）、原生 Wi-Fi 状态栏信号格修复（`EVENT_LQM_CHANGED` `0xb4`/`220 <= MLEN 224`、`clamp_rssi()`、`kev_post_msg()` 错误上报、`com.apple.wifi.manager` 预声明）、`TAS2557` 短延迟忙等修复（`native_delay` `<= 50 us` 自旋与 `check_us`/`check_y`/`check_err` 汇总上报）、内核原生 `AppleOLYHAL` / `RedwoodWLAN` 与动态 CPU/DDR 调频及 GPU 刷新合并、各子系统有序热退出及 2026-11-18 稳定性修复包。
 
 2026-11-18：完成稳定性与调试工具包：收敛 `/apps` 联合挂载侧载（`bsd/vfs/vfs_attrlist.c` `MNT_UNION` 遍历与 `APPS=1` 控制）、在 `Redwood buttons` 上标准上报 HID Telephony 振铃开关（`0x0b`/`0x2e` 响铃状态）以消除音量条误显静音、为 Wi-Fi `lx` 补充 `VM_WIMG_WCOMB` DMA `dsb sy` 屏障与回收槽前 512 字节清零并加入 `rx_confused` 有界诊断/恢复（可用 `wifi_no_recover=1` 关闭恢复）、周期健康日志与 `mi8_wifi_stop()` 退出汇总、修复 `build-payload.py --link-inputs` 缺失 `import os`，并新增只读实时抓日志脚本 `tools/tests/device-log.py`。
 

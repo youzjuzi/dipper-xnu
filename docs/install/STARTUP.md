@@ -49,7 +49,7 @@ Short cmdlines require a kernel carrying the `dipper` defaults table; the kernel
 
 `epoch` comes from host time and `wifi_mac` comes from private `local/wifi-mac`. `bootcpu`, `cpus`, `ufs`, and `root_apfs` must stay explicit; a matching loader prepares battery shared memory and torch identity on `dipper` by default (`battery=0`/`torch=0` disable).
 
-All 34 defaults live in `pexpert/arm/pe_bootargs.c`, shared by the kernel parser and userspace `kern.bootargs`:
+All 33 defaults live in `pexpert/arm/pe_bootargs.c`, shared by the kernel parser and userspace `kern.bootargs`:
 
 | Parameter | `dipper` Default |
 | --- | --- |
@@ -61,10 +61,9 @@ All 34 defaults live in `pexpert/arm/pe_bootargs.c`, shared by the kernel parser
 | `gpu` | `1` |
 | `mi8gpu_gmuclk` | `1` |
 | `mi8gpu_zap_keep` | `1` |
-| `caenv` | `FD_MESA_DEBUG=sysmem` |
 | `fb_partial` | `0` |
 | `fb_flip` | `1` |
-| `fb_native` | `1` |
+| `fb_native` | `2` |
 | `sb_fps_clamp` | `1` |
 | `mi8rp_mss` | `6` |
 | `mi8rp_hold` | `90` |
@@ -88,7 +87,7 @@ All 34 defaults live in `pexpert/arm/pe_bootargs.c`, shared by the kernel parser
 | `torch` | `3` |
 | `haptic` | `3` |
 
-Explicit arguments (including `=0`) take precedence (`fb_native=0`, `thermgov=0`, `ffix=0`, `caenv=0`, etc.). Early `bootcfg:` logs label `arg` vs `def` without printing `wifi_mac` values. When `--wifi` is omitted, `build-payload.py` appends `mi8rp_mss=0 wifi_lx=0 wifi_station=0 bt=0`; `--peripherals` and `--bluetooth` remain compatibility no-ops (`--bluetooth` still requires `--wifi`); `--no-audio` appends `audio=0`.
+Explicit arguments (including `=0`) take precedence (`fb_native=0`, `fb_native=1`, `thermgov=0`, `ffix=0`, `caenv=FD_MESA_DEBUG=sysmem` to force sysmem debug, etc.). Early `bootcfg:` logs label `arg` vs `def` without printing `wifi_mac` values. When `--wifi` is omitted, `build-payload.py` appends `mi8rp_mss=0 wifi_lx=0 wifi_station=0 bt=0`; `--peripherals` and `--bluetooth` remain compatibility no-ops (`--bluetooth` still requires `--wifi`); `--no-audio` appends `audio=0`.
 
 With a 10-digit epoch and 17-char MAC, `daily` is 87 bytes and `bench` is 172 bytes (167 / 252 bytes with the conservative 80-byte loader prefix, leaving 347 additional bytes below `< 600`). Loader input remains capped at 608 bytes while the kernel holds the expanded config in a 2048-byte `kern.bootargs` buffer.
 
@@ -143,7 +142,7 @@ Append `fbscale=2 fb_dpu=1` to `daily` args to render iOS at `750x1624` (`@2x`, 
 | Parameter | Behavior |
 | --- | --- |
 | `fbscale=2` | Reports `750x1624 @2x` and writes scale to device tree |
-| `fb_dpu=1` | Requires `fb_native=1` (default); keeps `750x1624` flip buffers and scales via DPU QSEED3 (`~0.5 ms` CPU blit instead of multi-ms CPU scaling) |
+| `fb_dpu=1` | Requires `fb_native=2` (default zero-copy WC scanout pool) or `fb_native=1`; keeps `750x1624` flip buffers and scales via DPU QSEED3 (zero-copy scanout under `fb_native=2`, or `~0.5 ms` CPU blit under `fb_native=1` instead of multi-ms CPU scaling) |
 
 Requirements and caveats:
 

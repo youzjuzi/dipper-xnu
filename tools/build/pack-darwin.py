@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Build a verified darwin.img on the host. Never opens a device or runs adb/fastboot."""
 import hashlib
 import json

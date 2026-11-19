@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Package a bounded dipper desktop, Wi-Fi or peripheral run; no device access."""
 import argparse
 import hashlib

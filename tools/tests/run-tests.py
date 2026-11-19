@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Unified host test runner with optional offline clean-replay tree and sanitizer modes."""
 import argparse
 import contextlib

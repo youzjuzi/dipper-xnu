@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Exercise the real count sink, cdev locking and final loader append on the host."""
 import argparse
 import os

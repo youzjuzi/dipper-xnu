@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 # Build the UFS route's host artifacts; no device operations.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

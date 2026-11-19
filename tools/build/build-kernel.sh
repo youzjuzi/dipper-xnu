@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 # Incremental host kernel build using the standard XNU BUILD tree; no device operations.
 set -euo pipefail
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Compile the actual bounded SMMU diagnostic against synthetic registers/RAM."""
 import argparse
 import os

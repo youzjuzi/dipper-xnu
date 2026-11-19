@@ -2163,10 +2163,12 @@ index c5e9d9020cc05b698313e88984117c43df8d141e..76ebd84c2f5e7db7142633b832b55cce
  		 * screen service for its own ("still waiting for a main screen digitizer"), whether the
 diff --git a/userland/src/inject_bt.c b/userland/src/inject_bt.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..3005a33286ba50c98adae0d35c9a839627bdd732
+index 0000000000000000000000000000000000000000..daf4d4bf753bbc8b31da180220c80a87291b1b85
 --- /dev/null
 +++ b/userland/src/inject_bt.c
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,56 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/*
 + * libredwood-bt.dylib: code of ours inside BlueTool and bluetoothd (build.sh, BT=1).
 + *

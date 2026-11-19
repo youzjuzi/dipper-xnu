@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Export manifest-owned patches, verify clean replay, and scan public content."""
 import argparse
 import contextlib

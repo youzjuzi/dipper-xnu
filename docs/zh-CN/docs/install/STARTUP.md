@@ -68,10 +68,9 @@ Wi-Fi 需要已核验的对应固件；无线关闭的对照可省略 `--wifi`�
 | `gpu` | `1` |
 | `mi8gpu_gmuclk` | `1` |
 | `mi8gpu_zap_keep` | `1` |
-| `caenv` | `FD_MESA_DEBUG=sysmem` |
 | `fb_partial` | `0` |
 | `fb_flip` | `1` |
-| `fb_native` | `1` |
+| `fb_native` | `2` |
 | `sb_fps_clamp` | `1` |
 | `mi8rp_mss` | `6` |
 | `mi8rp_hold` | `90` |
@@ -95,13 +94,13 @@ Wi-Fi 需要已核验的对应固件；无线关闭的对照可省略 `--wifi`�
 | `torch` | `3` |
 | `haptic` | `3` |
 
-显式参数优先，包括 `0`。例如 `fb_native=0`、`thermgov=0`、`ffix=0` 分别关闭对应功能，`caenv=0` 阻止注入默认环境变量；其他显式值沿用原消费者的解析和约束。启动时 `bootcfg:` 行按 `arg`/`def` 标记来源；MAC 只显示 `wifi_mac=set(arg)`，不输出其值。
+显式参数优先，包括 `0`。例如 `fb_native=0`（关闭原生扫描输出）、`fb_native=1`（回退 CPU 拷贝路径）、`thermgov=0`、`ffix=0` 分别关闭或覆盖对应功能，需要调试时仍可显式传 `caenv=FD_MESA_DEBUG=sysmem`；其他显式值沿用原消费者的解析和约束。启动时 `bootcfg:` 行按 `arg`/`def` 标记来源；MAC 只显示 `wifi_mac=set(arg)`，不输出其值。
 
 默认 Wi-Fi 配置需要匹配固件和私有 MAC。通用打包工具仍保留 `--wifi` 的显式选择：不带该选项时，短参数中增加 `mi8rp_mss=0 wifi_lx=0 wifi_station=0 bt=0` 以关闭其无线启动路径。`--peripherals` 与 `--bluetooth` 是兼容空操作，不再追加对应参数；`--bluetooth` 仍要求 `--wifi`。有 `--wifi` 时打包器同时核对蓝牙固件与用户态文件。`--no-audio` 追加 `audio=0`；缺省 cmdline 无 bt/audio 参数，采用内核默认表。
 
 以 10 位 epoch、17 字符 MAC 计，daily 为 87 字节，bench 为 172 字节（均不含换行）；加 80 字节保守 loader 前缀分别为 167、252 字节。bench 距 600 字节边界为 348 字节，保持严格小于 600 时最多再加 347 字节。默认电量缓存使 loader 还会增加 battery_shared_pa 前缀；打包器按含该地址的完整前缀另行检查。loader 的 608 字节输入结构不变；内核另用 2048 字节缓存保存展开配置，`kern.bootargs` 可返回展开值。该缓存不放宽载荷输入长度限制。
 
-原27项短参数设备冒烟已有记录；当前34项默认组合和常驻音频完成主机验证，组合设备验收仍待持有人执行。
+原27项短参数设备冒烟已有记录；当前33项默认组合和常驻音频完成主机验证，Adreno GMEM、`fb_native=2` 零拷贝扫描输出与批量 GPU SMMU 映射已通过内存启动 300 秒设备验证（无覆盖默认参数整包待持有人按需冒烟）。
 
 
 ## 持久保存（可选）
@@ -156,7 +155,7 @@ mi8rp_mss开启时音频仍等待Wi-Fi FW_READY，失败或90秒超时就不启�
 | 参数 | 作用 |
 | --- | --- |
 | `fbscale=2` | 向系统报告 750×1624 @2x；同时写入设备树的缩放值 |
-| `fb_dpu=1` | 需同时有 `fb_native=1`（默认）。翻页缓冲直接用 750×1624，由 DPU 的 QSEED3 放大到面板，处理器只做整块拷贝；不加则由处理器逐像素放大，每帧多数毫秒 |
+| `fb_dpu=1` | 需同时有 `fb_native=2`（默认零拷贝 WC 扫描输出池）或 `fb_native=1`。翻页缓冲直接用 750×1624，由 DPU 的 QSEED3 放大到面板；`fb_native=2` 直接由零拷贝扫描输出接管，不再做处理器翻页拷贝，`fb_native=1` 时处理器仅做整块拷贝；不加则由处理器逐像素放大，每帧多数毫秒 |
 
 使用前提和限制：
 

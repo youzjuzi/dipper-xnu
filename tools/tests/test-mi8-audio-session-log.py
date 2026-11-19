@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Native audio=5 log chain, including upstream PCM budget and init flags."""
 import argparse
 import os

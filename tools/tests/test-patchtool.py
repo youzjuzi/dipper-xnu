@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Offline synthetic patch export/replay tests; never open the development tree."""
 import contextlib
 import importlib.util

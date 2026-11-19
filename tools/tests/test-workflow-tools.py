@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Offline regression tests for status.py, build-kernel.sh, and build-payload.py options."""
 import hashlib
 import os

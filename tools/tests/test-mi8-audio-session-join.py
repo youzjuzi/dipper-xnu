@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Bounded native controller join, extracted from the actual source."""
 from pathlib import Path
 import argparse,runpy,subprocess,tempfile

@@ -15,107 +15,107 @@
       },
       {
         "path": "bsd/dev/mi8_adreno.c",
-        "sha256": "0f9dd7223d32c8e413c53cedc2e140952f1b4029f900e2a2c87ed67bbfe24692",
+        "sha256": "e3446b38822fe213a77a714c0d35ee8f94c70626d28da024dd52d78dc9749fda",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio.c",
-        "sha256": "cbecfaec66b267a6d72ee371eca3d91aa68a9a85562c76998ead337d715bab88",
+        "sha256": "38386fa93dc3bcae70b6010b5920303b44737cf5fc97fbe4073fa0c72879a057",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio.h",
-        "sha256": "46ff2c9884086f96d3c35a4c2d57bd1d870a3a36d9d81349e8c0ea8fd4768f52",
+        "sha256": "e6de53cc920e205412e75449d20c49c85d4b0e50dd0fece5c072b75aeaeb866a",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.c",
-        "sha256": "86624206fec683a417265320ad16d6fafa2886255aa28a6764e8fd9731ee093e",
+        "sha256": "8671d5bb34223f936eda11d484605c3164a595ddab8c9d9fa0bdc90a2e101ce6",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_pcm.h",
-        "sha256": "4048b7c45cc00ce5892a85cb331ee6bfa2322d8a7b8239bd5fc201812e9d7cd9",
+        "sha256": "19494a65f3605a1fc219beffa3337e60969454f327cdaa023e3213c7d8fd67b4",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_ring.c",
-        "sha256": "36a3b77f5283f7f4ec17452d693804a7cc9b2898b770c7d7dfd2d51e798c5e30",
+        "sha256": "2bd2e0d25d2f6823309fe3fff84f83b03ded499cb1e624ef742b18392774dce9",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_ring.h",
-        "sha256": "ad7ad74b99f5600c09a8ce1c0f262d4ee7261c9e58299c266b91addc26e40209",
+        "sha256": "0d0b4a6b12587bad1adbae03a379acaded7b9a934e4ba73b73acd7ae05a9663f",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_sink.c",
-        "sha256": "66332fb87fc4aed7c64889807e461e32a40959f62257b5f8f586f0cb64fa606f",
+        "sha256": "7796b9e1b06d85fc20162b79bfc911aa2dba6ad38bfcadab83196c4fa9c219de",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_sink.h",
-        "sha256": "638dff583162d153d8cb5d6a709d25f46973c59d60abeee56e6b6a1f035f476b",
+        "sha256": "31113695ee8154407d5a90bee294ff807d3bd69ea0a681f668eef294fad1f439",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_smmu.c",
-        "sha256": "38a1686c4f7d1d1027c4340f32c9646ef6b0d01e7ac78fddb07cab59d98ba7f3",
+        "sha256": "49e82d351ae214b7e79a7e47ad7f4f45074128fa42be939d0611fa91979a1ca9",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_audio_smmu.h",
-        "sha256": "117fc1feea9e33863c9f3a04a452dfbc2f14eafff605c338c46d263537c2fd70",
+        "sha256": "db2ff86e752694670432fd3d84ee65ae13df594b182d00d8d32f43a49ea5ea57",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_bt.c",
-        "sha256": "180d96c9c9d16caec1ba95554b4773d998a1b35288a8ce0d4855b811b777c5d3",
+        "sha256": "e8ed1c9f9205dbf15a08ebd8037928b1fb281ff3cb6559fda237ab2224432689",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_fts.c",
-        "sha256": "e0592a354c5c0113a0edb71f0215663a0584a98d643451c10d8607a9ab2f1875",
+        "sha256": "7362a5c436af7f40edea559eabeb63d4a22ac347d44821ca003dac5f9d811b03",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_glink.c",
-        "sha256": "afa20c4fd42246a8ba0298e169075bb6ad8c7d0d42be0a5176365b0fc05cd7dd",
+        "sha256": "7f27d1d7431fbd594983f3016cecad508cb2ffafe2ad7342502247fac083cc5c",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_glink.h",
-        "sha256": "e04cce36c3af8d2a6559857494c94b16ec3c68e378b6c97b0131553b00b4cb26",
+        "sha256": "6bc5d7cc70a3a05965056352b57a3cbcae737cd82ee9fc28f3c04e03017801a1",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_hostsvc.c",
-        "sha256": "eafbc6d9864691d32ee47fd1a46bcb3ca1f60d4705ceac9cc70c7bf5803eab8a",
+        "sha256": "cbee0001210459ddf85f2cce9af67f30edcf6d508b547d9fefa784b2e73592f4",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_hostsvc.h",
-        "sha256": "fcb7a609faca9af872311f7ada71ca19eb02562cbbe5a10c22af6a4189c451da",
+        "sha256": "e7f988b2bfa85cdb772fd524bab38d06d5c52f963c092b38c2236c09e0235206",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_hostsvc_k.c",
-        "sha256": "f31e98b4a931b9b94e6a00e72cb46bcf501c2afaf997596d73005a0aaf5ee026",
+        "sha256": "71260765ff207b510a72a997b56b128fc3dbcd04ee936e15b539d4993ac32278",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_rproc.c",
-        "sha256": "907334955bae93d75475a93f74e65c82761745f218f7724744af8851e864c349",
+        "sha256": "07a93481144f1dea7a2aa576b63d31df1e774dd4d159b71d7767c97ca432b6c8",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_tas2557.c",
-        "sha256": "8dbbd9ac6bff1f795f56d71733ad8f9e3859e807eded4817415b3cd6482e7afa",
+        "sha256": "6e08a9a3aa69ee6555c04b4c094ab71a63c41ca635dbc607a502674502746de7",
         "mode": "0o664"
       },
       {
         "path": "bsd/dev/mi8_tas2557.h",
-        "sha256": "095aa2958e259dfe1335b11bbb93dee8ab39ae73ed093068531b696687a1028f",
+        "sha256": "eaa63b6a666c64e6e2194c75fef7d8f1d83155a5c8caed1e7ed0f2acd885bcdc",
         "mode": "0o664"
       },
       {
@@ -130,7 +130,7 @@
       },
       {
         "path": "bsd/dev/mi8_wlfw_k.c",
-        "sha256": "1a5ab219cf21a3a6461d515b46438ae0e661c4718d5a47fd21e9e0f9248977db",
+        "sha256": "ce3406ec950f806808801e63d82e8755905eab6481f206297c09b79d0b48e602",
         "mode": "0o664"
       },
       {
@@ -145,7 +145,7 @@
       },
       {
         "path": "bsd/dev/redwood_adreno.c",
-        "sha256": "728e8d4db9627586eebe42a4c7e351f40092b5c24a2295360012394354155fc8",
+        "sha256": "394f0320b4f086bcb4245185724ac396b8de50746e9b621870ba30bce4c4bd06",
         "mode": "0o664"
       },
       {
@@ -210,7 +210,7 @@
       },
       {
         "path": "bsd/sys/mi8_lx.h",
-        "sha256": "71cca9cb0ae79f6b8081c9c740e01e21be298966cfaa7ae01d85b7766a43c77f",
+        "sha256": "5eda102515d318b293b480267d5d1b9a04296616279c77d4fd3d24c4e4622d4b",
         "mode": "0o664"
       },
       {
@@ -220,7 +220,7 @@
       },
       {
         "path": "bsd/sys/redwood_input.h",
-        "sha256": "f166749159d738b4b7695187b2f78b803a4fffe143c6822dfb1d13410c55b744",
+        "sha256": "16d0ef2618f1164e17af0396def4fc2c713271b5bf4090445e7489d6cf216abb",
         "mode": "0o664"
       },
       {
@@ -235,27 +235,27 @@
       },
       {
         "path": "iokit/Kernel/MiniIOMobileFramebuffer.cpp",
-        "sha256": "5c642832f368fa17d0f8ee9927bd7a8a26dc5d7097ce2779939ba763c0f4c046",
+        "sha256": "acb312100e1be80275ec1dcec987541d720de86afd7f91c300b4931bff68c84b",
         "mode": "0o664"
       },
       {
         "path": "iokit/Kernel/MiniIOSurface.cpp",
-        "sha256": "56b802fce93fe24d5bba05f23c34de62cd49429ab50fa168af0ad94babb3cbe3",
+        "sha256": "eb32371e25abcfe25a91ec08355759f9be489c5367ee1d4bbaf39ef8e7fba68c",
         "mode": "0o664"
       },
       {
         "path": "iokit/Kernel/MiniIOSurface.h",
-        "sha256": "9f49bf2a1a80203ea7090396beb3d707a4b41e2b7df95fa850c8ceb5b8d1ee00",
+        "sha256": "632270844d07f60918c76daa7066d67ab3c25ca3e54959a023cafa6a9d71d6f9",
         "mode": "0o664"
       },
       {
         "path": "iokit/Kernel/RedwoodBT.cpp",
-        "sha256": "02076aee3ff87f781339b9d2d628ece0f01675d0ee4d00fa78104e39a85e8f2d",
+        "sha256": "33612ea665c3948d002c6f2b04d80a2524dd6fa3adfe0ad0aa3ba8b37c7ed6b8",
         "mode": "0o664"
       },
       {
         "path": "iokit/Kernel/RedwoodGPU.cpp",
-        "sha256": "044e4abe44913239ed09213d8733fe2dee6b42d2244cfcf8fced1e6525022843",
+        "sha256": "f98e153397dfc18fbfd115819aec5d3f1e24cf19b63bf7e439ac9e03344ed536",
         "mode": "0o664"
       },
       {
@@ -290,7 +290,7 @@
       },
       {
         "path": "pexpert/arm/pe_bootargs.c",
-        "sha256": "e34dedf5059e3dd6381e5b8b60d37a99c9ef0b6803fb0230a47c667fabcf8a7f",
+        "sha256": "3f701e57979a6ee6edcdef33b34d2977f7372003f2d8d72f2ca09c912a530c65",
         "mode": "0o664"
       },
       {
@@ -311,7 +311,7 @@
     "files": [
       {
         "path": "tools/mk-ath10k.sh",
-        "sha256": "0e9ab4c048343165336823680bfd27116e2b9caa842415d89e5e6aa6e30e3f50",
+        "sha256": "4576e2840d62e52d0307adf6bfae95eec4303fd410ab70197b5c4420c996aca3",
         "mode": "0o775"
       },
       {
@@ -381,22 +381,22 @@
       },
       {
         "path": "wifi/lx/include-ath10k/lx_ath10k_prelude.h",
-        "sha256": "1d74ed2bc3dd8e570e553ffc357e1181c0ccc1a84dfa6b02e1c23a79c5b2ef0e",
+        "sha256": "f11864568790a2bc4e3f7b4be28cdd66876b958049175fadc1a11fd01518cf46",
         "mode": "0o664"
       },
       {
         "path": "wifi/lx/include/lx_ath10k_cfg.h",
-        "sha256": "51c6a5465d8bb9568edacd56a4910e65eb319b455da653cb504ea26c179b6e0d",
+        "sha256": "bbda4cc135f9189e8a7d4b362f1d908c429b878c2690e58a7f422ae7035cdc89",
         "mode": "0o664"
       },
       {
         "path": "wifi/lx/include/lx_wlfw.h",
-        "sha256": "d337afce019c6177541089c2ac23127906c22f9585d4dc966706b17719c5bd76",
+        "sha256": "99ff0d1cb0f38c6ce50437539ea8bdb4d62153d57e5d16083d355798635fb065",
         "mode": "0o664"
       },
       {
         "path": "wifi/lx/src-ath10k/lx_ath10k_bus.c",
-        "sha256": "e6caaec100bbf4e6f3b1d3610f2c28ac400fdf941a974ea2b4c313a973ca27df",
+        "sha256": "2f05a11da3ed272dd7d86a50a815a1cc3cb3c946da3c30d2724f6d305601b6af",
         "mode": "0o664"
       },
       {
@@ -406,7 +406,7 @@
       },
       {
         "path": "wifi/lx/src-ath10k/lx_ath10k_qmi.c",
-        "sha256": "d6c26f1a315022ba5cbc0ee055731b961f01db0ee8d53d4b148162338ffca990",
+        "sha256": "5e250f2775cd2ad984d7248425aedbe97815dddbf739f8102755eb1715ea577e",
         "mode": "0o664"
       },
       {
@@ -482,7 +482,7 @@
       },
       {
         "path": "userland/src/inject_bt.c",
-        "sha256": "185030780362eef015dbfa587222137777d161ca84d2457364343b8d6640eb36",
+        "sha256": "e91c842af5b1e49b049b7d1027c6ae2b1c365d1b0d24b10058417c6c0eff99be",
         "mode": "0o664"
       },
       {

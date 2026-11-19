@@ -6,6 +6,11 @@
 
 ## 2026-11-19
 
+- **A630 GMEM 渲染、`fb_native=2` 零拷贝直扫与 GPU 页表批量映射（已设为默认）**：
+  - 修正 `bsd/dev/mi8_adreno.c` 中 `MSM_PARAM_GMEM_BASE`（`0x06`）返回 `0x00100000ull`（原错误返回 `0`），并在 `pexpert/arm/pe_bootargs.c` 移除默认 `caenv=FD_MESA_DEBUG=sysmem`。
+  - 在 `MiniIOSurface.h/.cpp`、`RedwoodGPU.cpp` 与 `MiniIOMobileFramebuffer.cpp` 实现并默认启用 `fb_native=2`：构建 4 槽 Write-Combined `1125x2436` 零拷贝扫描输出池（`2` 个 splash 槽位 `0x9deb8000`/`0x9e970000` + `2` 个 `< 4 GB` 连续内存槽，保留 0 号块 `0x9d400000` 用于启动/兜底与 `MiniIOFlipQuiesce()` 安全还原），跳过 WC 扫描画布 `dc civac` 清洗；改写 `evictSurface()` 在罕见单缓冲复用时仅释放 `displayReaders` 锁同时保留引用（消除 `159–173 ms` WC CPU 回读尖刺），并新增 `MiniIOFlipWaitHintUs()` 按下一次 TE 脉冲精准休眠。
+  - 将 `RedwoodGPU.cpp` 定期清缓存间隔 `GPU_PUSH_AGAIN_MS`（新增 `gpu_push_ms` 启动参数）由 `4 ms` 提高至 `100 ms`（`seed` 变化仍立即清洗）；在 `bsd/dev/mi8_adreno.c`、`bsd/dev/redwood_adreno.c`、`bsd/sys/redwood_input.h` 与 `RedwoodGPU.cpp` 中增加 O(1) 页表虚址缓存（`keep_l2_virt`/`keep_l3_virt`）、连续物理段批量映射/卸载（`mi8_gpu_map_range()` / `mi8_gpu_unmap()`）及快速 SMMU TLB 自旋等待。
+  - 经过 4 轮渐进式 300 秒内存启动实机验证（全程 `0` panic、`0` GPU/SMMU 故障，退出干净还原 `slumber answered` 与 `MiniIOFlipQuiesce`）：清缓存由 `zc-sysmem` 的 `~85 GiB / 5.56 s` 降至 `1.75–3.26 GiB / 0.14–0.29 s`；零拷贝翻页 `5698/5700`（均耗时 `6.87 us`、最高 `1.70 ms`，活跃窗口 `59 FPS`，95% 帧 `< 21 ms`）；驱逐卡顿由 `173.5 ms` 降至 `<= 14.56 ms`；`IOSurface` GPU 映射由 `6.96–8.54 ms` 降至 `0.12–0.18 ms`，`gGPULock` 等待峰值由 `9.44 ms` 降至 `0.20 ms`。
 - **原生 Wi-Fi 状态栏信号格修复（LQM 事件长度收敛 + Mach 服务预声明）**：
   - 定位出连网后状态栏可见扇形但 `0` 格全灰的根因：`bsd/dev/redwood_apple80211.c` 中的 `struct apple80211_lqm_event` 为 `0xc0`（192 B），拼上 `KEV_MSG_HEADER_SIZE (24)` 与 `interface_name (16)` 后总长 `232 B > MLEN (224 B)`，导致 `kev_post_msg()` 将所有 `EVENT_LQM_CHANGED (39)` 以 `EMSGSIZE` 静默丢弃。
   - 将结构体收敛至 `0xb4`（180 B，总长 `220 <= 224`）并加入编译期 `MLEN` `_Static_assert`，通过 `clamp_rssi()` 归一化信号值、通过 `redwood_wifi_tell()` 输出 `kev_post_msg()` 失败及首次 LQM 投递日志，并在 `userland/mkjobs.py` 为 `com.apple.wifid` 预声明 `com.apple.wifi.manager`（`ResetAtClose`）消除 `SpringBoard` 启动查端口竞态。

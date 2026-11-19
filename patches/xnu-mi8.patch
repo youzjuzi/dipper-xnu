@@ -494,10 +494,11 @@ index 0000000000000000000000000000000000000000..f571c1cc1ddd8f9708d4c7da3fc8841e
 +}
 diff --git a/bsd/dev/mi8_adreno.c b/bsd/dev/mi8_adreno.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee4aa215b3
+index 0000000000000000000000000000000000000000..520694709ab588cb914211f42b78b23ee52188e5
 --- /dev/null
 +++ b/bsd/dev/mi8_adreno.c
-@@ -0,0 +1,5351 @@
+@@ -0,0 +1,5411 @@
++/* Copyright (c) 2026 yanei */
 +/*
 + * The GPU of the Xiaomi Mi 8 (dipper, SDM845): an Adreno 630 (chip id 0x06030001, "qcom,chipid" of the phone's
 + * own device tree), woken step by step. Only with boot-arg mi8gpu=N, which performs steps 1 to N and stops.
@@ -1427,6 +1428,17 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +}
 +
++static inline void
++to_memory_nodsb(vm_offset_t start, vm_size_t size)
++{
++	if (size == 0) {
++		return;
++	}
++	for (vm_offset_t line = start & ~(vm_offset_t)63; line < start + size; line += 64) {
++		__asm__ volatile ("dc civac, %0" : : "r" (line) : "memory");
++	}
++}
++
 +/* A timeout is not evidence that an unmapped address was rejected. */
 +enum smmu_translation { SMMU_TIMEOUT = -1, SMMU_FAULT = 0, SMMU_TRANSLATED = 1 };
 +static enum smmu_translation
@@ -1638,6 +1650,8 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +#define PTE_AP_UNPRIV           (1ull << 6)     /* AP[1]: the 3D core's accesses are not privileged (EXP-0108: permission fault at FAR 0x10000000) */
 +
 +static vm_offset_t g3d_tables;
++static uint64_t *keep_l2_virt[4];
++static uint64_t *keep_l3_virt[4][512];
 +static struct {
 +	bool saved;
 +	uint32_t smr, s2cr, cbar, cba2r, sctlr, tcr, tcr2, ttbr0_lo, ttbr0_hi, ttbr1_lo, ttbr1_hi, mair0, mair1;
@@ -1657,6 +1671,8 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +		kmem_free(kernel_map, g3d_tables, round_page(G3D_TABLE_POOL));
 +		g3d_tables = 0;
 +	}
++	bzero(keep_l2_virt, sizeof(keep_l2_virt));
++	bzero(keep_l3_virt, sizeof(keep_l3_virt));
 +}
 +
 +static void
@@ -1726,6 +1742,8 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +	if (kmem_alloc(kernel_map, &g3d_tables, round_page(G3D_TABLE_POOL), KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 +		return false;
 +	}
++	bzero(keep_l2_virt, sizeof(keep_l2_virt));
++	bzero(keep_l3_virt, sizeof(keep_l3_virt));
 +	for (uint32_t r = 0; r < G3D_REGIONS; r++) {
 +		if (g3d_regions[r].phys != 0) {
 +			continue;
@@ -1742,13 +1760,16 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +	l2 = (uint64_t *)(g3d_tables + 0x1000);
 +	root = kvtophys((vm_offset_t)l1);
 +	l1[(g3d_regions[0].address >> 30) & 0x1ff] = kvtophys((vm_offset_t)l2) | PTE_TABLE;
++	keep_l2_virt[(g3d_regions[0].address >> 30) & 3] = l2;
 +	uint32_t next_l3 = 2;
 +	for (uint32_t r = 0; r < G3D_REGIONS; r++) {
 +		struct g3d_region *g = &g3d_regions[r];
 +
 +		for (uint32_t off = 0; off < g->size; off += 0x1000) {
 +			uint64_t va = g->address + off, pa = g->memory ? kvtophys(g->memory) + off : g->phys + off;
-+			uint64_t *entry = &l2[(va >> 21) & 0x1ff];
++			uint32_t i1 = (uint32_t)((va >> 30) & 3);
++			uint32_t i2 = (uint32_t)((va >> 21) & 0x1ff);
++			uint64_t *entry = &l2[i2];
 +
 +			if (*entry == 0) {
 +				if (next_l3 >= G3D_TABLE_POOL / 0x1000) {
@@ -1756,14 +1777,11 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +					g3d_free();
 +					return false;
 +				}
-+				*entry = kvtophys(g3d_tables + 0x1000 * next_l3++) | PTE_TABLE;
++				uint64_t *tbl = (uint64_t *)(g3d_tables + 0x1000 * next_l3++);
++				*entry = kvtophys((vm_offset_t)tbl) | PTE_TABLE;
++				keep_l3_virt[i1][i2] = tbl;
 +			}
-+			l3 = NULL;
-+			for (uint32_t t = 2; t < next_l3; t++) {
-+				if (kvtophys(g3d_tables + 0x1000 * t) == (*entry & PTE_ADDRESS)) {
-+					l3 = (uint64_t *)(g3d_tables + 0x1000 * t);
-+				}
-+			}
++			l3 = keep_l3_virt[i1][i2];
 +			l3[(va >> 12) & 0x1ff] = pa | PTE_GMU | PTE_AP_UNPRIV | PTE_PAGE;
 +			pages++;
 +		}
@@ -3183,22 +3201,6 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +static vm_offset_t keep_pool;
 +static uint32_t keep_pool_used = 4;     /* of the 4 tables one page holds */
 +
-+static uint64_t *
-+keep_table_virt(uint64_t phys)
-+{
-+	for (uint32_t i = 1; i < G3D_TABLE_POOL / 0x1000; i++) {
-+		if (kvtophys(g3d_tables + 0x1000 * i) == phys) {
-+			return (uint64_t *)(g3d_tables + 0x1000 * i);
-+		}
-+	}
-+	for (uint32_t i = 0; i < keep_tables_n; i++) {
-+		if (keep_tables[i].phys == phys) {
-+			return (uint64_t *)keep_tables[i].virt;
-+		}
-+	}
-+	return NULL;
-+}
-+
 +/* One new (zeroed) 4 KB table of the 3D core's page tables. */
 +static uint64_t *
 +keep_table_new(uint64_t *phys)
@@ -3222,41 +3224,46 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +
 +static uint64_t keep_attr_index;        /* boot-arg mi8gpu_attr=N: memory attribute index of the core's pages (0 not cached, 1 cached) */
 +
-+static bool
-+keep_map(uint64_t va, uint64_t pa, uint64_t attributes)
++static uint64_t *
++keep_l3_get(uint64_t va, bool alloc)
 +{
-+	uint64_t *l1 = (uint64_t *)g3d_tables, *l2, *l3, phys;
-+	uint64_t *e1 = &l1[(va >> 30) & 0x1ff], *e2, *e3;
++	if (g3d_tables == 0 || va >= (4ull << 30)) {
++		return NULL;
++	}
++	uint32_t i1 = (uint32_t)(va >> 30);
++	uint32_t i2 = (uint32_t)((va >> 21) & 0x1ff);
++	uint64_t *l2 = keep_l2_virt[i1];
 +
-+	if (*e1 == 0) {
++	if (l2 == NULL) {
++		if (!alloc) {
++			return NULL;
++		}
++		uint64_t *l1 = (uint64_t *)g3d_tables, phys;
++
 +		l2 = keep_table_new(&phys);
 +		if (l2 == NULL) {
-+			return false;
++			return NULL;
 +		}
-+		*e1 = phys | PTE_TABLE;
-+		to_memory((vm_offset_t)e1, 8);
++		l1[i1] = phys | PTE_TABLE;
++		to_memory((vm_offset_t)&l1[i1], 8);
++		keep_l2_virt[i1] = l2;
 +	}
-+	l2 = keep_table_virt(*e1 & PTE_ADDRESS);
-+	if (l2 == NULL) {
-+		return false;
-+	}
-+	e2 = &l2[(va >> 21) & 0x1ff];
-+	if (*e2 == 0) {
++	uint64_t *l3 = keep_l3_virt[i1][i2];
++	if (l3 == NULL) {
++		if (!alloc) {
++			return NULL;
++		}
++		uint64_t phys;
++
 +		l3 = keep_table_new(&phys);
 +		if (l3 == NULL) {
-+			return false;
++			return NULL;
 +		}
-+		*e2 = phys | PTE_TABLE;
-+		to_memory((vm_offset_t)e2, 8);
++		l2[i2] = phys | PTE_TABLE;
++		to_memory((vm_offset_t)&l2[i2], 8);
++		keep_l3_virt[i1][i2] = l3;
 +	}
-+	l3 = keep_table_virt(*e2 & PTE_ADDRESS);
-+	if (l3 == NULL) {
-+		return false;
-+	}
-+	e3 = &l3[(va >> 12) & 0x1ff];
-+	*e3 = pa ? (pa | PTE_GMU | PTE_AP_UNPRIV | PTE_PAGE | (keep_attr_index << 2) | attributes) : 0;
-+	to_memory((vm_offset_t)e3, 8);
-+	return true;
++	return l3;
 +}
 +
 +static void
@@ -3267,6 +3274,12 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +	wr(cb + CB_TLBIASID, G3D_CTX);
 +	wr(cb + CB_TLBSYNC, 1);
++	for (int i = 0; i < 64; i++) {
++		if ((rd(cb + CB_TLBSTATUS) & 1) == 0) {
++			return;
++		}
++		__asm__ volatile ("yield" ::: "memory");
++	}
 +	for (int i = 0; i < 1000 && (rd(cb + CB_TLBSTATUS) & 1); i++) {
 +		sleep_us(1);
 +	}
@@ -3375,12 +3388,14 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +{
 +	switch (which) {
 +	case 0x01:      /* GPU_ID */
-+	case 0x06:      /* GMEM_BASE */
 +	case 0x08:      /* PP_PGTABLE */
 +	case 0x09:      /* FAULTS */
 +	case 0x0a:      /* SUSPENDS */
 +	case 0x11:      /* RAYTRACING */
 +		*value = 0;
++		return true;
++	case 0x06:      /* GMEM_BASE: 1 MiB (matches UCHE_GMEM_RANGE_MIN on a630 / ADRENO_6XX_GEN1) */
++		*value = 0x00100000ull;
 +		return true;
 +	case 0x02:      /* GMEM_SIZE: 1 MiB (a6xx_catalog.c, TASK-002) */
 +		*value = 1024 * 1024;
@@ -3483,9 +3498,42 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +}
 +
 +bool
++mi8_gpu_map_range(uint64_t address, uint64_t phys, uint64_t size, bool read_only)
++{
++	if ((address & 0xfff) != 0 || (phys & 0xfff) != 0 || (size & 0xfff) != 0) {
++		return false;
++	}
++	uint64_t pte_flags = PTE_GMU | PTE_AP_UNPRIV | PTE_PAGE | (keep_attr_index << 2) |
++	    (read_only ? KEEP_PTE_READ_ONLY : 0);
++
++	while (size != 0) {
++		uint64_t *l3 = keep_l3_get(address, true);
++
++		if (l3 == NULL) {
++			return false;
++		}
++		uint32_t idx = (uint32_t)((address >> 12) & 0x1ff);
++		uint32_t avail = 512u - idx;
++		uint64_t pages = size >> 12;
++		uint32_t chunk = pages < avail ? (uint32_t)pages : avail;
++
++		for (uint32_t i = 0; i < chunk; i++) {
++			l3[idx + i] = (phys + ((uint64_t)i << 12)) | pte_flags;
++		}
++		to_memory_nodsb((vm_offset_t)&l3[idx], (vm_size_t)chunk * sizeof(uint64_t));
++		uint64_t step = (uint64_t)chunk << 12;
++
++		address += step;
++		phys += step;
++		size -= step;
++	}
++	return true;
++}
++
++bool
 +mi8_gpu_map(uint64_t address, uint64_t phys, bool read_only)
 +{
-+	return keep_map(address, phys, read_only ? KEEP_PTE_READ_ONLY : 0);
++	return mi8_gpu_map_range(address, phys, 0x1000, read_only);
 +}
 +
 +void
@@ -3506,8 +3554,21 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +			    *(volatile uint32_t *)(g3d_regions[2].memory + KEEP_FENCE_AT), keep_fence);
 +		}
 +	}
-+	for (uint64_t offset = 0; offset < size; offset += 0x1000) {
-+		keep_map(address + offset, 0, 0);
++	uint64_t va = address & ~0xfffull;
++	uint64_t rem = (size + 0xfffull) >> 12;
++
++	while (rem != 0) {
++		uint32_t idx = (uint32_t)((va >> 12) & 0x1ff);
++		uint32_t avail = 512u - idx;
++		uint32_t chunk = rem < avail ? (uint32_t)rem : avail;
++		uint64_t *l3 = keep_l3_get(va, false);
++
++		if (l3 != NULL) {
++			bzero(&l3[idx], (size_t)chunk * sizeof(uint64_t));
++			to_memory_nodsb((vm_offset_t)&l3[idx], (vm_size_t)chunk * sizeof(uint64_t));
++		}
++		va += (uint64_t)chunk << 12;
++		rem -= chunk;
 +	}
 +	keep_tlb();
 +}
@@ -3569,11 +3630,10 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +static uint32_t
 +keep_peek(uint64_t va)
 +{
-+	uint64_t *l1 = (uint64_t *)g3d_tables, *l2, *l3;
-+	uint64_t e = l1[(va >> 30) & 0x1ff];
++	uint64_t *l3 = keep_l3_get(va, false);
++	uint64_t e;
 +
-+	if (e == 0 || (l2 = keep_table_virt(e & PTE_ADDRESS)) == NULL || (e = l2[(va >> 21) & 0x1ff]) == 0 ||
-+	    (l3 = keep_table_virt(e & PTE_ADDRESS)) == NULL || (e = l3[(va >> 12) & 0x1ff]) == 0) {
++	if (l3 == NULL || (e = l3[(va >> 12) & 0x1ff]) == 0) {
 +		return 0xdeadbeef;
 +	}
 +	return ml_phys_read_word((e & PTE_ADDRESS) + (va & 0xfff));
@@ -5851,11 +5911,12 @@ index 0000000000000000000000000000000000000000..c589a2b122ac689c6720f8ef6eb822ee
 +}
 diff --git a/bsd/dev/mi8_audio.c b/bsd/dev/mi8_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..4d1d1803785335212652e8e7500d8a837067987f
+index 0000000000000000000000000000000000000000..454ad32081d2d786c4fa71fab915a0143b1234b2
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.c
-@@ -0,0 +1,809 @@
+@@ -0,0 +1,810 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/* Mi 8 ADSP core handshake over APR. Independently written from protocol
 + * descriptions in Linux apr.h/q6core.c and the existing redwood APR client.
 + * The explicit AFE entry controls MI2S; the play entry additionally owns a bounded
@@ -6666,11 +6727,12 @@ index 0000000000000000000000000000000000000000..4d1d1803785335212652e8e7500d8a83
 +}
 diff --git a/bsd/dev/mi8_audio.h b/bsd/dev/mi8_audio.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3b401e70c9180a9bbb1eaecb706aa87aeef7b54a
+index 0000000000000000000000000000000000000000..7a4728b195f8b5aff8273607ea6a544ecc13ad38
 --- /dev/null
 +++ b/bsd/dev/mi8_audio.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,70 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/* APR core handshake and explicit AFE MI2S control. The muted check uses explicit worker-owned amplifier callbacks. */
 +#ifndef MI8_AUDIO_H
 +#define MI8_AUDIO_H
@@ -6741,11 +6803,12 @@ index 0000000000000000000000000000000000000000..3b401e70c9180a9bbb1eaecb706aa87a
 +#endif
 diff --git a/bsd/dev/mi8_audio_pcm.c b/bsd/dev/mi8_audio_pcm.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..0c15cf6c0aa24a929842750c56f6bce9339b7059
+index 0000000000000000000000000000000000000000..3aeb72ace1cd333aa3c954893690b8f5496a8320
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.c
-@@ -0,0 +1,879 @@
+@@ -0,0 +1,880 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/* Independent wire encoding of ASM/ADM protocol layouts, not reference driver
 + * code. A WRITE_DONE returns ownership of a buffer; it is not proof of DMA. */
 +#include "mi8_audio_pcm.h"
@@ -7626,11 +7689,12 @@ index 0000000000000000000000000000000000000000..0c15cf6c0aa24a929842750c56f6bce9
 +}
 diff --git a/bsd/dev/mi8_audio_pcm.h b/bsd/dev/mi8_audio_pcm.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4dab3305c3f06228e7c523ee204de67aabdc6b82
+index 0000000000000000000000000000000000000000..25ef28b4f5dc656c75412437b07c81593aac1917
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_pcm.h
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,122 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/* Bounded PCM protocol exerciser; the caller owns AFE, pins and DSP lifetime. */
 +#ifndef MI8_AUDIO_PCM_H
 +#define MI8_AUDIO_PCM_H
@@ -7753,11 +7817,12 @@ index 0000000000000000000000000000000000000000..4dab3305c3f06228e7c523ee204de67a
 +#endif
 diff --git a/bsd/dev/mi8_audio_ring.c b/bsd/dev/mi8_audio_ring.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..41b7575c6f9abf1b845e9a07fef50a96ab3a1ef1
+index 0000000000000000000000000000000000000000..48f356370d2870e71c37b0031d0227caa3b61ce5
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_ring.c
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,110 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#include "mi8_audio_ring.h"
 +/* SPSC: cdev holds audio_mutex across each sink call (including multiple
 + * writers); the PCM worker is the sole consumer/open/close owner. Neither
@@ -7868,11 +7933,12 @@ index 0000000000000000000000000000000000000000..41b7575c6f9abf1b845e9a07fef50a96
 +bool mi8_audio_ring_admitting(void){return (RLOAD(&ring_gate)&1)!=0;}
 diff --git a/bsd/dev/mi8_audio_ring.h b/bsd/dev/mi8_audio_ring.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b66fdb25d6286987e4da8b3f90fb9abe178b3eaf
+index 0000000000000000000000000000000000000000..fe0b0e421d2bfab07448a07a3d7c666efb8e560e
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_ring.h
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,33 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#ifndef MI8_AUDIO_RING_H
 +#define MI8_AUDIO_RING_H
 +#include <stdint.h>
@@ -7906,11 +7972,12 @@ index 0000000000000000000000000000000000000000..b66fdb25d6286987e4da8b3f90fb9abe
 +#endif
 diff --git a/bsd/dev/mi8_audio_sink.c b/bsd/dev/mi8_audio_sink.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..1b5280aa2b3dcda3d3dfde88d65c0b182282288a
+index 0000000000000000000000000000000000000000..0b7957989b3f096d82a3ef346f69eb8dccc96ddc
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_sink.c
-@@ -0,0 +1,314 @@
+@@ -0,0 +1,315 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/* Count-only observer of iOS PCM. No playback buffers or hardware operations. */
 +#ifdef MI8_AUDIO_SINK_HOST_TEST
 +#include "sink-host.h"
@@ -8226,11 +8293,12 @@ index 0000000000000000000000000000000000000000..1b5280aa2b3dcda3d3dfde88d65c0b18
 +}
 diff --git a/bsd/dev/mi8_audio_sink.h b/bsd/dev/mi8_audio_sink.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d4fd6315bb948b6f320e2a6e28944d511b1bc475
+index 0000000000000000000000000000000000000000..4e08f58d4a96b8bb087e584fc92a3694ba3a991b
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_sink.h
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,9 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#ifndef MI8_AUDIO_SINK_H
 +#define MI8_AUDIO_SINK_H
 +void mi8_audio_sink_init(void);
@@ -8240,11 +8308,12 @@ index 0000000000000000000000000000000000000000..d4fd6315bb948b6f320e2a6e28944d51
 +#endif
 diff --git a/bsd/dev/mi8_audio_smmu.c b/bsd/dev/mi8_audio_smmu.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..daac5cd76f46f03920659b339fdb18645b48e88e
+index 0000000000000000000000000000000000000000..451c675f73fd6e83dfef74f8e0eabc98b729d306
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_smmu.c
-@@ -0,0 +1,677 @@
+@@ -0,0 +1,678 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/* Independently written from SMMUv2 register/descriptor formats and the
 + * existing apps SMMU adapters. Software checks do not establish DMA reachability. */
 +#include "mi8_audio_smmu.h"
@@ -8923,11 +8992,12 @@ index 0000000000000000000000000000000000000000..daac5cd76f46f03920659b339fdb1864
 +#endif
 diff --git a/bsd/dev/mi8_audio_smmu.h b/bsd/dev/mi8_audio_smmu.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e1e652481f2cf89070991764978f3aa0bea3ea7e
+index 0000000000000000000000000000000000000000..5fff04c4c75a1e5582587eaf15ad1be92a879ebb
 --- /dev/null
 +++ b/bsd/dev/mi8_audio_smmu.h
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,91 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/* Bounded apps SMMU diagnostics; no remote processor or DMA operations. */
 +#ifndef MI8_AUDIO_SMMU_H
 +#define MI8_AUDIO_SMMU_H
@@ -9019,10 +9089,11 @@ index 0000000000000000000000000000000000000000..e1e652481f2cf89070991764978f3aa0
 +#endif
 diff --git a/bsd/dev/mi8_bt.c b/bsd/dev/mi8_bt.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..d96959ed8216899d246b30a59378562d1f5efcd0
+index 0000000000000000000000000000000000000000..9f880d22c84f54a6ba954f03daf5769c6d6d1b57
 --- /dev/null
 +++ b/bsd/dev/mi8_bt.c
-@@ -0,0 +1,1987 @@
+@@ -0,0 +1,1988 @@
++/* Copyright (c) 2026 yanei */
 +/*
 + * The Bluetooth of the Xiaomi Mi 8 (dipper, SDM845): a Qualcomm WCN3990 -- the chip whose Wi-Fi half
 + * redwood_wifi.c / mi8_rproc.c already run -- spoken to over a UART: serial engine 6 of the first QUP
@@ -11012,10 +11083,11 @@ index 0000000000000000000000000000000000000000..d96959ed8216899d246b30a59378562d
 +}
 diff --git a/bsd/dev/mi8_fts.c b/bsd/dev/mi8_fts.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..f860b0c6c5f0ec72ee9ddbeef1191daff46a27bf
+index 0000000000000000000000000000000000000000..72ecdbbc0e917cbc75fa77c11e121f82f0a19431
 --- /dev/null
 +++ b/bsd/dev/mi8_fts.c
-@@ -0,0 +1,1882 @@
+@@ -0,0 +1,1883 @@
++/* Copyright (c) 2026 yanei */
 +/*
 + * The touch screen of the Xiaomi Mi 8 (dipper, SDM845): an ST FTS at address 0x49 on the I2C of
 + * serial engine 14 (F-026). Only with boot-arg fts=1; boot-arg fts_steps=N stops after N steps.
@@ -12900,10 +12972,12 @@ index 0000000000000000000000000000000000000000..f860b0c6c5f0ec72ee9ddbeef1191daf
 +}
 diff --git a/bsd/dev/mi8_glink.c b/bsd/dev/mi8_glink.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..035000e3d793c64eeb780acd16f22f9947e182f0
+index 0000000000000000000000000000000000000000..7dc7682bfda306913cba5bae478b5c71627e7e66
 --- /dev/null
 +++ b/bsd/dev/mi8_glink.c
-@@ -0,0 +1,1115 @@
+@@ -0,0 +1,1117 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#include "mi8_glink.h"
 +
 +#ifdef MI8_GLINK_HOST_TEST
@@ -14021,10 +14095,12 @@ index 0000000000000000000000000000000000000000..035000e3d793c64eeb780acd16f22f99
 +}
 diff --git a/bsd/dev/mi8_glink.h b/bsd/dev/mi8_glink.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e54bdf680bf9937a9b4bfc0f3628e18f43aeb82b
+index 0000000000000000000000000000000000000000..150cff350cea78ad3287a09014be6eeff656ec50
 --- /dev/null
 +++ b/bsd/dev/mi8_glink.h
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,84 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#ifndef MI8_GLINK_H
 +#define MI8_GLINK_H
 +
@@ -14109,10 +14185,12 @@ index 0000000000000000000000000000000000000000..e54bdf680bf9937a9b4bfc0f3628e18f
 +#endif
 diff --git a/bsd/dev/mi8_hostsvc.c b/bsd/dev/mi8_hostsvc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..526c3dddc3fb0cfe500769a5cc5f3e46b6694f25
+index 0000000000000000000000000000000000000000..5ff8a5d906395b782415782be70103f74a375ee9
 --- /dev/null
 +++ b/bsd/dev/mi8_hostsvc.c
-@@ -0,0 +1,738 @@
+@@ -0,0 +1,740 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#include "mi8_hostsvc.h"
 +#include <stdbool.h>
 +#include <string.h>
@@ -14853,10 +14931,12 @@ index 0000000000000000000000000000000000000000..526c3dddc3fb0cfe500769a5cc5f3e46
 +}
 diff --git a/bsd/dev/mi8_hostsvc.h b/bsd/dev/mi8_hostsvc.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..befa7a3e5e756e19fde48eec9ee7360622cc4cd8
+index 0000000000000000000000000000000000000000..730894062ef4ba89d98587dbb77b046e5e14887c
 --- /dev/null
 +++ b/bsd/dev/mi8_hostsvc.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,50 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#ifndef MI8_HOSTSVC_H
 +#define MI8_HOSTSVC_H
 +
@@ -14907,10 +14987,12 @@ index 0000000000000000000000000000000000000000..befa7a3e5e756e19fde48eec9ee73606
 +#endif
 diff --git a/bsd/dev/mi8_hostsvc_k.c b/bsd/dev/mi8_hostsvc_k.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2afe9152f
+index 0000000000000000000000000000000000000000..5847d42153894dec3b61928c94c56e454e8683c8
 --- /dev/null
 +++ b/bsd/dev/mi8_hostsvc_k.c
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,22 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/* The host services (TASK-005) with the kernel's allocator; the service source takes its allocator from the includer. */
 +#include <kern/kalloc.h>
 +#include <sys/errno.h>
@@ -14933,10 +15015,11 @@ index 0000000000000000000000000000000000000000..e483b3216f1764aae005e48c377c35a2
 +#include "mi8_hostsvc.c"
 diff --git a/bsd/dev/mi8_rproc.c b/bsd/dev/mi8_rproc.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..069306c3c6b07e6be49f950cf6c83627f35f298d
+index 0000000000000000000000000000000000000000..0038e04f3e0c156f82c4232afe5df44cd1267428
 --- /dev/null
 +++ b/bsd/dev/mi8_rproc.c
-@@ -0,0 +1,5019 @@
+@@ -0,0 +1,5020 @@
++/* Copyright (c) 2026 yanei */
 +/*
 + * The Mi 8's (SDM845) remote processors -- modem (MPSS), audio DSP, sensors, compute -- and the shared memory they talk
 + * through: the common ground under the Wi-Fi (the WCN3990's firmware is loaded and served by the modem, docs/wifi-plan.md)
@@ -19958,11 +20041,12 @@ index 0000000000000000000000000000000000000000..069306c3c6b07e6be49f950cf6c83627
 +}
 diff --git a/bsd/dev/mi8_tas2557.c b/bsd/dev/mi8_tas2557.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..d464a5221f7d53db8ec183bc53fcdc1de9020db6
+index 0000000000000000000000000000000000000000..425f7652dc5dc36849f58d7a67607a19e57a8a13
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.c
-@@ -0,0 +1,1156 @@
+@@ -0,0 +1,1157 @@
 +/* SPDX-License-Identifier: MIT
++ * Copyright (c) 2026 yanei
 + * TAS2557 firmware probe and bounded hard-muted power check. Independently written from the TI
 + * firmware format and Qualcomm register interfaces, without vendor code.
 + * Unmute is restricted to the bounded tone or clip check; no calibration or routing here.
@@ -21120,11 +21204,12 @@ index 0000000000000000000000000000000000000000..d464a5221f7d53db8ec183bc53fcdc1d
 +#endif
 diff --git a/bsd/dev/mi8_tas2557.h b/bsd/dev/mi8_tas2557.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..68a8481ff961a989b1af319d4dfc905197d6e384
+index 0000000000000000000000000000000000000000..1b50e657031bdd00ec3684caa55d7a20481a5238
 --- /dev/null
 +++ b/bsd/dev/mi8_tas2557.h
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,85 @@
 +/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#ifndef MI8_TAS2557_H
 +#define MI8_TAS2557_H
 +#include <stdint.h>
@@ -21842,10 +21927,12 @@ index 0000000000000000000000000000000000000000..d53853be36fae24bfd6fdfac1847b8e8
 +#endif
 diff --git a/bsd/dev/mi8_wlfw_k.c b/bsd/dev/mi8_wlfw_k.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..2940617f39c126ed20f5b3f6ecd5ed330093eae1
+index 0000000000000000000000000000000000000000..949c0c3bfa7c1984b50f49b9fd06ff47366b7b2f
 --- /dev/null
 +++ b/bsd/dev/mi8_wlfw_k.c
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/* The WLFW client (TASK-004) with the kernel's allocator; the client source takes its allocator from the includer. */
 +#include <kern/kalloc.h>
 +#include <sys/errno.h>
@@ -24867,7 +24954,7 @@ index 0000000000000000000000000000000000000000..e6394fc291cc837efbf341b5fd1a0fb2
 +
 +#endif
 diff --git a/bsd/dev/redwood_adreno.c b/bsd/dev/redwood_adreno.c
-index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115e9f3df60 100644
+index e84005324a92b88f242d2599471f4ddec04bf23f..f0a486a8cdb4a16fd8e796c6baab5bc3562ba6a8 100644
 --- a/bsd/dev/redwood_adreno.c
 +++ b/bsd/dev/redwood_adreno.c
 @@ -3129,6 +3129,10 @@ gpu_block_stop(void)
@@ -24961,7 +25048,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  	*largest = 0;
  	for (unsigned i = 0; i < gpu_free_count; i++) {
  		if (gpu_free[i].size > *largest) {
-@@ -3479,18 +3505,29 @@ redwood_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest, unsigned *h
+@@ -3479,18 +3505,45 @@ redwood_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest, unsigned *h
  bool
  redwood_gpu_map(uint64_t address, uint64_t phys, bool read_only)
  {
@@ -24971,6 +25058,22 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  	return space_map(&core_space, address, phys, PTE_CORE | (read_only ? PTE_READ_ONLY : 0));
  }
  
++bool
++redwood_gpu_map_range(uint64_t address, uint64_t phys, uint64_t size, bool read_only)
++{
++	if (mi8_gpu_kept()) {
++		return mi8_gpu_map_range(address, phys, size, read_only);
++	}
++	uint64_t flags = PTE_CORE | (read_only ? PTE_READ_ONLY : 0);
++
++	for (uint64_t off = 0; off < size; off += 4096) {
++		if (!space_map(&core_space, address + off, phys + off, flags)) {
++			return false;
++		}
++	}
++	return true;
++}
++
  void
  redwood_gpu_mapped(void)
  {
@@ -24991,7 +25094,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  	uint32_t context = smmu_context(&core_space);
  
  	for (uint64_t offset = 0; offset < size; offset += 4096) {
-@@ -3507,6 +3544,10 @@ redwood_gpu_unmap(uint64_t address, uint64_t size)
+@@ -3507,6 +3560,10 @@ redwood_gpu_unmap(uint64_t address, uint64_t size)
  void
  redwood_gpu_to_memory(void *start, uint64_t size)
  {
@@ -25002,7 +25105,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  	to_memory((vm_offset_t)start, size);
  }
  
-@@ -3514,6 +3555,9 @@ redwood_gpu_to_memory(void *start, uint64_t size)
+@@ -3514,6 +3571,9 @@ redwood_gpu_to_memory(void *start, uint64_t size)
  bool
  redwood_gpu_done(uint32_t fence)
  {
@@ -25012,7 +25115,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  	volatile uint32_t *word = (volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT);
  
  	to_memory((vm_offset_t)word, 4);
-@@ -3523,6 +3567,9 @@ redwood_gpu_done(uint32_t fence)
+@@ -3523,6 +3583,9 @@ redwood_gpu_done(uint32_t fence)
  uint32_t
  redwood_gpu_last(void)
  {
@@ -25022,7 +25125,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  	return gpu_fence;
  }
  
-@@ -3566,6 +3613,7 @@ gpu_times(void)
+@@ -3566,6 +3629,7 @@ gpu_times(void)
  			}
  			gpu_timed_by[by]++;
  			gpu_ticks += ticks;
@@ -25030,7 +25133,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  			gpu_timed_count++;
  		}
  	}
-@@ -3578,6 +3626,10 @@ gpu_times(void)
+@@ -3578,6 +3642,10 @@ gpu_times(void)
  void
  redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7])
  {
@@ -25041,7 +25144,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  	gpu_times();
  	*microseconds = gpu_ticks * 10 / 192;
  	*submissions = gpu_timed_count;
-@@ -3595,6 +3647,9 @@ redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7]
+@@ -3595,6 +3663,9 @@ redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7]
  uint32_t
  redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
  {
@@ -25051,7 +25154,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  	uint32_t wanted = 26 + 4 * count, room = 0;
  
  	for (int i = 0; i < 20000; i++) {
-@@ -3640,6 +3695,10 @@ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t co
+@@ -3640,6 +3711,10 @@ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t co
  void
  redwood_gpu_report(const char *why)
  {
@@ -25062,7 +25165,7 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  	uint32_t context = smmu_context(&core_space);
  
  	printf("adreno: gpu: %s: submission %u is the last, the core has done %u; ring: read up to %u, written up to %u; status "
-@@ -3712,6 +3771,9 @@ redwood_gpu_report(const char *why)
+@@ -3712,6 +3787,9 @@ redwood_gpu_report(const char *why)
  bool
  redwood_gpu_recover(void)
  {
@@ -28749,10 +28852,12 @@ index 9ba4ffbfef033532d8d3627f1c83f4bdf01403c4..215e4038fcc01ad7a0b77ddf0f200b04
  
 diff --git a/bsd/sys/mi8_lx.h b/bsd/sys/mi8_lx.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..559aed46289d6482c3681fccc00b7a8761d873da
+index 0000000000000000000000000000000000000000..f093459b2b8fdcde55cdedc5263e3be41ce9fc34
 --- /dev/null
 +++ b/bsd/sys/mi8_lx.h
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +/*
 + * Mi 8 (WCN3990): what the ath10k object on the lx layer asks of the kernel beyond sys/redwood_lx.h
 + * (docs/tasks/TASK-006: wifi/lx/include/lx_wlfw.h is the driver's copy and must stay the same).
@@ -28800,7 +28905,7 @@ index eb549c3f27629257b5ff88e3954c64a868687413..558632e256cec058f8081f26b7adce88
  void redwood_audio_init(void);
  void redwood_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virtio sound device */
 diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
-index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..91f6c6ea2dd6cf4532d8bbef5e60b5e7cfb5d9b8 100644
+index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..4acfc8851716403362975146d15ebf75ea03ac31 100644
 --- a/bsd/sys/redwood_input.h
 +++ b/bsd/sys/redwood_input.h
 @@ -42,6 +42,14 @@ void redwood_input_init(void);
@@ -28818,7 +28923,15 @@ index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..91f6c6ea2dd6cf4532d8bbef5e60b5e7
  void redwood_ufs_init(void);           /* ufs=2 to xnuloader: the phone's storage, read only, through the loader (ufs_shared_pa=) */
  void redwood_ufs_report(const char *when); /* where reading the storage has spent its time so far */
  bool redwood_ufs_dev(dev_t dev);           /* one of the storage's devices */
-@@ -122,6 +130,24 @@ void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t
+@@ -112,6 +120,7 @@ void redwood_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest, unsign
+     uint64_t *lost, uint32_t *refused);
+ extern uint32_t gpu_va;                 /* boot-arg gpu_va: 0 as before, 1 describe the addresses, 2 also guard them */
+ bool redwood_gpu_map(uint64_t address, uint64_t phys, bool read_only);
++bool redwood_gpu_map_range(uint64_t address, uint64_t phys, uint64_t size, bool read_only);
+ void redwood_gpu_mapped(void);
+ void redwood_gpu_unmap(uint64_t address, uint64_t size);
+ void redwood_gpu_to_memory(void *start, uint64_t size);
+@@ -122,6 +131,25 @@ void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t
  void redwood_gpu_report(const char *why);
  bool redwood_gpu_recover(void);
  void redwood_gpu_stop(void);
@@ -28830,6 +28943,7 @@ index bb8ad1ba451ad0ec98eb7b93ee97071cb2a45e59..91f6c6ea2dd6cf4532d8bbef5e60b5e7
 +void mi8_gpu_address_free(uint64_t address, uint64_t size);
 +void mi8_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest, unsigned *holes, unsigned *most, uint64_t *lost, uint32_t *refused);
 +bool mi8_gpu_map(uint64_t address, uint64_t phys, bool read_only);
++bool mi8_gpu_map_range(uint64_t address, uint64_t phys, uint64_t size, bool read_only);
 +void mi8_gpu_mapped(void);
 +void mi8_gpu_unmap(uint64_t address, uint64_t size);
 +void mi8_gpu_to_memory(void *start, uint64_t size);
@@ -28903,10 +29017,18 @@ index 78315a2d54cf0d9fe3dd0cf95178e835bd8e9304..fbe249244b0b9ef668c2fa9c9d6a7331
  out:
  	if (dvp) {
 diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
-index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8aded362e6 100644
+index a537cb6d31bd4ade5a024a301ade08ad7494c28f..eb2e0c1559a4af73c6491276a67f3309d5b7366e 100644
 --- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
 +++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
-@@ -77,13 +77,14 @@ enum {
+@@ -37,6 +37,7 @@ extern struct vc_info vinfo;            /* the boot framebuffer, as the text con
+ }
+ 
+ #include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IOMapTypes.h>
+ 
+ #include "MiniIOSurface.h"
+ 
+@@ -77,13 +78,14 @@ enum {
  #define SWAP_LAYERS_CLEARED     0x108
  #define SWAP_LAYERS             4
  
@@ -28922,7 +29044,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  #define SWAP_HELD_MS            700                     /* a swap that cannot be taken by then is not shown at all */
  
  #define FOURCC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
-@@ -162,6 +163,255 @@ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
+@@ -162,6 +164,257 @@ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
   * to 10 (the phone, 15 October; fb_threads=1 is how it was).
   */
  static TUNABLE(uint32_t, gThreads, "fb_threads", 3);
@@ -29023,6 +29145,8 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
 +static volatile bool gNativeChanged;            /* the first flip has changed the registers above */
 +static uint8_t * gNativeBootVirt;               /* the boot framebuffer's memory, as the native buffer A maps it, and ... */
 +static size_t gNativeBootBytes;                 /* ... the size of the picture the loader's display has in it */
++static IOLock * gFlipStateLock;                 /* leaf lock guarding fScanLatched / fScanPending */
++static class IOMobileFramebuffer * gZeroCopyFB;
 +
 +static void flipLog(const char * format, ...) __printflike(1, 2);
 +extern "C" void loader_log_putc(char c);
@@ -29178,7 +29302,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
  static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
  static inline unsigned
-@@ -231,6 +481,25 @@ class IOMobileFramebuffer : public IOService
+@@ -231,6 +484,32 @@ class IOMobileFramebuffer : public IOService
  public:
  	IOLock *        fLock;
  	uint8_t *       fBase;                  /* the boot framebuffer: the panel */
@@ -29189,8 +29313,10 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
 +	IOBufferMemoryDescriptor * fFlipMemory[3];
 +	bool            fNativeOn;              /* fb_native: the flip buffers are the splash region's, 1125 x 2436 */
 +	bool            fNativeADone;           /* ... buffer 0 has been cleared once the DPU let go of it */
++	bool            fNativeZeroCopy;        /* fb_native=2: direct scanout from pooled WC IOSurfaces */
 +	size_t          fNativeBytes;           /* ... one buffer's size */
 +	uint32_t        fNativeSrcW, fNativeSrcH, fNativeStride;        /* the size and row of the picture the DPU scales (fb_dpu) */
++	uint32_t        fNativeCurStride;
 +	IOMemoryDescriptor * fNativeRegion;
 +	IOMemoryMap *   fNativeMap;
 +	volatile uint32_t * fDpuPipe;           /* SSPP0 (VIG0) registers of the DPU */
@@ -29199,12 +29325,17 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
 +	uint32_t        fFlips;
 +	int             fFlipLatched, fFlipPending, fFlipDraw;  /* fb_mailbox */
 +	volatile uint32_t fSwapDrawing, fSwapPending, fSwapLatched;     /* the swap IDs of those buffers' frames */
++	MiniIOSurface * fScanLatched;           /* currently scanned-out surface (held + displayReaders) */
++	MiniIOSurface * fScanPending;           /* armed surface waiting for next TE latch (held + displayReaders) */
++	bool            fScanPendingValid, fScanLatchedIsFallback, fScanPendingIsFallback;
++	bool            fScanLatchedHold, fScanPendingHold;
++	uint32_t        fFlipZeroCopy, fFlipFallback, fFlipEvicted;
 +	uint32_t        fFlipReplaced;
 +	uint64_t        fFlipWaited, fFlipWaitedMax;
  	uint32_t        fPanelWidth, fPanelHeight, fRowBytes;
  	uint32_t        fWidth, fHeight;        /* the display as user space sees it */
  	MiniIOSurface * fDefaultSurface;
-@@ -289,6 +558,11 @@ public:
+@@ -289,6 +568,11 @@ public:
  	uint16_t *      fColumnWeight;          /* ... with fb_filter: how much of the column after it, of 256 */
  	uint32_t *      fBlendRow;              /* ... and a row of the picture blended from two (fBlendRowSize pixels) */
  	uint32_t        fBlendRowSize;
@@ -29216,7 +29347,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	uint8_t *       fRecBase;
  	uint64_t        fRecSize, fRecUsed;
  	uint64_t        fFirstFrame, fRecFirst; /* when the first frame was shown, and the first recorded */
-@@ -300,10 +574,15 @@ public:
+@@ -300,10 +584,19 @@ public:
  	MiniIOSurface * defaultSurface(void);
  	void present(const uint8_t * swap);
  	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
@@ -29227,12 +29358,16 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	void drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst);
 +	void flipSetup();
 +	void flipPresent();
++	void flipPresentZeroCopy(MiniIOSurface * s, uint32_t swapID, uint32_t stride);
++	bool pollLatch(void);
++	bool evictSurface(MiniIOSurface * s);
++	uint32_t waitHintUs(MiniIOSurface * s);
 +	bool shownSwap(uint32_t * id);
 +	void copyScan(MiniIOSurface * s);
  	void drawRows(const struct RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow);
  	static void helperMain(void * self, wait_result_t result);
  	/* the scaling shared out (fb_threads): fThreads drawers, the presenter and fThreads - 1 helpers */
-@@ -389,6 +668,551 @@ IOMobileFramebuffer::publishModes(void)
+@@ -389,6 +682,912 @@ IOMobileFramebuffer::publishModes(void)
  	OSSafeReleaseNULL(color);
  }
  
@@ -29565,6 +29700,125 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
 +	fFlipMemory[0] = NULL;
 +	fFlipVirt[0] = fBase;
 +	fFlipPhys[0] = fFlipOriginal;
++	if (gNative >= 2 && gFlip == 1 && gMailbox != 0 && fFlipOriginal == 0x9d400000u) {
++		const size_t piece = round_page((size_t) 4608 * 2436);
++		uint32_t srcW = 1125, srcH = 2436, stride = 4608;
++
++		if (gDpuScale != 0 && fWidth <= 1125 && fHeight <= 2436 && (fWidth != 1125 || fHeight != 2436)) {
++			srcW = fWidth;
++			srcH = fHeight;
++			stride = (fWidth * 4 + 63) & ~63u;
++		}
++		const size_t slotSize = round_page((size_t) stride * srcH);
++
++		fNativeRegion = IOMemoryDescriptor::withPhysicalAddress((IOPhysicalAddress) 0x9d400000ull, piece, kIODirectionInOut);
++		fNativeMap = fNativeRegion != NULL ? fNativeRegion->map(kIOMapAnywhere | kIOMapWriteCombineCache) : NULL;
++		if (fNativeMap == NULL) {
++			flipLog("MiniIOMobileFramebuffer: fb_native=2: the splash region cannot be mapped: trying fallback\n");
++			OSSafeReleaseNULL(fNativeRegion);
++		} else {
++			struct minisurf_scan_slot slots[4];
++			unsigned slotCount = 0, splashCount = 0, ramCount = 0;
++
++			bzero(slots, sizeof(slots));
++			for (unsigned i = 0; i < 2; i++) {
++				uint32_t phys = 0x9d400000u + (uint32_t) ((i + 1) * piece);
++				if ((uint64_t) phys + slotSize > 0x9f800000ull) {
++					continue;
++				}
++				IOOptionBits wcPhysOpts = kIODirectionInOut |
++				    ((IOOptionBits) kIOWriteCombineCache << kIOMemoryBufferCacheShift);
++				IOMemoryDescriptor * desc = IOMemoryDescriptor::withAddressRange((mach_vm_address_t) phys,
++				    slotSize, wcPhysOpts, TASK_NULL);
++				IOMemoryMap * kmap = desc != NULL ?
++				    desc->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapWriteCombineCache) : NULL;
++
++				if (kmap != NULL) {
++					uint8_t * kvirt = (uint8_t *) kmap->getVirtualAddress();
++
++					bzero(kvirt, slotSize);
++					__asm__ volatile ("dsb sy" ::: "memory");
++					slots[slotCount].memory = desc;
++					slots[slotCount].kmap = kmap;
++					slots[slotCount].kvirt = kvirt;
++					slots[slotCount].phys = phys;
++					slotCount++;
++					splashCount++;
++				} else {
++					OSSafeReleaseNULL(desc);
++				}
++			}
++			for (unsigned i = 0; i < 2; i++) {
++				IOOptionBits wcRamOpts = kIODirectionInOut | kIOMemoryKernelUserShared |
++				    kIOMemoryPhysicallyContiguous | kIOMapWriteCombineCache;
++				IOBufferMemoryDescriptor * bmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
++				    wcRamOpts, slotSize, 0xffffc000ull);
++				addr64_t p = bmd != NULL ? bmd->getPhysicalAddress() : 0;
++
++				if (bmd != NULL && p != 0 && (p & PAGE_MASK) == 0 && p + slotSize <= 0x100000000ull) {
++					uint8_t * kvirt = (uint8_t *) bmd->getBytesNoCopy();
++
++					bzero(kvirt, slotSize);
++					__asm__ volatile ("dsb sy" ::: "memory");
++					slots[slotCount].memory = bmd;
++					slots[slotCount].kmap = NULL;
++					slots[slotCount].kvirt = kvirt;
++					slots[slotCount].phys = (uint32_t) p;
++					slotCount++;
++					ramCount++;
++				} else {
++					OSSafeReleaseNULL(bmd);
++					break;
++				}
++			}
++			if (slotCount >= 2) {
++				for (unsigned i = 0; i < sizeof(gScalePipeRegs) / 4; i++) {
++					gNativeSavedPipe[i] = fDpuPipe[gScalePipeRegs[i] / 4];
++				}
++				for (unsigned i = 0; i < sizeof(gScalerRegs) / 4; i++) {
++					gNativeSavedScaler[i] = fDpuPipe[(0xa00 + gScalerRegs[i]) / 4];
++				}
++				gNativeBootVirt = (uint8_t *) fNativeMap->getVirtualAddress();
++				gNativeBootBytes = (size_t) fRowBytes * fPanelHeight;
++				fFlipMemory[0] = NULL;
++				fFlipVirt[0] = gNativeBootVirt;
++				fFlipPhys[0] = 0x9d400000u;
++				fNativeBytes = slotSize;
++				fNativeSrcW = srcW;
++				fNativeSrcH = srcH;
++				fNativeStride = stride;
++				fNativeCurStride = stride;
++				MiniIOSurfaceRegisterScanPool(fNativeSrcW, fNativeSrcH, fNativeStride, slotSize, slots, slotCount);
++				fPanelWidth = fNativeSrcW;
++				fPanelHeight = fNativeSrcH;
++				fRowBytes = fNativeStride;
++				fNativeOn = true;
++				fNativeZeroCopy = true;
++				fFlipOn = true;
++				fBase = fFlipVirt[0];
++				fScanLatched = NULL;
++				fScanPending = NULL;
++				fScanPendingValid = false;
++				fScanLatchedIsFallback = true;
++				fScanPendingIsFallback = false;
++				fScanLatchedHold = false;
++				fScanPendingHold = false;
++				gZeroCopyFB = this;
++				flipLog("MiniIOMobileFramebuffer: fb_native=2: zero-copy scanout pool (%u slots of %u x %u stride %u, "
++				    "%lu bytes each: %u splash + %u ram; fallback %#x)\n", slotCount, fNativeSrcW, fNativeSrcH,
++				    fNativeStride, (unsigned long) slotSize, splashCount, ramCount, fFlipPhys[0]);
++				return;
++			}
++			flipLog("MiniIOMobileFramebuffer: fb_native=2: only %u pool slots built; falling back to fb_native=1\n",
++			    slotCount);
++			for (unsigned k = 0; k < slotCount; k++) {
++				OSSafeReleaseNULL(slots[k].kmap);
++				OSSafeReleaseNULL(slots[k].memory);
++			}
++			OSSafeReleaseNULL(fNativeMap);
++			OSSafeReleaseNULL(fNativeRegion);
++		}
++	}
 +	if (gNative != 0 && gFlip == 1 && gMailbox != 0 && fFlipOriginal == 0x9d400000u) {
 +		/* three pictures of 1125 x 2436 from the boot framebuffer's address on, in the splash region (36 MiB, not XNU's: EXP-0165) */
 +		const size_t piece = round_page((size_t) 4608 * 2436);
@@ -29762,6 +30016,238 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
 +	}
 +}
 +
++bool
++IOMobileFramebuffer::pollLatch(void)
++{
++	MiniIOSurface * retired = NULL;
++	bool retiredHold = false;
++	bool promoted = false;
++
++	if (!fNativeZeroCopy || gFlipStateLock == NULL) {
++		return false;
++	}
++	IOLockLock(gFlipStateLock);
++	if (fScanPendingValid && (fDpuCtl[0x18 / 4] & 1) == 0) {
++		retired = fScanLatched;
++		retiredHold = fScanLatchedHold;
++		fScanLatched = fScanPending;
++		fScanLatchedHold = fScanPendingHold;
++		fScanLatchedIsFallback = fScanPendingIsFallback;
++		fSwapLatched = fSwapPending;
++		fScanPending = NULL;
++		fScanPendingHold = false;
++		fScanPendingIsFallback = false;
++		fScanPendingValid = false;
++		promoted = true;
++	}
++	IOLockUnlock(gFlipStateLock);
++	if (retired != NULL) {
++		if (retiredHold) {
++			MiniIOSurfaceEndDisplay(&retired, 1);
++		}
++		MiniIOSurfaceDrop(retired);
++	}
++	return promoted;
++}
++
++void
++IOMobileFramebuffer::flipPresentZeroCopy(MiniIOSurface * s, uint32_t swapID, uint32_t stride)
++{
++	uint64_t t0 = mach_absolute_time(), ns, pulse, period, guard, next;
++	MiniIOSurface * sCopy = NULL;
++	MiniIOSurface * retiredLatched = NULL;
++	MiniIOSurface * retiredPending = NULL;
++	bool retiredLatchedHold = false, retiredPendingHold = false;
++	bool clearBootNow = false;
++
++	if (gScaleBusy || gFlipStateLock == NULL) {
++		return;
++	}
++	if (s != NULL) {
++		sCopy = MiniIOSurfaceCopy(s->sid);
++		if (sCopy != NULL) {
++			MiniIOSurfaceRetainDisplay(sCopy);
++		}
++	}
++	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
++	nanoseconds_to_absolutetime(300 * NSEC_PER_USEC, &guard);
++	if (teLast(&pulse)) {
++		next = pulse + period;
++		if (next > t0 && next - t0 < guard) {
++			while (mach_absolute_time() < next + guard / 6) {
++			}
++		}
++	}
++	IOLockLock(gFlipStateLock);
++	if (fScanPendingValid && (fDpuCtl[0x18 / 4] & 1) == 0) {
++		retiredLatched = fScanLatched;
++		retiredLatchedHold = fScanLatchedHold;
++		fScanLatched = fScanPending;
++		fScanLatchedHold = fScanPendingHold;
++		fScanLatchedIsFallback = fScanPendingIsFallback;
++		fSwapLatched = fSwapPending;
++		fScanPending = NULL;
++		fScanPendingHold = false;
++		fScanPendingIsFallback = false;
++		fScanPendingValid = false;
++	}
++	if (fScanPendingValid) {
++		retiredPending = fScanPending;
++		retiredPendingHold = fScanPendingHold;
++		fScanPending = NULL;
++		fScanPendingHold = false;
++		fScanPendingIsFallback = false;
++		fScanPendingValid = false;
++		fFlipReplaced++;
++	}
++	uint32_t phys = sCopy != NULL ? sCopy->pixelPhys : fFlipPhys[0];
++	__asm__ volatile ("dsb sy" ::: "memory");
++	if (!gNativeChanged) {
++		scaleSet(fDpuPipe, phys, fNativeSrcW, fNativeSrcH, stride, 1080, 0, 2248);
++		fNativeCurStride = stride;
++		gNativeChanged = true;
++	} else {
++		if (stride != fNativeCurStride) {
++			fDpuPipe[0x24 / 4] = stride;
++			fNativeCurStride = stride;
++		}
++		fDpuPipe[0x14 / 4] = phys;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	fDpuCtl[0x18 / 4] = 1;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	fSwapPending = swapID;
++	fScanPending = sCopy;
++	fScanPendingHold = (sCopy != NULL);
++	fScanPendingIsFallback = (sCopy == NULL);
++	fScanPendingValid = true;
++	if (sCopy != NULL) {
++		fFlipZeroCopy++;
++	} else {
++		fFlipFallback++;
++	}
++	if (!fNativeADone && !fScanLatchedIsFallback && !fScanPendingIsFallback) {
++		fNativeADone = true;
++		clearBootNow = true;
++	}
++	uint32_t zc = fFlipZeroCopy, fb = fFlipFallback, ev = fFlipEvicted, rep = fFlipReplaced;
++	IOLockUnlock(gFlipStateLock);
++
++	if (retiredLatched != NULL) {
++		if (retiredLatchedHold) {
++			MiniIOSurfaceEndDisplay(&retiredLatched, 1);
++		}
++		MiniIOSurfaceDrop(retiredLatched);
++	}
++	if (retiredPending != NULL) {
++		if (retiredPendingHold) {
++			MiniIOSurfaceEndDisplay(&retiredPending, 1);
++		}
++		MiniIOSurfaceDrop(retiredPending);
++	}
++	if (clearBootNow) {
++		bzero(fFlipVirt[0], fNativeBytes);
++		__asm__ volatile ("dsb sy" ::: "memory");
++	}
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	fFlipWaited += ns / 1000;
++	fFlipWaitedMax = (ns / 1000) > fFlipWaitedMax ? (ns / 1000) : fFlipWaitedMax;
++	if (++fFlips % 300 == 0) {
++		flipLog("MiniIOMobileFramebuffer: fb_native=2: %u flips (%u zero-copy, %u fallback, %u evicted, %u replaced), "
++		    "%llu us spent in all, %llu us at most\n", fFlips, zc, fb, ev, rep, fFlipWaited, fFlipWaitedMax);
++	}
++}
++
++bool
++IOMobileFramebuffer::evictSurface(MiniIOSurface * s)
++{
++	if (!fNativeZeroCopy || gFlipStateLock == NULL || s == NULL || gScaleBusy) {
++		return false;
++	}
++	if (pollLatch()) {
++		return true;
++	}
++	MiniIOSurface * release[2];
++	unsigned releaseCount = 0;
++
++	IOLockLock(gFlipStateLock);
++	bool sameAsPending = fScanPendingValid && fScanPending == s;
++	if (fScanLatched == s && fScanLatchedHold && (!fScanPendingValid || sameAsPending)) {
++		fScanLatchedHold = false;
++		release[releaseCount++] = s;
++	}
++	if (sameAsPending && fScanPendingHold) {
++		fScanPendingHold = false;
++		release[releaseCount++] = s;
++	}
++	if (releaseCount != 0) {
++		fFlipEvicted++;
++	}
++	IOLockUnlock(gFlipStateLock);
++	if (releaseCount == 0) {
++		return false;
++	}
++	MiniIOSurfaceEndDisplay(release, releaseCount);
++	return true;
++}
++
++bool
++MiniIOFlipPollLatch(void)
++{
++	return gZeroCopyFB != NULL ? gZeroCopyFB->pollLatch() : false;
++}
++
++bool
++MiniIOFlipEvictSurface(MiniIOSurface * surface)
++{
++	return gZeroCopyFB != NULL ? gZeroCopyFB->evictSurface(surface) : false;
++}
++
++uint32_t
++IOMobileFramebuffer::waitHintUs(MiniIOSurface * s)
++{
++	if (!fNativeZeroCopy || gFlipStateLock == NULL || s == NULL || gScaleBusy) {
++		return 0;
++	}
++	IOLockLock(gFlipStateLock);
++	bool waitTe = fScanPendingValid && fScanLatched == s && fScanLatchedHold && fScanPending != s &&
++	    (fDpuCtl[0x18 / 4] & 1) != 0;
++	IOLockUnlock(gFlipStateLock);
++	if (!waitTe) {
++		return 0;
++	}
++	uint64_t pulse, period, now, remNs;
++	if (!teLast(&pulse)) {
++		return 0;
++	}
++	if ((fDpuCtl[0x18 / 4] & 1) == 0) {
++		return 0;
++	}
++	uint32_t hz = refreshHz();
++	uint64_t periodUs = 1000000ull / hz;
++	nanoseconds_to_absolutetime(NSEC_PER_SEC / hz, &period);
++	now = mach_absolute_time();
++	uint64_t next = pulse + period;
++	if (next <= now) {
++		return 0;
++	}
++	absolutetime_to_nanoseconds(next - now, &remNs);
++	uint64_t waitUs = remNs / NSEC_PER_USEC + 250;
++	if (waitUs < 200) {
++		waitUs = 200;
++	}
++	if (waitUs > periodUs + 250) {
++		waitUs = periodUs + 250;
++	}
++	return (uint32_t) waitUs;
++}
++
++uint32_t
++MiniIOFlipWaitHintUs(MiniIOSurface * surface)
++{
++	return gZeroCopyFB != NULL ? gZeroCopyFB->waitHintUs(surface) : 0;
++}
++
 +/*
 + * The swap whose frame is on the panel (fb_flip with fb_mailbox): the waiting one if the DPU has taken it since (CTL0 FLUSH
 + * clear), else the one taken before. Read without the presenter's cooperation: a flip just being made can make this the
@@ -29772,6 +30258,16 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
 +{
 +	if (!fFlipOn || gMailbox == 0) {
 +		return false;
++	}
++	if (fNativeZeroCopy && gFlipStateLock != NULL) {
++		IOLockLock(gFlipStateLock);
++		if (fScanPendingValid && (fDpuCtl[0x18 / 4] & 1) == 0) {
++			*id = fSwapPending;
++		} else {
++			*id = fSwapLatched;
++		}
++		IOLockUnlock(gFlipStateLock);
++		return *id != 0;
 +	}
 +	if (fFlipPending >= 0 && (fDpuCtl[0x18 / 4] & 1) == 0) {
 +		*id = fSwapPending;
@@ -29784,15 +30280,17 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  bool
  IOMobileFramebuffer::start(IOService * provider)
  {
-@@ -403,6 +1227,7 @@ IOMobileFramebuffer::start(IOService * provider)
+@@ -403,7 +1602,9 @@ IOMobileFramebuffer::start(IOService * provider)
  		return false;
  	}
  	fLock = IOLockAlloc();
 +	gDamageLock = IOLockAlloc();
  	fSwapLock = IOLockAlloc();
++	gFlipStateLock = IOLockAlloc();
  	if (kernel_thread_start(&IOMobileFramebuffer::presenterMain, this, &thread) != KERN_SUCCESS) {
  		IOLog("MiniIOMobileFramebuffer: no thread to put frames on the panel with\n");
-@@ -424,6 +1249,8 @@ IOMobileFramebuffer::start(IOService * provider)
+ 		return false;
+@@ -424,6 +1625,8 @@ IOMobileFramebuffer::start(IOService * provider)
  	fPanelWidth = vinfo.v_width;
  	fPanelHeight = vinfo.v_height;
  	fRowBytes = vinfo.v_rowbytes;
@@ -29801,7 +30299,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
  	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
  	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
-@@ -442,12 +1269,15 @@ IOMobileFramebuffer::start(IOService * provider)
+@@ -442,12 +1645,15 @@ IOMobileFramebuffer::start(IOService * provider)
  			}
  		}
  	}
@@ -29819,7 +30317,18 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  
  	if (gRecSeconds != 0) {
  		/* one piece of physical memory: the loader will send it over USB as it lies */
-@@ -595,10 +1425,35 @@ sample_at(int64_t i, int64_t in, int64_t out)
+@@ -557,7 +1763,9 @@ IOMobileFramebuffer::defaultSurface(void)
+ {
+ 	IOLockLock(fLock);
+ 	if (fDefaultSurface == NULL) {
+-		fDefaultSurface = MiniIOSurfaceCreateSimple(fWidth, fHeight, FOURCC('B', 'G', 'R', 'A'));
++		fDefaultSurface = fNativeZeroCopy ?
++		    MiniIOSurfaceCreateScanout(fWidth, fHeight, fNativeStride, (uint32_t) fNativeBytes, FOURCC('B', 'G', 'R', 'A')) :
++		    MiniIOSurfaceCreateSimple(fWidth, fHeight, FOURCC('B', 'G', 'R', 'A'));
+ 	}
+ 	IOLockUnlock(fLock);
+ 	return fDefaultSurface;
+@@ -595,10 +1803,35 @@ sample_at(int64_t i, int64_t in, int64_t out)
  struct RowJob {
  	const uint8_t * pixels;
  	uint32_t        stride;
@@ -29857,7 +30366,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  void
  IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow)
  {
-@@ -607,6 +1462,62 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -607,6 +1840,62 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  	int32_t sx = job->sx, sy = job->sy, sw = job->sw, sh = job->sh;
  	int32_t px0 = job->px0, py0 = job->py0, px1 = job->px1, py1 = job->py1, cx0 = job->cx0, cx1 = job->cx1;
  	bool filter = job->filter;
@@ -29920,7 +30429,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  
  	for (int32_t y = y0; y < y1; y++) {
  		const uint32_t * from;
-@@ -615,6 +1526,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -615,6 +1904,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  		if (y < 0 || (uint32_t) y >= fPanelHeight) {
  			continue;
  		}
@@ -29928,7 +30437,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
  		if (job->unscaled) {
  			/* not scaled at all */
-@@ -634,13 +1546,31 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -634,13 +1924,31 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  
  				uint32_t * __restrict mixed = blendRow;
  
@@ -29963,7 +30472,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  		} else {
  			from = (const uint32_t *) (pixels + (size_t) (sy + (int64_t) (y - py0) * sh / (py1 - py0)) * stride);
  		}
-@@ -661,7 +1591,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -661,7 +1969,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  		if (filter) {
  			const uint32_t * __restrict column = fColumn + cx0;
  			const uint16_t * __restrict weights = fColumnWeight + cx0;
@@ -29972,7 +30481,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  
  			for (uint32_t i = 0, n = (uint32_t) (cx1 - cx0); i < n; i++) {
  				uint32_t c = column[i], w = weights[i], a = from[c];
-@@ -670,9 +1600,26 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
+@@ -670,9 +1978,26 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
  			}
  		} else {
  			for (int32_t x = cx0; x < cx1; x++) {
@@ -30000,7 +30509,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	}
  }
  
-@@ -687,6 +1634,7 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
+@@ -687,6 +2012,7 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  	IOLockLock(fb->fHelperLock);
  	index = fb->fHelpersStarted++;
  	IOLockUnlock(fb->fHelperLock);
@@ -30008,7 +30517,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	for (;;) {
  		const RowJob * job;
  		int32_t rows, y0, y1;
-@@ -700,9 +1648,9 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
+@@ -700,9 +2026,9 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  		job = fb->fHelperJob;
  		IOLockUnlock(fb->fHelperLock);
  		/* share index + 1 of fThreads (the presenter takes share 0) */
@@ -30021,7 +30530,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  		blend = fb->fHelperBlend[index];
  		fb->drawRows(job, y0, y1, blend);
  		IOLockLock(fb->fHelperLock);
-@@ -714,6 +1662,38 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
+@@ -714,6 +2040,38 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  	}
  }
  
@@ -30060,7 +30569,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  /*
   * Put a rectangle of a 32-bit surface on the screen. `dst` is in display coordinates; the
   * panel may be of another size, and the layer itself may be scaled: both are done in one
-@@ -741,6 +1721,33 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
+@@ -741,6 +2099,33 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  	if (sx < 0 || sy < 0 || (uint32_t) (sx + sw) > s->info.width || (uint32_t) (sy + sh) > s->info.height) {
  		return;
  	}
@@ -30094,7 +30603,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	/* the rectangle on the panel */
  	px0 = (int32_t) ((int64_t) dx * fPanelWidth / fWidth);
  	py0 = (int32_t) ((int64_t) dy * fPanelHeight / fHeight);
-@@ -750,7 +1757,11 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
+@@ -750,7 +2135,11 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  		return;
  	}
  	/* (blending, a row of the picture mixed from two: room for it, for every one who draws rows) */
@@ -30107,7 +30616,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  		if (fBlendRow != NULL) {
  			IODelete(fBlendRow, uint32_t, fBlendRowSize);
  		}
-@@ -759,7 +1770,7 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
+@@ -759,7 +2148,7 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  				IODelete(fHelperBlend[i], uint32_t, fBlendRowSize);
  			}
  		}
@@ -30116,7 +30625,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  		fBlendRow = IONew(uint32_t, fBlendRowSize);
  		for (unsigned i = 0; i + 1 < fThreads; i++) {
  			fHelperBlend[i] = IONew(uint32_t, fBlendRowSize);
-@@ -776,6 +1787,24 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
+@@ -776,6 +2165,24 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  	/* which pixel of a source row each pixel of a panel row takes: worked out once, not 2.6 million times */
  	cx0 = px0 < 0 ? 0 : px0;
  	cx1 = (uint32_t) px1 > fPanelWidth ? (int32_t) fPanelWidth : px1;
@@ -30141,7 +30650,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	for (int32_t x = cx0; x < cx1; x++) {
  		if (filter) {
  			int64_t at = sample_at(x - px0, sw, px1 - px0);
-@@ -798,25 +1827,34 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
+@@ -798,25 +2205,34 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
  	job.py1 = py1;
  	job.cx0 = cx0;
  	job.cx1 = cx1;
@@ -30179,7 +30688,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  }
  
  /*
-@@ -880,6 +1918,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
+@@ -880,6 +2296,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
  		if (IOLockSleepDeadline(fSwapLock, &fSwapsWaiting, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
  		    fSwapsWaiting >= swapQueue()) {
  			fStatLost++;                    /* (the GPU has stopped answering: the frame before is waiting for it) */
@@ -30187,7 +30696,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  			IOLockUnlock(fSwapLock);
  			return;
  		}
-@@ -897,9 +1936,21 @@ IOMobileFramebuffer::present(const uint8_t * swap)
+@@ -897,9 +2314,21 @@ IOMobileFramebuffer::present(const uint8_t * swap)
  	IOLockUnlock(fSwapLock);
  }
  
@@ -30209,7 +30718,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	((IOMobileFramebuffer *) self)->presenter();
  }
  
-@@ -927,6 +1978,17 @@ IOMobileFramebuffer::presenter(void)
+@@ -927,6 +2356,17 @@ IOMobileFramebuffer::presenter(void)
  	}
  }
  
@@ -30227,7 +30736,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  /* A swap's surfaces onto the panel, once the GPU is done with them. */
  void
  IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
-@@ -935,17 +1997,54 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -935,17 +2375,54 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  	uint64_t began = mach_absolute_time(), nanos, ready, shown, drawn;
  	uint32_t layers = 0;
  	MiniIOSurface * recorded = NULL;
@@ -30286,7 +30795,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  		uint64_t period, aim, next;
  
  		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
-@@ -971,11 +2070,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -971,11 +2448,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  	}
  	shown = began;
  	/* its turn has come: the swap after it may be handed over */
@@ -30299,118 +30808,271 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	IOLockLock(fLock);
  	if (fLastFrame != 0) {
  		absolutetime_to_nanoseconds(began - fLastFrame, &nanos);
-@@ -1010,9 +2105,11 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
- 		if (sid == 0) {
- 			/* the bottom layer taken away: nothing is shown, the screen is black */
- 			if (layer == 0 && (set & 1) && fGraphics) {
-+				fPanelWhole = false;
- 				for (uint32_t y = 0; y < fPanelHeight; y++) {
- 					bzero(fBase + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
- 				}
-+				blanked = true;
- 			}
- 			continue;
- 		}
-@@ -1036,7 +2133,82 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
- 				fGraphics = true;
- 				PE_initialize_console(NULL, kPEGraphicsMode);
- 			}
--			drawLayer(s, src, dst);
-+			if (!(gNoCopy && fSwapsShown > 40)) {
-+				MiniIOSurface * scan = NULL;
-+
-+				fDamageUse = false;
-+				if (layer == 0) {
-+					bool only = true, given, whole;
-+					int32_t box[4];
-+
-+					for (unsigned other = 1; other < SWAP_LAYERS; other++) {
-+						only = only && swapWord(swap, SWAP_SURFACE(other)) == 0;
-+					}
-+					IOLockLock(gDamageLock);
-+					given = gDamageGiven;
-+					whole = gDamageFull;
-+					memcpy(box, gDamage, sizeof(box));
-+					gDamageGiven = gDamageFull = false;
-+					bzero(gDamage, sizeof(gDamage));
-+					IOLockUnlock(gDamageLock);
-+					if (gPartial && !fFlipOn && only && given && !whole && fPanelWhole && fSinceFull < FULL_EVERY && fSwapsShown > 8 &&
-+					    !fWasLost && box[2] > box[0] && box[3] > box[1]) {
-+						box[0] = box[0] < 0 ? 0 : box[0];
-+						box[1] = box[1] < 0 ? 0 : box[1];
-+						box[2] = box[2] > (int32_t) s->info.width ? (int32_t) s->info.width : box[2];
-+						box[3] = box[3] > (int32_t) s->info.height ? (int32_t) s->info.height : box[3];
-+						memcpy(fDamageBox, box, sizeof(box));
-+						fDamageUse = box[2] > box[0] && box[3] > box[1];
-+					}
-+					fSinceFull = fDamageUse ? fSinceFull + 1 : 0;
-+					fPanelWhole = only;
-+					fWasLost = false;
-+				} else {
-+					fPanelWhole = false;    /* (more than the one layer: the panel is not the frame alone) */
-+				}
-+				if (layer == 0 && gScanOn) {
-+					bool only = true;
-+
-+					for (unsigned other = 1; other < SWAP_LAYERS; other++) {
-+						only = only && swapWord(swap, SWAP_SURFACE(other)) == 0;
-+					}
-+					IOLockLock(gDamageLock);
-+					if (only && gScanFresh && gScan != NULL &&
-+					    (src[2] <= 0 || (src[0] == 0 && src[1] == 0 && src[2] == (int32_t) s->info.width && src[3] == (int32_t) s->info.height)) &&
-+					    (dst[2] <= 0 || (dst[0] == 0 && dst[1] == 0 && dst[2] == (int32_t) fWidth && dst[3] == (int32_t) fHeight))) {
-+						scan = gScan;
-+						gScanFresh = false;
-+					}
-+					IOLockUnlock(gDamageLock);
-+				}
-+				if (layer == 0 && gTouchLat) {
-+					redwood_tl("tl: d %u partial %u box %d,%d,%d,%d whole %u since %u\n", swapWord(swap, SWAP_ID), fDamageUse ? 1u : 0u,
-+					    fDamageBox[0], fDamageBox[1], fDamageBox[2], fDamageBox[3], fPanelWhole ? 1u : 0u, fSinceFull);
-+				}
-+				if (scan != NULL) {
-+					MiniIOSurface * one[1] = { scan };
-+
-+					uint64_t w0 = mach_absolute_time(), w1, w2;
-+					bool got = MiniIOSurfaceBeginDisplay(one, 1, SWAP_GPU_MS);
-+
-+					w1 = mach_absolute_time();
-+					if (got) {
-+						copyScan(scan);
-+						w2 = mach_absolute_time();
-+						MiniIOSurfaceEndDisplay(one, 1);
-+						if (gTouchLat) {
-+							redwood_tl("tl: s2 wait_for_gpu %llu copy %llu\n", micros(w1) - micros(w0), micros(w2) - micros(w1));
-+						}
-+						fPanelWhole = true;
-+						fSinceFull = 0;
-+					} else {
-+						drawLayer(s, src, dst);
-+					}
-+				} else {
-+					drawLayer(s, src, dst);
-+				}
-+				fDamageUse = false;
-+			}
- 			if (layer == 0) {
- 				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
- 			}
-@@ -1046,6 +2218,14 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
- 	if (recorded != NULL) {
- 		record(recorded);
+@@ -994,58 +2467,223 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+ 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
+ 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
  	}
-+	if (fFlipOn && (recorded != NULL || blanked)) {
+-	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+-		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
+-		int32_t src[4], dst[4];
+-		MiniIOSurface * s;
+-
+-		layers |= sid != 0 ? 1u << layer : 0;
+-		/* the frames' surfaces: is it a few, in turn? */
+-		for (unsigned i = 0; layer == 0 && sid != 0 && i < 8; i++) {
+-			if (fStatSurfaces[i] == 0 || fStatSurfaces[i] == sid) {
+-				fStatSurfaces[i] = sid;
++	bool canDirectScanout = false;
++	if (fNativeZeroCopy && !gScaleBusy && !(gNoCopy && fSwapsShown > 40) && !fDiff && surfaces[0] != NULL &&
++	    swapWord(swap, SWAP_SURFACE(0)) != 0 && swapWord(swap, SWAP_SURFACE(1)) == 0 &&
++	    swapWord(swap, SWAP_SURFACE(2)) == 0 && swapWord(swap, SWAP_SURFACE(3)) == 0) {
++		MiniIOSurface * s0 = surfaces[0];
++		int32_t src0[4], dst0[4];
++
++		memcpy(src0, swap + SWAP_SOURCE(0), sizeof(src0));
++		memcpy(dst0, swap + SWAP_DEST(0), sizeof(dst0));
++		bool srcFull = src0[2] <= 0 || src0[3] <= 0 ||
++		    (src0[0] == 0 && src0[1] == 0 && src0[2] == (int32_t) s0->info.width && src0[3] == (int32_t) s0->info.height);
++		bool dstFull = dst0[2] <= 0 || dst0[3] <= 0 ||
++		    (dst0[0] == 0 && dst0[1] == 0 && dst0[2] == (int32_t) fWidth && dst0[3] == (int32_t) fHeight);
++
++		canDirectScanout = s0->pixelPhys != 0 && s0->info.bytesPerElement == 4 && s0->info.planeCount == 0 &&
++		    s0->info.offset == 0 && s0->info.pixelFormat == FOURCC('B', 'G', 'R', 'A') &&
++		    s0->info.width == fNativeSrcW && s0->info.height == fNativeSrcH &&
++		    (s0->info.bytesPerRow & 63) == 0 &&
++		    (uint64_t) s0->info.bytesPerRow * s0->info.height <= fNativeBytes &&
++		    srcFull && dstFull;
++	}
++	if (canDirectScanout) {
++		uint32_t sid0 = swapWord(swap, SWAP_SURFACE(0));
++		MiniIOSurface * s = surfaces[0];
++
++		layers = 1;
++		for (unsigned i = 0; i < 8; i++) {
++			if (fStatSurfaces[i] == 0 || fStatSurfaces[i] == sid0) {
++				fStatSurfaces[i] = sid0;
+ 				break;
+ 			}
+ 		}
+-		if (sid == 0) {
+-			/* the bottom layer taken away: nothing is shown, the screen is black */
+-			if (layer == 0 && (set & 1) && fGraphics) {
+-				for (uint32_t y = 0; y < fPanelHeight; y++) {
+-					bzero(fBase + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
++		if (report) {
++			int32_t src[4], dst[4];
++
++			memcpy(src, swap + SWAP_SOURCE(0), sizeof(src));
++			memcpy(dst, swap + SWAP_DEST(0), sizeof(dst));
++			IOLog("MiniIOMobileFramebuffer: swap %u layer 0: surface %u (%ux%u '%c%c%c%c') "
++			    "from %d,%d %dx%d to %d,%d %dx%d, layers set 0x%x\n", swapWord(swap, SWAP_ID), sid0,
++			    s->info.width, s->info.height,
++			    (int) (s->info.pixelFormat >> 24 & 0xff), (int) (s->info.pixelFormat >> 16 & 0xff),
++			    (int) (s->info.pixelFormat >> 8 & 0xff), (int) (s->info.pixelFormat & 0xff),
++			    src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3], set);
++		}
++		if (!fGraphics) {
++			fGraphics = true;
++			PE_initialize_console(NULL, kPEGraphicsMode);
++		}
++		IOLockLock(gDamageLock);
++		gDamageGiven = gDamageFull = false;
++		bzero(gDamage, sizeof(gDamage));
++		IOLockUnlock(gDamageLock);
++		fDamageUse = false;
++		fPanelWhole = true;
++		fWasLost = false;
++		fSinceFull = 0;
++		recorded = s;
++		drawn = mach_absolute_time();
++		record(recorded);
 +		if (fFlips == 0) {
 +			flipLog("MiniIOMobileFramebuffer: fb_flip: the first flip\n");
 +		}
-+		fSwapDrawing = swapWord(swap, SWAP_ID);
-+		flipPresent();
-+	}
++		flipPresentZeroCopy(s, swapWord(swap, SWAP_ID), s->info.bytesPerRow);
++	} else {
++		if (fNativeZeroCopy && gFlipStateLock != NULL) {
++			IOLockLock(gFlipStateLock);
++			bool pendingFallback = fScanPendingValid && fScanPendingIsFallback;
++			IOLockUnlock(gFlipStateLock);
++			if (pendingFallback) {
++				for (unsigned ms = 0; ms < 20 && (fDpuCtl[0x18 / 4] & 1) != 0; ms++) {
++					IOSleep(1);
+ 				}
++				pollLatch();
+ 			}
+-			continue;
+ 		}
+-		memcpy(src, swap + SWAP_SOURCE(layer), sizeof(src));
+-		memcpy(dst, swap + SWAP_DEST(layer), sizeof(dst));
+-		s = surfaces[layer];
+-		if (report) {
+-			IOLog("MiniIOMobileFramebuffer: swap %u layer %u: surface %u%s (%ux%u '%c%c%c%c') "
+-			    "from %d,%d %dx%d to %d,%d %dx%d, layers set 0x%x\n", swapWord(swap, SWAP_ID), layer, sid,
+-			    s ? "" : " MISSING", s ? s->info.width : 0, s ? s->info.height : 0,
+-			    s ? (int) (s->info.pixelFormat >> 24 & 0xff) : '?', s ? (int) (s->info.pixelFormat >> 16 & 0xff) : '?',
+-			    s ? (int) (s->info.pixelFormat >> 8 & 0xff) : '?', s ? (int) (s->info.pixelFormat & 0xff) : '?',
+-			    src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3], set);
++		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
++			uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
++			int32_t src[4], dst[4];
++			MiniIOSurface * s;
++
++			layers |= sid != 0 ? 1u << layer : 0;
++			/* the frames' surfaces: is it a few, in turn? */
++			for (unsigned i = 0; layer == 0 && sid != 0 && i < 8; i++) {
++				if (fStatSurfaces[i] == 0 || fStatSurfaces[i] == sid) {
++					fStatSurfaces[i] = sid;
++					break;
++				}
++			}
++			if (sid == 0) {
++				/* the bottom layer taken away: nothing is shown, the screen is black */
++				if (layer == 0 && (set & 1) && fGraphics) {
++					fPanelWhole = false;
++					for (uint32_t y = 0; y < fPanelHeight; y++) {
++						bzero(fBase + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
++					}
++					blanked = true;
++				}
++				continue;
++			}
++			memcpy(src, swap + SWAP_SOURCE(layer), sizeof(src));
++			memcpy(dst, swap + SWAP_DEST(layer), sizeof(dst));
++			s = surfaces[layer];
++			if (report) {
++				IOLog("MiniIOMobileFramebuffer: swap %u layer %u: surface %u%s (%ux%u '%c%c%c%c') "
++				    "from %d,%d %dx%d to %d,%d %dx%d, layers set 0x%x\n", swapWord(swap, SWAP_ID), layer, sid,
++				    s ? "" : " MISSING", s ? s->info.width : 0, s ? s->info.height : 0,
++				    s ? (int) (s->info.pixelFormat >> 24 & 0xff) : '?', s ? (int) (s->info.pixelFormat >> 16 & 0xff) : '?',
++				    s ? (int) (s->info.pixelFormat >> 8 & 0xff) : '?', s ? (int) (s->info.pixelFormat & 0xff) : '?',
++				    src[0], src[1], src[2], src[3], dst[0], dst[1], dst[2], dst[3], set);
++			}
++			if (s == NULL) {
++				continue;
++			}
++			if (s->info.bytesPerElement == 4 && s->info.planeCount == 0) {
++				if (!fGraphics) {
++					/* the first picture: the kernel's text console must stop drawing over it */
++					fGraphics = true;
++					PE_initialize_console(NULL, kPEGraphicsMode);
++				}
++				if (!(gNoCopy && fSwapsShown > 40)) {
++					MiniIOSurface * scan = NULL;
++
++					fDamageUse = false;
++					if (layer == 0) {
++						bool only = true, given, whole;
++						int32_t box[4];
++
++						for (unsigned other = 1; other < SWAP_LAYERS; other++) {
++							only = only && swapWord(swap, SWAP_SURFACE(other)) == 0;
++						}
++						IOLockLock(gDamageLock);
++						given = gDamageGiven;
++						whole = gDamageFull;
++						memcpy(box, gDamage, sizeof(box));
++						gDamageGiven = gDamageFull = false;
++						bzero(gDamage, sizeof(gDamage));
++						IOLockUnlock(gDamageLock);
++						if (gPartial && !fFlipOn && only && given && !whole && fPanelWhole && fSinceFull < FULL_EVERY && fSwapsShown > 8 &&
++						    !fWasLost && box[2] > box[0] && box[3] > box[1]) {
++							box[0] = box[0] < 0 ? 0 : box[0];
++							box[1] = box[1] < 0 ? 0 : box[1];
++							box[2] = box[2] > (int32_t) s->info.width ? (int32_t) s->info.width : box[2];
++							box[3] = box[3] > (int32_t) s->info.height ? (int32_t) s->info.height : box[3];
++							memcpy(fDamageBox, box, sizeof(box));
++							fDamageUse = box[2] > box[0] && box[3] > box[1];
++						}
++						fSinceFull = fDamageUse ? fSinceFull + 1 : 0;
++						fPanelWhole = only;
++						fWasLost = false;
++					} else {
++						fPanelWhole = false;    /* (more than the one layer: the panel is not the frame alone) */
++					}
++					if (layer == 0 && gScanOn) {
++						bool only = true;
++
++						for (unsigned other = 1; other < SWAP_LAYERS; other++) {
++							only = only && swapWord(swap, SWAP_SURFACE(other)) == 0;
++						}
++						IOLockLock(gDamageLock);
++						if (only && gScanFresh && gScan != NULL &&
++						    (src[2] <= 0 || (src[0] == 0 && src[1] == 0 && src[2] == (int32_t) s->info.width && src[3] == (int32_t) s->info.height)) &&
++						    (dst[2] <= 0 || (dst[0] == 0 && dst[1] == 0 && dst[2] == (int32_t) fWidth && dst[3] == (int32_t) fHeight))) {
++							scan = gScan;
++							gScanFresh = false;
++						}
++						IOLockUnlock(gDamageLock);
++					}
++					if (layer == 0 && gTouchLat) {
++						redwood_tl("tl: d %u partial %u box %d,%d,%d,%d whole %u since %u\n", swapWord(swap, SWAP_ID), fDamageUse ? 1u : 0u,
++						    fDamageBox[0], fDamageBox[1], fDamageBox[2], fDamageBox[3], fPanelWhole ? 1u : 0u, fSinceFull);
++					}
++					if (scan != NULL) {
++						MiniIOSurface * one[1] = { scan };
++
++						uint64_t w0 = mach_absolute_time(), w1, w2;
++						bool got = MiniIOSurfaceBeginDisplay(one, 1, SWAP_GPU_MS);
++
++						w1 = mach_absolute_time();
++						if (got) {
++							copyScan(scan);
++							w2 = mach_absolute_time();
++							MiniIOSurfaceEndDisplay(one, 1);
++							if (gTouchLat) {
++								redwood_tl("tl: s2 wait_for_gpu %llu copy %llu\n", micros(w1) - micros(w0), micros(w2) - micros(w1));
++							}
++							fPanelWhole = true;
++							fSinceFull = 0;
++						} else {
++							drawLayer(s, src, dst);
++						}
++					} else {
++						drawLayer(s, src, dst);
++					}
++					fDamageUse = false;
++				}
++				if (layer == 0) {
++					recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
++				}
++			}
+ 		}
+-		if (s == NULL) {
+-			continue;
++		drawn = mach_absolute_time();
++		if (recorded != NULL) {
++			record(recorded);
+ 		}
+-		if (s->info.bytesPerElement == 4 && s->info.planeCount == 0) {
+-			if (!fGraphics) {
+-				/* the first picture: the kernel's text console must stop drawing over it */
+-				fGraphics = true;
+-				PE_initialize_console(NULL, kPEGraphicsMode);
++		if (fFlipOn && (recorded != NULL || blanked)) {
++			if (fFlips == 0) {
++				flipLog("MiniIOMobileFramebuffer: fb_flip: the first flip\n");
+ 			}
+-			drawLayer(s, src, dst);
+-			if (layer == 0) {
+-				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
++			if (fNativeZeroCopy) {
++				flipPresentZeroCopy(NULL, swapWord(swap, SWAP_ID), fNativeStride);
++			} else {
++				fSwapDrawing = swapWord(swap, SWAP_ID);
++				flipPresent();
+ 			}
+ 		}
+ 	}
+-	drawn = mach_absolute_time();
+-	if (recorded != NULL) {
+-		record(recorded);
+-	}
 +	MiniIOSurfaceEndDisplay(surfaces, SWAP_LAYERS);
  	fSwapsShown++;
  	if (gTouchLat) {
  		redwood_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
-@@ -1072,7 +2252,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+@@ -1072,7 +2710,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
  		absolutetime_to_nanoseconds(fStatDrawing, &drawing);
  		absolutetime_to_nanoseconds(fStatWaiting, &waiting);
  		absolutetime_to_nanoseconds(fStatBeatWait, &beat);
@@ -30419,7 +31081,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  		    "waiting for the GPU and, %u of them, %llu us for the next refresh; %u swaps waited for the frame before, "
  		    "%u gave up; %u swaps came a refresh late themselves\n", fStatFrames, nanos / NSEC_PER_MSEC,
  		    fStatFrames * NSEC_PER_SEC / nanos, drawing / fStatFrames / NSEC_PER_USEC,
-@@ -1127,6 +2307,11 @@ class IOMobileFramebufferUserClient : public IOUserClient
+@@ -1127,6 +2765,11 @@ class IOMobileFramebufferUserClient : public IOUserClient
  	uint64_t                fVSyncTime;             /* when the refresh being waited for is due */
  	bool                    fVSyncRunning;
  	bool                    fClosed;
@@ -30431,7 +31093,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  
  	static void vsyncFired(thread_call_param_t self, thread_call_param_t unused);
  	void vsync(void);
-@@ -1237,6 +2422,20 @@ IOMobileFramebufferUserClient::armVSync(void)
+@@ -1237,6 +2880,20 @@ IOMobileFramebufferUserClient::armVSync(void)
  
  	/* one refresh after the last, not after whenever we got round to this: the rate does not drift */
  	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
@@ -30452,7 +31114,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	fVSyncTime += period;
  	if (fVSyncTime <= now || fVSyncTime > now + 2 * period) {
  		fVSyncTime = now + period;
-@@ -1244,38 +2443,74 @@ IOMobileFramebufferUserClient::armVSync(void)
+@@ -1244,38 +2901,75 @@ IOMobileFramebufferUserClient::armVSync(void)
  	thread_call_enter_delayed(fVSyncCall, fVSyncTime);
  }
  
@@ -30489,6 +31151,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
 +	uint32_t shown;
 +	bool send = false, sendInfo = false;
  
++	fOwner->pollLatch();
  	IOLockLock(fLock);
  	now = fVSyncTime;
 -	if (fClosed || fCallbacks[kFBNotifyVSync] == 0 || fPorts[kFBNotifyVSync] == NULL) {
@@ -30543,7 +31206,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  }
  
  IOReturn
-@@ -1291,11 +2526,22 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1291,11 +2985,22 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  
  		gFBCalls[selector]++;
  		proc_selfname(procname, sizeof(procname));
@@ -30569,7 +31232,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  	}
  
  	switch (selector) {
-@@ -1353,6 +2599,20 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1353,6 +3058,26 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  		return kIOReturnSuccess;
  
  	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
@@ -30580,7 +31243,13 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
 +			for (int i = 0; i < 40; i++) {
 +				IOMobileFramebuffer * o = fOwner;
 +
-+				if ((int32_t) (o->fSwapLatched - id) >= 0 ||
++				if (o->fNativeZeroCopy) {
++					uint32_t shownId = 0;
++
++					if (o->shownSwap(&shownId) && (int32_t) (shownId - id) >= 0) {
++						break;
++					}
++				} else if ((int32_t) (o->fSwapLatched - id) >= 0 ||
 +				    ((int32_t) (o->fSwapPending - id) >= 0 && (o->fDpuCtl[0x18 / 4] & 1) == 0)) {
 +					break;
 +				}
@@ -30590,7 +31259,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  		if (gTouchLat) {
  			redwood_tl("tl: w %llu %#llx %#llx at %llu\n", args->scalarInputCount > 0 ? in[0] : 0,
  			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
-@@ -1362,7 +2622,19 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1362,7 +3087,19 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  	case kFBMethodSwapCancel:
  	case kFBMethodSwapCancelAll:
  	case kFBMethodRequestPowerChange:
@@ -30611,7 +31280,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  		return kIOReturnSuccess;
  
  	case kFBMethodNotifications:                    /* in: callback (0 = off), its argument, type, 0 */
-@@ -1372,22 +2644,25 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1372,22 +3109,25 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  		IOLockLock(fLock);
  		fCallbacks[in[2]] = in[0];
  		fRefcons[in[2]] = in[1];
@@ -30641,7 +31310,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  
  	case kFBMethodGetBlock:                         /* in: which block; out: its bytes */
  		if (args->structureOutput == NULL) {
-@@ -1416,7 +2691,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -1416,7 +3156,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  
  	if (selector < 128 && !(gFBLogged[selector / 64] & (1ULL << (selector % 64)))) {
  		gFBLogged[selector / 64] |= 1ULL << (selector % 64);
@@ -30651,7 +31320,7 @@ index a537cb6d31bd4ade5a024a301ade08ad7494c28f..3fce02e0e86639f65664417e89288b8a
  		    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, args->scalarOutputCount,
  		    args->structureInputSize, args->structureOutputSize);
 diff --git a/iokit/Kernel/MiniIOSurface.cpp b/iokit/Kernel/MiniIOSurface.cpp
-index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b171794282 100644
+index 5523e8557902d66f19ffb47848ca679828e215c1..ebb370c91417dad052e9affd23c18b507dd3606e 100644
 --- a/iokit/Kernel/MiniIOSurface.cpp
 +++ b/iokit/Kernel/MiniIOSurface.cpp
 @@ -5,7 +5,7 @@
@@ -30663,7 +31332,15 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
   * notifications. Calls that are not implemented are logged once and refused.
   */
  
-@@ -25,11 +25,187 @@
+@@ -14,6 +14,7 @@
+ #include <IOKit/IOLocks.h>
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOMapTypes.h>
+ #include <libkern/c++/OSSerialize.h>
+ #include <libkern/c++/OSUnserialize.h>
+ #include <libkern/c++/OSDictionary.h>
+@@ -25,11 +26,187 @@
  #include <libkern/c++/OSString.h>
  #include <libkern/c++/OSSymbol.h>
  #include <kern/thread_call.h>
@@ -30851,7 +31528,7 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  static_assert(sizeof(struct minisurf_plane) == 0x80, "plane layout");
  static_assert(sizeof(struct minisurf_result) == 0x68, "result layout");
  static_assert(offsetof(struct minisurf_shared, attachments) == 0x30, "shared layout");
-@@ -82,6 +258,24 @@ enum {
+@@ -82,6 +259,24 @@ enum {
  #define FOURCC(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
  
  static IOLock *         gSurfaceLock;
@@ -30876,7 +31553,7 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  static MiniIOSurface *  gSurfaceTable[MINISURF_TABLE_SIZE];     /* index = surface number; [0] unused */
  static uint32_t         gSurfaceNext = 1;
  static uint32_t         gSurfaceCount;
-@@ -90,6 +284,7 @@ static uint32_t         gSurfaceUnheld;         /* surfaces around client memory
+@@ -90,6 +285,7 @@ static uint32_t         gSurfaceUnheld;         /* surfaces around client memory
  /* what making surfaces and taking them away has cost since it was last asked (MiniIOSurfaceCost()) */
  static uint64_t         gSurfaceMaking, gSurfaceFreeing;
  static uint32_t         gSurfacesMade, gSurfacesFreed;
@@ -30884,7 +31561,99 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  static uint64_t         gSurfaceLogged[2];                      /* selectors already complained about */
  /* Boot-arg surftrace=N: log the first N surfaces created (default 24). */
  static TUNABLE(uint32_t, gSurfaceTrace, "surftrace", 24);
-@@ -283,6 +478,9 @@ MiniIOSurface::free(void)
+@@ -152,6 +348,91 @@ static uint32_t         gSurfacesGivenAgain;    /* for MiniIOSurfaceCost() */
+ /* boot-arg surf_clear=0: kept memory is given out as it is (to see what the clearing costs; a surface is then not all zeroes) */
+ static TUNABLE(uint32_t, gSurfaceClear, "surf_clear", 1);
+ 
++#define SCAN_POOL_MAX           4
++static IOLock *                 gScanPoolLock;
++static uint32_t                 gScanPoolWidth, gScanPoolHeight, gScanPoolStride;
++static size_t                   gScanPoolBytes;
++static unsigned                 gScanPoolCount;
++static struct {
++	IOMemoryDescriptor *    memory;
++	IOMemoryMap *           kmap;
++	uint8_t *               kvirt;
++	uint32_t                phys;
++	bool                    inUse;
++} gScanPool[SCAN_POOL_MAX];
++static uint32_t                 gScanPoolHits, gScanPoolMisses;
++
++/* Register physically contiguous Write-Combined scanout slots shared by display-sized surfaces. */
++void
++MiniIOSurfaceRegisterScanPool(uint32_t width, uint32_t height, uint32_t stride, size_t bytes,
++    const struct minisurf_scan_slot * slots, unsigned count)
++{
++	if (gScanPoolLock == NULL || slots == NULL || count == 0 || bytes == 0) {
++		return;
++	}
++	IOLockLock(gScanPoolLock);
++	gScanPoolWidth = width;
++	gScanPoolHeight = height;
++	gScanPoolStride = stride;
++	gScanPoolBytes = bytes;
++	gScanPoolCount = 0;
++	for (unsigned i = 0; i < count && gScanPoolCount < SCAN_POOL_MAX; i++) {
++		if (slots[i].memory == NULL || slots[i].kvirt == NULL || slots[i].phys == 0) {
++			continue;
++		}
++		gScanPool[gScanPoolCount].memory = slots[i].memory;
++		gScanPool[gScanPoolCount].kmap = slots[i].kmap;
++		gScanPool[gScanPoolCount].kvirt = slots[i].kvirt;
++		gScanPool[gScanPoolCount].phys = slots[i].phys;
++		gScanPool[gScanPoolCount].inUse = false;
++		gScanPoolCount++;
++	}
++	IOLockUnlock(gScanPoolLock);
++}
++
++static bool
++scanPoolAcquire(int32_t * slotOut)
++{
++	uint8_t * kvirt = NULL;
++	size_t bytes = 0;
++	int32_t found = -1;
++
++	if (gScanPoolLock == NULL || gScanPoolCount == 0) {
++		return false;
++	}
++	IOLockLock(gScanPoolLock);
++	for (unsigned i = 0; i < gScanPoolCount; i++) {
++		if (!gScanPool[i].inUse) {
++			gScanPool[i].inUse = true;
++			kvirt = gScanPool[i].kvirt;
++			bytes = gScanPoolBytes;
++			found = (int32_t) i;
++			break;
++		}
++	}
++	IOLockUnlock(gScanPoolLock);
++	if (found < 0) {
++		return false;
++	}
++	bzero(kvirt, bytes);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	*slotOut = found;
++	return true;
++}
++
++static void
++scanPoolRelease(int32_t slot)
++{
++	if (gScanPoolLock == NULL || slot < 0) {
++		return;
++	}
++	IOLockLock(gScanPoolLock);
++	if ((unsigned) slot < gScanPoolCount && gScanPool[slot].inUse) {
++		gScanPool[slot].inUse = false;
++	}
++	IOLockUnlock(gScanPoolLock);
++}
++
+ void
+ MiniIOSurfaceClearKept(void)
+ {
+@@ -283,6 +564,9 @@ MiniIOSurface::free(void)
  		    "the middle %#010x\n", sid, info.width, info.height, nonzero, info.allocSize / 64, middle);
  	}
  
@@ -30894,7 +31663,7 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  	OSSafeReleaseNULL(values);
  	OSSafeReleaseNULL(clientMap);
  	if (client != NULL) {
-@@ -290,6 +488,10 @@ MiniIOSurface::free(void)
+@@ -290,6 +574,17 @@ MiniIOSurface::free(void)
  		client->release();
  		client = NULL;
  	}
@@ -30902,10 +31671,17 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
 +		task_deallocate(clientTask);
 +		clientTask = NULL;
 +	}
++	OSSafeReleaseNULL(pixelDesc);
++	if (scanSlot >= 0) {
++		scanPoolRelease(scanSlot);
++		scanSlot = -1;
++		pixelPhys = 0;
++		writeCombined = false;
++	}
  	if (memory != NULL) {
  		surfaceMemoryBack(memory);
  		memory = NULL;
-@@ -316,6 +518,18 @@ MiniIOSurfaceCost(uint32_t * made, uint64_t * making, uint32_t * freed, uint64_t
+@@ -316,6 +611,18 @@ MiniIOSurfaceCost(uint32_t * made, uint64_t * making, uint32_t * freed, uint64_t
  	gSurfaceMaking = gSurfaceFreeing = 0;
  }
  
@@ -30924,7 +31700,7 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  /* The values changed: a new seed, and how much room a client needs to fetch them. */
  void
  MiniIOSurface::updateValuesState(void)
-@@ -442,7 +656,7 @@ describeComponents(struct minisurf_plane * plane, uint32_t format)
+@@ -442,7 +749,7 @@ describeComponents(struct minisurf_plane * plane, uint32_t format)
   * Returned with one holder, and entered in the table.
   */
  static MiniIOSurface *
@@ -30933,7 +31709,7 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  {
  	MiniIOSurface * s;
  	struct minisurf_result * info;
-@@ -465,7 +679,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
+@@ -465,7 +772,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
  	 * there is no wide gamut on this panel anyway. The surface is made as ordinary BGRA of
  	 * the same geometry, and says so: whoever uses it reads the format back from the surface.
  	 */
@@ -30942,7 +31718,7 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  		format = 'BGRA';
  	}
  	/*
-@@ -473,7 +687,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
+@@ -473,7 +780,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
  	 * surfaces of once it draws with a GPU's renderer (OpenGL ES, userland/src/eagl.c) instead
  	 * of its software one. One plane of BGRA here too; the framebuffer shows nothing else.
  	 */
@@ -30951,7 +31727,7 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  		format = 'BGRA';
  		onePlane = true;
  	}
-@@ -577,7 +791,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
+@@ -577,7 +884,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
  		    : alignUp((uint64_t) ((width + ew - 1) / ew) * bpe, MINISURF_ROW_ALIGN);
  	}
  	if (planeCount == 0) {
@@ -30960,23 +31736,139 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  		/* the one implicit plane, for the per-plane getters */
  		s->planes[0].width = width;
  		s->planes[0].height = height;
-@@ -625,6 +839,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
- 	s->kpixels = s->kbase + PAGE_SIZE;
+@@ -612,19 +919,56 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
+ 		alloc = dictNumber(props, "IOSurfaceAllocSize", (uint32_t) needed);
+ 	}
+ 
+-	s->memory = surfaceMemory((vm_size_t) PAGE_SIZE + (wrapped ? 0 : alloc));
+-	if (s->memory == NULL) {
+-		IOLog("MiniIOSurface: no memory for %u bytes (%u surfaces, %llu MB in use)\n", alloc, gSurfaceCount,
+-		    gSurfaceBytes >> 20);
+-		s->release();
+-		*error = kIOReturnNoMemory;
+-		return NULL;
++	uint32_t cacheMode = dictNumber(props, "IOSurfaceCacheMode", 0);
++	bool wantScanPool = (wrapped == NULL && gScanPoolCount != 0 &&
++	    planeCount == 0 && offset == 0 && bpe == 4 &&
++	    format == FOURCC('B', 'G', 'R', 'A') &&
++	    width == gScanPoolWidth && height == gScanPoolHeight &&
++	    bpr >= width * 4 && (bpr & 63) == 0 &&
++	    alloc <= gScanPoolBytes &&
++	    cacheMode == kIOMapRealTimeCache);
++	int32_t scanSlot = -1;
++	if (wantScanPool) {
++		if (scanPoolAcquire(&scanSlot)) {
++			s->memory = surfaceMemory(PAGE_SIZE);
++			if (s->memory == NULL) {
++				scanPoolRelease(scanSlot);
++				IOLog("MiniIOSurface: no memory for scanout shared page (%u surfaces, %llu MB in use)\n",
++				    gSurfaceCount, gSurfaceBytes >> 20);
++				s->release();
++				*error = kIOReturnNoMemory;
++				return NULL;
++			}
++			alloc = (uint32_t) gScanPoolBytes;
++			s->scanSlot = scanSlot;
++			s->pixelDesc = gScanPool[scanSlot].memory;
++			s->pixelDesc->retain();
++			s->pixelPhys = gScanPool[scanSlot].phys;
++			s->writeCombined = true;
++		} else {
++			uint32_t miss = (uint32_t) OSIncrementAtomic(&gScanPoolMisses) + 1;
++			if (miss <= 8) {
++				displayLog("MiniIOSurface: scanout pool miss #%u (%ux%u bpr %u alloc %u)\n",
++				    miss, width, height, bpr, alloc);
++			}
++		}
++	}
++	if (s->pixelDesc == NULL) {
++		s->memory = surfaceMemory((vm_size_t) PAGE_SIZE + (wrapped ? 0 : alloc));
++		if (s->memory == NULL) {
++			IOLog("MiniIOSurface: no memory for %u bytes (%u surfaces, %llu MB in use)\n", alloc, gSurfaceCount,
++			    gSurfaceBytes >> 20);
++			s->release();
++			*error = kIOReturnNoMemory;
++			return NULL;
++		}
+ 	}
+ 	s->kbase = (uint8_t *) s->memory->getBytesNoCopy();
+ 	s->values = OSDictionary::withCapacity(4);
+-	s->kpixels = s->kbase + PAGE_SIZE;
++	s->kpixels = s->pixelDesc != NULL ? gScanPool[scanSlot].kvirt : (s->kbase + PAGE_SIZE);
  	if (wrapped != NULL) {
  		s->clientTask = current_task();
 +		if (gFrameFix & 2) task_reference(s->clientTask);
  		s->clientAddress = wrapped->unsigned64BitValue();
  		IOReturn held = kIOReturnNoMemory;
  
-@@ -840,6 +1055,7 @@ MiniIOSurfaceStart(IOService * provider)
+@@ -662,7 +1006,7 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
+ 	info->bytesPerElement = (uint16_t) bpe;
+ 	info->elementWidth = (uint8_t) ew;
+ 	info->elementHeight = (uint8_t) eh;
+-	info->cacheMode = dictNumber(props, "IOSurfaceCacheMode", 0);
++	info->cacheMode = cacheMode;
+ 	info->subsampling = (uint8_t) dictNumber(props, "IOSurfaceSubsampling", 0);
+ 	info->prohibitUseCount = (uint8_t) dictNumber(props, "IOSurfaceProhibitUseCount", 0);
+ 	info->sliceCount = dictNumber(props, "IOSurfaceSliceCount", 0);
+@@ -703,6 +1047,16 @@ surfaceCreate(OSDictionary * props, IOReturn * error)
+ 	sh->sysMemOnly = (uint8_t) dictNumber(props, "IOSurfaceSysMemOnly", 0);
+ 	IOLockUnlock(gSurfaceLock);
+ 
++	if (s->pixelDesc != NULL) {
++		uint32_t hit = (uint32_t) OSIncrementAtomic(&gScanPoolHits) + 1;
++		if (hit <= 16) {
++			char procname[32] = "?";
++			proc_selfname(procname, sizeof(procname));
++			displayLog("MiniIOSurface: scanout pool hit #%u: %s[%d] surface %u slot %d phys %#x bpr %u alloc %u\n",
++			    hit, procname, proc_selfpid(), sid, s->scanSlot, s->pixelPhys, bpr, alloc);
++		}
++	}
++
+ 	*error = kIOReturnSuccess;
+ 	return s;
+ }
+@@ -783,6 +1137,29 @@ MiniIOSurfaceCreateSimple(uint32_t width, uint32_t height, uint32_t pixelFormat)
+ 	return s;
+ }
+ 
++MiniIOSurface *
++MiniIOSurfaceCreateScanout(uint32_t width, uint32_t height, uint32_t bytesPerRow, uint32_t allocSize, uint32_t pixelFormat)
++{
++	OSDictionary * props = OSDictionary::withCapacity(6);
++	MiniIOSurface * s = NULL;
++	IOReturn error;
++
++	if (props == NULL || gSurfaceLock == NULL) {
++		OSSafeReleaseNULL(props);
++		return NULL;
++	}
++	OSNumber * n;
++	n = OSNumber::withNumber(width, 32); props->setObject("IOSurfaceWidth", n); n->release();
++	n = OSNumber::withNumber(height, 32); props->setObject("IOSurfaceHeight", n); n->release();
++	n = OSNumber::withNumber(bytesPerRow, 32); props->setObject("IOSurfaceBytesPerRow", n); n->release();
++	n = OSNumber::withNumber(allocSize, 32); props->setObject("IOSurfaceAllocSize", n); n->release();
++	n = OSNumber::withNumber(pixelFormat, 32); props->setObject("IOSurfacePixelFormat", n); n->release();
++	n = OSNumber::withNumber(kIOMapRealTimeCache, 32); props->setObject("IOSurfaceCacheMode", n); n->release();
++	s = surfaceCreate(props, &error);
++	props->release();
++	return s;
++}
++
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+ 
+ /* What a Mach send right for a surface points at. Holds the surface while any right exists. */
+@@ -840,8 +1217,10 @@ MiniIOSurfaceStart(IOService * provider)
  {
  	IOCoreSurfaceRoot * root;
  
 +	surfaceProfileStart();
  	gSurfaceLock = IOLockAlloc();
  	gSurfaceKeptLock = IOLockAlloc();
++	gScanPoolLock = IOLockAlloc();
  	if (!PE_parse_boot_arg_str("surftrace_of", gSurfaceTraceOf, sizeof(gSurfaceTraceOf))) {
-@@ -887,6 +1103,7 @@ class IOSurfaceRootUserClient : public IOUserClient
+ 		gSurfaceTraceOf[0] = 0;
+ 	}
+@@ -887,6 +1266,7 @@ class IOSurfaceRootUserClient : public IOUserClient
  
  	IOReturn methodInit(IOExternalMethodArguments * args);
  	IOReturn methodCreate(IOExternalMethodArguments * args);
@@ -30984,9 +31876,21 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  	IOReturn methodLookup(IOExternalMethodArguments * args);
  	IOReturn methodLookupFromPort(IOExternalMethodArguments * args);
  	IOReturn methodCreatePort(IOExternalMethodArguments * args);
-@@ -1019,6 +1236,11 @@ IOSurfaceRootUserClient::addRef(MiniIOSurface * surface)
+@@ -1017,8 +1397,22 @@ IOSurfaceRootUserClient::addRef(MiniIOSurface * surface)
+ 	bzero(ref, sizeof(*ref));
+ 	ref->surface = surface;
  	ref->map = map;
- 	if (surface->client != NULL && surface->clientTask != fTask) {
+-	if (surface->client != NULL && surface->clientTask != fTask) {
++	if (surface->pixelDesc != NULL) {
++		ref->pixelMap = surface->pixelDesc->createMappingInTask(fTask, 0, kIOMapAnywhere | kIOMapWriteCombineCache);
++		if (ref->pixelMap == NULL) {
++			IOLog("MiniIOSurface: cannot map scanout surface %u (%u bytes) into the client\n",
++			    surface->sid, surface->info.allocSize);
++			OSSafeReleaseNULL(ref->map);
++			fRefCount--;
++			return NULL;
++		}
++	} else if (surface->client != NULL && surface->clientTask != fTask) {
  		ref->pixelMap = surface->client->createMappingInTask(fTask, 0, kIOMapAnywhere);
 +		if ((gFrameFix & 2) && ref->pixelMap == NULL) {
 +			OSSafeReleaseNULL(ref->map);
@@ -30996,7 +31900,15 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  	}
  	surfaceHold(surface);
  	return ref;
-@@ -1069,6 +1291,69 @@ IOSurfaceRootUserClient::returnSurface(struct minisurf_client_ref * ref, bool kn
+@@ -1063,12 +1457,76 @@ IOSurfaceRootUserClient::returnSurface(struct minisurf_client_ref * ref, bool kn
+ 	memcpy(r + 1, s->planes, size - sizeof(*r));
+ 	r->shared = address;
+ 	r->aux = address + MINISURF_AUX_OFFSET;
+-	r->base = known ? ~0ULL : s->client == NULL ? address + PAGE_SIZE :
++	r->base = known ? ~0ULL :
++	    (s->client == NULL && s->pixelDesc == NULL) ? address + PAGE_SIZE :
+ 	    ref->pixelMap != NULL ? ref->pixelMap->getAddress() : s->clientAddress;
+ 	args->structureOutputSize = size;
  	return kIOReturnSuccess;
  }
  
@@ -31066,7 +31978,7 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  IOReturn
  IOSurfaceRootUserClient::methodInit(IOExternalMethodArguments * args)
  {
-@@ -1196,6 +1481,30 @@ IOSurfaceRootUserClient::methodCreate(IOExternalMethodArguments * args)
+@@ -1196,6 +1654,32 @@ IOSurfaceRootUserClient::methodCreate(IOExternalMethodArguments * args)
  		    (int) (s->info.pixelFormat & 0xff), s->info.bytesPerRow, s->info.planeCount, s->info.allocSize);
  	}
  
@@ -31090,14 +32002,16 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
 +			    s->sid, s->info.width, s->info.height, (int) (s->info.pixelFormat >> 24 & 0xff),
 +			    (int) (s->info.pixelFormat >> 16 & 0xff), (int) (s->info.pixelFormat >> 8 & 0xff),
 +			    (int) (s->info.pixelFormat & 0xff), s->info.bytesPerRow, s->info.planeCount, s->info.allocSize,
-+			    s->info.offset, s->info.cacheMode, s->client != NULL ? "around the client's own memory" : "memory of ours");
++			    s->info.offset, s->info.cacheMode,
++			    s->client != NULL ? "around the client's own memory" :
++			    s->pixelDesc != NULL ? "scanout pool WC" : "memory of ours");
 +		}
 +	}
 +
  	uint64_t mapped_at = mach_absolute_time();
  	IOLockLock(gSurfaceLock);
  	ref = addRef(s);
-@@ -1584,6 +1893,10 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+@@ -1584,6 +2068,10 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
  		return methodInit(args);
  	case kSurfaceMethodCreate:
  		return methodCreate(args);
@@ -31108,7 +32022,7 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  	case kSurfaceMethodLookup:
  		return methodLookup(args);
  	case kSurfaceMethodLookupFromPort:
-@@ -1675,6 +1988,7 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
+@@ -1675,6 +2163,7 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
  		return kIOReturnSuccess;
  
  	default:
@@ -31117,12 +32031,17 @@ index 5523e8557902d66f19ffb47848ca679828e215c1..1a2cb894e118403bff1367bc196b76b1
  	}
  
 diff --git a/iokit/Kernel/MiniIOSurface.h b/iokit/Kernel/MiniIOSurface.h
-index 431423b069f6ab4dc98d06eb5f2969a3d50e376a..ce86f05e07ac32bda105a1619322fdf22c599021 100644
+index 431423b069f6ab4dc98d06eb5f2969a3d50e376a..bf5dabbfad3a6794cac57fe54667f2a8b7f28b14 100644
 --- a/iokit/Kernel/MiniIOSurface.h
 +++ b/iokit/Kernel/MiniIOSurface.h
-@@ -118,16 +118,22 @@ public:
+@@ -117,17 +117,31 @@ public:
+ 	task_t                          clientTask;     /* whose memory it is (not held: only compared) */
  	mach_vm_address_t               clientAddress;  /* ... and where it is there */
  	uint8_t *                       kpixels;        /* where the pixel memory starts in the kernel, either way */
++	IOMemoryDescriptor *            pixelDesc;      /* WC contiguous pixel backing when pooled */
++	uint32_t                        pixelPhys;      /* physical base < 4 GB when scanSlot >= 0; 0 otherwise */
++	int32_t                         scanSlot;       /* scanout pool slot index, or -1 */
++	bool                            writeCombined;  /* true when pixel backing is Write-Combined */
  	uint32_t                        drawn;          /* the GPU's last submission that names the pixels (0: none; RedwoodGPU.cpp) */
 +	uint32_t                        displayReaders; /* under gGPULock: CPU display reads block GPU submissions */
 +	bool                            gpuOnly;        /* only the GPU writes it (the display's scaled frame): not pushed out of the CPU's cache at a submission */
@@ -31137,13 +32056,17 @@ index 431423b069f6ab4dc98d06eb5f2969a3d50e376a..ce86f05e07ac32bda105a1619322fdf2
  	virtual bool
  	init(void) APPLE_KEXT_OVERRIDE
  	{
++		pixelDesc = NULL;
++		pixelPhys = 0;
++		scanSlot = -1;
++		writeCombined = false;
 +		displayReaders = 0;
 +		gpuOnly = false;
 +		displaySized = false;
  		return OSObject::init();
  	}
  	virtual void free(void) APPLE_KEXT_OVERRIDE;
-@@ -161,10 +167,23 @@ MiniIOSurface * MiniIOSurfaceCopy(uint32_t sid);
+@@ -161,14 +175,42 @@ MiniIOSurface * MiniIOSurfaceCopy(uint32_t sid);
   * each; how many got memory that was kept from one before.
   */
  void            MiniIOSurfaceCost(uint32_t * made, uint64_t * making, uint32_t * freed, uint64_t * freeing, uint32_t * again);
@@ -31167,12 +32090,32 @@ index 431423b069f6ab4dc98d06eb5f2969a3d50e376a..ce86f05e07ac32bda105a1619322fdf2
  MiniIOSurface * MiniIOSurfaceCreateSimple(uint32_t width, uint32_t height, uint32_t pixelFormat);
  void            MiniIOSurfaceDrop(MiniIOSurface * surface);
  /* A Mach send right for the surface in the task (what IOSurfaceCreateMachPort gives); 0 on failure. */
+ mach_port_name_t MiniIOSurfaceMakeSendRight(task_t task, MiniIOSurface * surface);
+ 
++struct minisurf_scan_slot {
++	IOMemoryDescriptor *    memory;         /* retained by pool; WC physical MD or contiguous IOBMD */
++	IOMemoryMap *           kmap;           /* retained kernel WC mapping if physical MD, else NULL */
++	uint8_t *               kvirt;          /* kernel VA of pixel memory */
++	uint32_t                phys;           /* physical base address (< 4 GB, page-aligned) */
++};
++void            MiniIOSurfaceRegisterScanPool(uint32_t width, uint32_t height, uint32_t stride, size_t bytes,
++                    const struct minisurf_scan_slot * slots, unsigned count);
++MiniIOSurface * MiniIOSurfaceCreateScanout(uint32_t width, uint32_t height, uint32_t bytesPerRow,
++                    uint32_t allocSize, uint32_t pixelFormat);
++void            MiniIOSurfaceRetainDisplay(MiniIOSurface * surface);
++bool            MiniIOFlipPollLatch(void);
++bool            MiniIOFlipEvictSurface(MiniIOSurface * surface);
++uint32_t        MiniIOFlipWaitHintUs(MiniIOSurface * surface);
++
+ 
+ #endif /* _IOKIT_MINIIOSURFACE_H */
 diff --git a/iokit/Kernel/RedwoodBT.cpp b/iokit/Kernel/RedwoodBT.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4581c3d8abd8cd7b9f9e1917f4738b70441b9d94
+index 0000000000000000000000000000000000000000..fa57e0de0e24c16dcb72e57aeddce78b7dc68960
 --- /dev/null
 +++ b/iokit/Kernel/RedwoodBT.cpp
-@@ -0,0 +1,515 @@
+@@ -0,0 +1,516 @@
++/* Copyright (c) 2026 yanei */
 +/*
 + * RedwoodBT: the Bluetooth controller as iOS's bluetoothd looks for it.
 + *
@@ -31689,7 +32632,7 @@ index 0000000000000000000000000000000000000000..4581c3d8abd8cd7b9f9e1917f4738b70
 +	OSSafeReleaseNULL(node);
 +}
 diff --git a/iokit/Kernel/RedwoodGPU.cpp b/iokit/Kernel/RedwoodGPU.cpp
-index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e844cc8abda 100644
+index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..c28be94129217d9f076fd9c35fec575a409f9008 100644
 --- a/iokit/Kernel/RedwoodGPU.cpp
 +++ b/iokit/Kernel/RedwoodGPU.cpp
 @@ -45,7 +45,123 @@
@@ -31816,7 +32759,15 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  
  extern "C" {
  /* bsd/dev/redwood_adreno.c ("the GPU kept on"; declared in bsd/sys/redwood_input.h, which is not seen from here) */
-@@ -89,6 +205,8 @@ enum {
+@@ -57,6 +173,7 @@ void redwood_gpu_space(uint64_t * used, uint32_t * live, uint64_t * largest, uns
+     uint64_t * lost, uint32_t * refused);
+ extern uint32_t gpu_va;                 /* boot-arg gpu_va: 0 as before, 1 describe the addresses, 2 also guard them */
+ bool redwood_gpu_map(uint64_t address, uint64_t phys, bool read_only);
++bool redwood_gpu_map_range(uint64_t address, uint64_t phys, uint64_t size, bool read_only);
+ void redwood_gpu_mapped(void);
+ void redwood_gpu_unmap(uint64_t address, uint64_t size);
+ void redwood_gpu_to_memory(void * start, uint64_t size);
+@@ -89,6 +206,8 @@ enum {
  	kMsmSubmitQueueNew      = 0x4a,
  	kMsmSubmitQueueClose    = 0x4b,
  	kMsmSubmitQueueQuery    = 0x4c,
@@ -31825,7 +32776,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  	kRedwoodGPUWorked       = 0x7d,         /* ours: how long the 3D core itself has worked, and on how many */
  	kRedwoodSurface         = 0x7e,         /* ours: an IOSurface's memory as a buffer */
  	kRedwoodShow            = 0x7f,         /* ours: pixels of the caller's onto the panel, to see a test's result */
-@@ -156,6 +274,13 @@ struct redwood_surface {
+@@ -156,6 +275,13 @@ struct redwood_surface {
  	uint32_t offset, rowBytes;              /* where the pixels start in it and how long a row of them is, */
  	uint32_t width, height, pixelFormat, planes;    /* and what they are */
  };
@@ -31839,7 +32790,16 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  struct redwood_show {
  	uint64_t pixels;
  	uint32_t width, height, rowBytes, pad;
-@@ -263,12 +388,78 @@ MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds)
+@@ -202,7 +328,7 @@ struct redwood_worked {
+ #define GPU_SUBMIT_BOS          8192
+ #define GPU_PATIENCE_MS         5000            /* for a buffer or a submission that somebody waits for without a limit */
+ #define GPU_ASK_AGAIN_US        200             /* while waiting for the core: how long between two looks at how far it is */
+-#define GPU_PUSH_AGAIN_MS       4               /* a surface is pushed out of the cache again for a submission this long after the last */
++#define GPU_PUSH_AGAIN_MS       100             /* a surface is pushed out of the cache again for a submission this long after the last */
+ 
+ static IOLock * gGPULock;                       /* around everything that is the GPU's (redwood_gpu_...) */
+ static bool gGPUReported;
+@@ -263,17 +389,96 @@ MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds)
  
  	if (fence != 0 && gGPULock != NULL) {
  		IOLockLock(gGPULock);
@@ -31916,10 +32876,28 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
 +	IOLockUnlock(gGPULock);
 +}
 +
++void
++MiniIOSurfaceRetainDisplay(MiniIOSurface * surface)
++{
++	if (gGPULock == NULL || surface == NULL) {
++		return;
++	}
++	IOLockLock(gGPULock);
++	assert(surface->displayReaders != 0);
++	surface->displayReaders++;
++	IOLockUnlock(gGPULock);
++}
++
  /*
   * Boot-arg touch_lat=1: a line for every wait of a program's for the GPU that took a millisecond or
   * more ("tl: f KIND US at US"), for telling apart what holds a frame up (tools/frames.py).
-@@ -391,10 +582,82 @@ struct gpu_buffer {
+  */
+ static TUNABLE(uint32_t, gWaitLines, "touch_lat", 0);
++static TUNABLE(uint32_t, gGPUPushAgainMs, "gpu_push_ms", GPU_PUSH_AGAIN_MS);
+ 
+ static void
+ slowWait(const char * kind, uint64_t began)
+@@ -391,10 +596,82 @@ struct gpu_buffer {
  	uint32_t                        flags;
  	uint32_t                        seed;           /* the surface's when it was last pushed out of the cache, */
  	uint64_t                        pushed;         /* ... and when that was */
@@ -32002,7 +32980,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  /*
   * A buffer given back while the GPU is still at it: its memory and its place in the GPU's
   * address space are kept until the submission is done, and nobody waits for that. (A window
-@@ -450,6 +713,7 @@ class RedwoodGPUUserClient : public IOUserClient
+@@ -450,6 +727,7 @@ class RedwoodGPUUserClient : public IOUserClient
  	uint32_t                fLeftCount;
  	struct gpu_kept         fKept[GPU_KEPT];
  	uint64_t                fKeptBytes;
@@ -32010,7 +32988,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  
  	struct gpu_buffer * buffer(uint32_t handle);
  	struct gpu_buffer * newBuffer(IOMemoryDescriptor * memory, uint64_t from, uint64_t size, uint32_t flags, uint32_t * handle);
-@@ -482,6 +746,7 @@ RedwoodGPUUserClient::initWithTask(task_t owningTask, void * securityID, UInt32
+@@ -482,6 +760,7 @@ RedwoodGPUUserClient::initWithTask(task_t owningTask, void * securityID, UInt32
  		return false;
  	}
  	fTask = owningTask;
@@ -32018,15 +32996,108 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  	return true;
  }
  
-@@ -935,6 +1200,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
- 	uint32_t words[GPU_SUBMIT_CMDS], count = 0;
+@@ -523,7 +802,7 @@ RedwoodGPUUserClient::freeBuffer(struct gpu_buffer * b)
+ 
+ 			if (b->surface == NULL) {
+ 				b->memory->retain();
+-			} else {
++			} else if (b->surface->pixelDesc == NULL) {
+ 				b->surface->memory->retain();
+ 			}
+ 			if (said++ < 8) {
+@@ -538,7 +817,7 @@ RedwoodGPUUserClient::freeBuffer(struct gpu_buffer * b)
+ 		if (b->memory != NULL) {
+ 			b->memory->release();
+ 		}
+-		if (b->surface != NULL) {
++		if (b->surface != NULL && !(busy && b->surface->pixelDesc != NULL)) {
+ 			MiniIOSurfaceDrop(b->surface);
+ 		}
+ 	}
+@@ -652,11 +931,21 @@ RedwoodGPUUserClient::newBuffer(IOMemoryDescriptor * memory, uint64_t from, uint
+ 		IOLog("RedwoodGPU: no %s left for a buffer of %llu bytes\n", b ? "addresses" : "handles", size);
+ 		return NULL;
+ 	}
+-	for (uint64_t offset = 0; offset < size && mapped; offset += 4096) {
++	for (uint64_t offset = 0; offset < size && mapped;) {
+ 		IOByteCount length = 0;
+ 		addr64_t phys = memory->getPhysicalSegment(from + offset, &length, kIOMemoryMapperNone);
++		uint64_t seg = (uint64_t) length;
+ 
+-		mapped = phys != 0 && redwood_gpu_map(b->address + offset, phys, flags & MSM_BO_GPU_READONLY);
++		if (seg > size - offset) {
++			seg = size - offset;
++		}
++		seg &= ~0xfffull;
++		if (phys == 0 || (phys & 0xfff) != 0 || seg == 0) {
++			mapped = false;
++			break;
++		}
++		mapped = redwood_gpu_map_range(b->address + offset, phys, seg, flags & MSM_BO_GPU_READONLY);
++		offset += seg;
+ 	}
+ 	redwood_gpu_mapped();
+ 	if (!mapped) {
+@@ -833,10 +1122,9 @@ RedwoodGPUUserClient::surfaceBuffer(struct redwood_surface * request)
+ 		MiniIOSurfaceDrop(s);
+ 		return kIOReturnUnsupported;
+ 	}
+-	size = round_page_64(s->info.allocSize);
+-	memory = IOSubMemoryDescriptor::withSubRange(s->memory, PAGE_SIZE, size, kIODirectionInOut);
+-	if (memory == NULL || size == 0 || size > GPU_BUFFER_MAX) {
+-		OSSafeReleaseNULL(memory);
++	bool pooled = (s->pixelDesc != NULL);
++	size = pooled ? s->pixelDesc->getLength() : round_page_64(s->info.allocSize);
++	if (size == 0 || size > GPU_BUFFER_MAX) {
+ 		MiniIOSurfaceDrop(s);
+ 		return kIOReturnNoMemory;
+ 	}
+@@ -849,10 +1137,19 @@ RedwoodGPUUserClient::surfaceBuffer(struct redwood_surface * request)
+ 	request->planes = s->info.planeCount;
+ 	if (request->handle == kRedwoodDescribe) {
+ 		request->handle = 0;
+-		memory->release();
+ 		MiniIOSurfaceDrop(s);
+ 		return kIOReturnSuccess;
+ 	}
++	if (pooled) {
++		memory = s->pixelDesc;
++		memory->retain();
++	} else {
++		memory = IOSubMemoryDescriptor::withSubRange(s->memory, PAGE_SIZE, size, kIODirectionInOut);
++	}
++	if (memory == NULL) {
++		MiniIOSurfaceDrop(s);
++		return kIOReturnNoMemory;
++	}
+ 
+ 	IOLockLock(gGPULock);
+ 	for (uint32_t i = 0; i < GPU_BUFFERS; i++) {
+@@ -865,9 +1162,9 @@ RedwoodGPUUserClient::surfaceBuffer(struct redwood_surface * request)
+ 	if (b != NULL) {
+ 		memory->release();
+ 		MiniIOSurfaceDrop(s);
+-	} else if ((b = newBuffer(s->memory, PAGE_SIZE, size, 0, &request->handle)) != NULL) {
++	} else if ((b = newBuffer(pooled ? s->pixelDesc : s->memory, pooled ? 0 : PAGE_SIZE, size, 0, &request->handle)) != NULL) {
+ 		b->memory = memory;
+-		b->kernel = s->kbase + PAGE_SIZE;
++		b->kernel = pooled ? s->kpixels : (s->kbase + PAGE_SIZE);
+ 		b->surface = s;
+ 		gGPUStat.surfaces++;
+ 	}
+@@ -932,9 +1229,10 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+ 	struct msm_gem_submit_bo * bos = NULL;
+ 	struct msm_gem_submit_cmd * cmds = NULL;
+ 	uint64_t addresses[GPU_SUBMIT_CMDS];
+-	uint32_t words[GPU_SUBMIT_CMDS], count = 0;
++	uint32_t words[GPU_SUBMIT_CMDS], count = 0, pushMs;
  	uint64_t began, nanos, again;
  	IOReturn ret = kIOReturnBadArgument;
 +	PerfprofSubmit profile(request->nr_bos);
  
  	if (request->nr_cmds == 0 || request->nr_cmds > GPU_SUBMIT_CMDS || request->nr_bos == 0 || request->nr_bos > GPU_SUBMIT_BOS) {
  		IOLog("RedwoodGPU: a submission of %u command buffers in %u buffers: not taken\n", request->nr_cmds, request->nr_bos);
-@@ -951,7 +1217,61 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -951,7 +1249,82 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  		ret = kIOReturnVMError;
  		goto out;
  	}
@@ -32041,7 +33112,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
 +
 +		nanoseconds_to_absolutetime(GPU_PATIENCE_MS * NSEC_PER_MSEC, &patience);
 +		for (;;) {
-+			bool held = false;
++			MiniIOSurface * heldSurface = NULL;
 +
 +			if (!redwood_gpu_ready()) {
 +				ret = kIOReturnNotReady;
@@ -32053,9 +33124,12 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
 +				struct gpu_buffer * b = buffer(bos[i].handle);
 +				profile.looked(lookupBegan);
 +
-+				held |= b != NULL && b->surface != NULL && b->surface->displayReaders != 0;
++				if (b != NULL && b->surface != NULL && b->surface->displayReaders != 0) {
++					heldSurface = b->surface;
++					break;
++				}
 +			}
-+			if (!held) {
++			if (heldSurface == NULL) {
 +				break;
 +			}
 +			if (mach_absolute_time() - started >= patience) {
@@ -32064,9 +33138,27 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
 +				IOLockUnlock(gGPULock);
 +				goto out;
 +			}
-+			waited = true;
++			MiniIOSurface * pinned = MiniIOSurfaceCopy(heldSurface->sid);
 +			IOLockUnlock(gGPULock);
-+			delay_for_interval(GPU_ASK_AGAIN_US, NSEC_PER_USEC);
++			bool progressed = MiniIOFlipPollLatch();
++			if (!progressed && pinned != NULL && pinned->pixelPhys != 0) {
++				progressed = MiniIOFlipEvictSurface(pinned);
++			}
++			uint32_t waitUs = 0;
++			if (!progressed && pinned != NULL && pinned->pixelPhys != 0) {
++				waitUs = MiniIOFlipWaitHintUs(pinned);
++				if (waitUs == 0) {
++					progressed = MiniIOFlipPollLatch();
++				}
++			}
++			if (pinned != NULL) {
++				MiniIOSurfaceDrop(pinned);
++			}
++			if (!progressed) {
++				waited = true;
++				delay_for_interval(waitUs != 0 ? waitUs : GPU_ASK_AGAIN_US, NSEC_PER_USEC);
++				MiniIOFlipPollLatch();
++			}
 +			profile.next(PS_LOCK);
 +			IOLockLock(gGPULock);
 +			profile.next(PS_DISPLAY);
@@ -32088,13 +33180,15 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  	/*
  	 * The GPU reads memory and writes memory. What this processor's cache holds of an IOSurface
  	 * (somebody has written it, or has read it, as the display's driver does, and the GPU is to
-@@ -963,34 +1283,54 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -963,34 +1336,55 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  	 * has mapped, every time. The buffers made here need none of that, unless they are
  	 * ordinary memory (gpu_cached=1).
  	 */
 +	profile.next(PS_CACHE);
  	began = mach_absolute_time();
- 	nanoseconds_to_absolutetime(GPU_PUSH_AGAIN_MS * NSEC_PER_MSEC, &again);
+-	nanoseconds_to_absolutetime(GPU_PUSH_AGAIN_MS * NSEC_PER_MSEC, &again);
++	pushMs = gGPUPushAgainMs;
++	nanoseconds_to_absolutetime((uint64_t) pushMs * NSEC_PER_MSEC, &again);
 +	uint64_t seenAgain;
 +	nanoseconds_to_absolutetime(2 * NSEC_PER_MSEC, &seenAgain);
  	for (uint32_t i = 0; i < request->nr_bos; i++) {
@@ -32105,8 +33199,8 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  		if (b == NULL) {
  			continue;
  		}
-+		if (b->surface != NULL && b->surface->gpuOnly) {
-+			continue;                       /* (the CPU never writes it: nothing of it is in the cache that the GPU would miss) */
++		if (b->surface != NULL && (b->surface->gpuOnly || b->surface->writeCombined)) {
++			continue;                       /* (WC scanout or GPU-only: nothing dirty in the CPU cache that the GPU would miss) */
 +		}
 +		unsigned flushCause = PF_FLUSH_CACHED;
  		if (b->surface != NULL) {
@@ -32114,7 +33208,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  
 -			if (seed == b->seed && !b->seen && began - b->pushed < again) {
 +			if (seed == b->seed && b->pushed != 0 &&
-+			    ((!b->seen && began - b->pushed < again) ||
++			    ((!b->seen && (pushMs == 0 || began - b->pushed < again)) ||
 +			     (b->seen && b->pushedGen == fSyncGen && began - b->pushed < seenAgain))) {
  				continue;
  			}
@@ -32144,7 +33238,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  		if (cmds[i].type != MSM_SUBMIT_CMD_BUF) {
  			continue;                               /* the other kinds are for a GPU shared between address spaces */
  		}
-@@ -1004,6 +1344,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -1004,6 +1398,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  		addresses[count] = b->address + cmds[i].submit_offset;
  		words[count++] = cmds[i].size / 4;
  	}
@@ -32152,7 +33246,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  	request->fence = redwood_gpu_submit(addresses, words, count);
  	/*
  	 * The ring is full and the core is not reading it: it has stopped. With gpu_recover=1 it is
-@@ -1018,13 +1359,16 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -1018,13 +1413,16 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  			request->fence = redwood_gpu_submit(addresses, words, count);
  		}
  	}
@@ -32169,7 +33263,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  
  			big += b != NULL && b->size >= (4u << 20);
  		}
-@@ -1044,7 +1388,9 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -1044,7 +1442,9 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  	 * told; the last submission of a frame names the surface the frame is drawn into.)
  	 */
  	for (uint32_t i = 0; request->fence != 0 && i < request->nr_bos; i++) {
@@ -32179,7 +33273,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  
  		if (b != NULL) {
  			b->fence = request->fence;
-@@ -1109,6 +1455,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
+@@ -1109,6 +1509,7 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
  	IOLockUnlock(gGPULock);
  	ret = request->fence != 0 ? kIOReturnSuccess : kIOReturnTimeout;
  out:
@@ -32187,7 +33281,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  	if (bos != NULL) {
  		IODelete(bos, struct msm_gem_submit_bo, request->nr_bos);
  	}
-@@ -1154,6 +1501,7 @@ RedwoodGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options, I
+@@ -1154,6 +1555,7 @@ RedwoodGPUUserClient::clientMemoryForType(UInt32 type, IOOptionBits * options, I
  	if (b != NULL) {
  		b->memory->retain();
  		b->seen = true;
@@ -32195,7 +33289,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  		*memory = b->memory;
  		*options = 0;
  		ret = kIOReturnSuccess;
-@@ -1166,6 +1514,7 @@ IOReturn
+@@ -1166,6 +1568,7 @@ IOReturn
  RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
      IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
  {
@@ -32203,7 +33297,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  	union {
  		struct msm_param param;
  		struct msm_gem_new gemNew;
-@@ -1179,6 +1528,8 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
+@@ -1179,6 +1582,8 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
  		struct drm_gem_close close;
  		struct redwood_surface surface;
  		struct redwood_show show;
@@ -32212,7 +33306,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  		struct redwood_worked worked;
  	} r;
  	size_t size = args->structureInputSize;
-@@ -1219,6 +1570,7 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
+@@ -1219,6 +1624,7 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
  				waitOver(&r.cpuPrep.timeout, redwood_gpu_last());
  			}
  		}
@@ -32220,7 +33314,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  		IOLockUnlock(gGPULock);
  		slowWait("cpu-prep", waitBegan);
  		break;
-@@ -1235,6 +1587,7 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
+@@ -1235,6 +1641,7 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
  				waitOver(&r.waitFence.timeout, r.waitFence.fence);
  			}
  		}
@@ -32228,7 +33322,7 @@ index 1dc147cca3ed4f73efb18ad48d6dba10fde8d00d..e402691e7bf07b7a1b365b3e220d9e84
  		IOLockUnlock(gGPULock);
  		slowWait("fence", waitBegan);
  		break;
-@@ -1280,6 +1633,12 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
+@@ -1280,6 +1687,12 @@ RedwoodGPUUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
  	case kRedwoodShow:
  		ret = show(&r.show);
  		break;
@@ -32543,10 +33637,10 @@ index 0a7de6fc4be75dc19dc7626d406a251299d22fb0..2ec713e2ede72c86d0c135ab4ae99c4d
  	processor_state_update_from_thread(processor, thread, false);
  
 diff --git a/pexpert/arm/pe_bootargs.c b/pexpert/arm/pe_bootargs.c
-index c6b87b081d2f4338653431e4baefa712b4da710a..0ac5d3647ee50316b5b7e3dcb5a32fa377a3c718 100644
+index c6b87b081d2f4338653431e4baefa712b4da710a..49e4ff0dd6daeb2eee19ffad67bd2ce5325b6b67 100644
 --- a/pexpert/arm/pe_bootargs.c
 +++ b/pexpert/arm/pe_bootargs.c
-@@ -3,10 +3,128 @@
+@@ -3,10 +3,127 @@
   */
  #include <pexpert/pexpert.h>
  #include <pexpert/boot.h>
@@ -32566,10 +33660,9 @@ index c6b87b081d2f4338653431e4baefa712b4da710a..0ac5d3647ee50316b5b7e3dcb5a32fa3
 +	{ "gpu", "1" },
 +	{ "mi8gpu_gmuclk", "1" },
 +	{ "mi8gpu_zap_keep", "1" },
-+	{ "caenv", "FD_MESA_DEBUG=sysmem" },
 +	{ "fb_partial", "0" },
 +	{ "fb_flip", "1" },
-+	{ "fb_native", "1" },
++	{ "fb_native", "2" },
 +	{ "sb_fps_clamp", "1" },
 +	{ "mi8rp_mss", "6" },
 +	{ "mi8rp_hold", "90" },

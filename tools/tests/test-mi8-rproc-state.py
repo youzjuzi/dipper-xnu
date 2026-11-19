@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Execute the actual per-remote SMP2P helpers with synthetic SMEM callbacks."""
 import argparse
 from pathlib import Path

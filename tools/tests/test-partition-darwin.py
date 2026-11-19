@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Synthetic GPT and sandboxed shell tests. No ADB or real block devices."""
 import importlib.util
 import json

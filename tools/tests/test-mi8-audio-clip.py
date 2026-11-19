@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Actual bounded clip, ring/GLINK/APR and TAS driver against independent peers."""
 import argparse
 import hashlib

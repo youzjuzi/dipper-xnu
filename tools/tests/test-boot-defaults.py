@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Compile the actual ARM boot-default code and XNU parser against host DT stubs."""
 import argparse
 import ctypes
@@ -19,14 +20,14 @@ a = p.parse_args()
 x = a.tree.resolve()
 source = (x / 'pexpert/arm/pe_bootargs.c').read_text()
 entries = re.findall(r'\{ "([^"]+)", "([^"]+)" \}', source)
-assert len(entries) == 34
+assert len(entries) == 33
 measure = 'taskload touch_lat mi8_cpuclk perfprof fprof loader_return_after'.split()
 retained = 'bootcpu=7 cpus=7 ufs=2 root_apfs=ufs_darwin epoch=1793436756 wifi_mac=00:00:00:00:00:00'
 # Independent complete reference profile: do not derive expected values from the table.
 reference = (retained + ' '
     'fts=1 fts_steps=6 fts_raw=0 buttons=1 buttons_steps=5 '
-    'gpu=1 mi8gpu_gmuclk=1 mi8gpu_zap_keep=1 caenv=FD_MESA_DEBUG=sysmem '
-    'fb_partial=0 fb_flip=1 fb_native=1 sb_fps_clamp=1 '
+    'gpu=1 mi8gpu_gmuclk=1 mi8gpu_zap_keep=1 '
+    'fb_partial=0 fb_flip=1 fb_native=2 sb_fps_clamp=1 '
     'mi8rp_mss=6 mi8rp_hold=90 mi8rp_svc=1 mi8rp_servreg=1 mi8rp_wlfw=1 '
     'mi8rp_bdf=1 mi8rp_wsmmu=3 mi8rp_lx=1 mi8rp_lxirq=1 '
     'wifi_lx=2 wifi_station=1 wifi_quiet=1 thermgov=66 ffix=1 '
@@ -149,7 +150,7 @@ const char *raw_input(void) { return input.CommandLine; }
     for size in [0,3,6,8]:
         reset('',size=size);check(lib.PE_boot_args()==b'')
     for k,v in entries:
-        for override in ['0','2','0x1'] if k!='caenv' else ['0','FD_MESA_DEBUG=other']:
+        for override in (['0','1','0x1'] if k=='fb_native' else ['0','2','0x1']):
             raw=k+'='+override
             reset(raw,init=0);before=snapshot([k])
             reset(raw);check(snapshot([k])==before)

@@ -17,7 +17,7 @@ Rebuilding only the kernel and payload verified the DSI brightness DMA fix: owne
 | Component | Verified Behavior | Validation Boundaries |
 | --- | --- | --- |
 | Build & Boot | Kernel `build`, `ath10k`, Mesa, userspace, UEFI build pass; boots to SpringBoard on device | Host had pre-installed deps; initial test reused verified `darwin` span |
-| Display & Input | A630 desktop rendering, touch, both brightness sliders, 3x lock/wake, dynamic CPU/DDR governor (`825 MHz` / DDR `2/16` idle under `66 °C`), `IOSurface` 2 ms flush coalescing | Short sessions only; DPU zero-copy scanout and render-thread big-core affinity unimplemented |
+| Display & Input | A630 GMEM desktop rendering (`caenv=FD_MESA_DEBUG=sysmem` default removed), `fb_native=2` WC zero-copy scanout (`59 FPS`, `5698/5700` zero-copy, `6.87 us` avg flip), TE-aware submit waits, batched SMMU mapping (`0.12–0.18 ms`/`IOSurface`), dynamic CPU/DDR governor, touch & brightness sliders | Bounded 300 s runs verified (`perfprof=1`); standalone zero-override boot with default `pe_bootargs.c` & render-thread big-core affinity open |
 | Wi-Fi / Safari | Driver starts, `en0` gets IP, native LQM updates (`218` `linkQualityDidChange` events, active status bar bars), DMA barriers/`rx_confused` recovery, Safari page load/refresh | Throughput, external IPv6, and multi-hour runtime unverified |
 | Peripherals & UI | Torch toggle, haptics, volume keys/slider, standard HID ringer switch (`0x0b`/`0x2e` HUD fix), battery gauge, `/apps` `MNT_UNION` sideload, widgets, static wallpaper | Torch dimming steps subtle; volume UI alone does not cover audio tuning |
 | Persistence (opt-in) | Under `--persist`, `/private/var` saves to `darwin` and restores icons, folders, and Settings switches on next boot with CRC match | Single save + single restore only; only saves on orderly exit; crash/periodic saving and multi-cycle store growth untested |
@@ -29,7 +29,7 @@ Rebuilding only the kernel and payload verified the DSI brightness DMA fix: owne
 
 - XNU `all` target (export symbol checks and LLDB tool generation) still fails; clean-machine Ubuntu package install unverified.
 - Generic device config input and full charge/discharge cycle unverified; persistence tested once and loses unsaved state on hard power-off.
-- Heavy-load UI stutter (DPU zero-copy scanout and render-thread big-core affinity pending), sustained power management, and modem exit recovery (`halt port modem` stays non-idle across warm stop; full reboot still required between baseband runs) remain open.
+- Render-thread big-core affinity, sustained power management, and modem exit recovery (`halt port modem` stays non-idle across warm stop; full reboot still required between baseband runs) remain open.
 - Telephony, cellular data, Bluetooth audio, microphone, camera, GPS, and unlisted hardware are not available.
 - Extended Wi-Fi runtime stability and browser video decoding remain under observation.
 - Combined distribution terms for the Linux-derived GPU init table and APSL kernel remain unresolved ([GPU License Notes](legal/GPU_LICENSE.md)).
@@ -49,7 +49,7 @@ Android layout restoration, ~24 GiB `darwin` creation, two `Format Data` cycles,
 
 ## Tool Maintenance
 
-- **2026-11-19**: Device-verified native Wi-Fi status bar signal bars (`EVENT_LQM_CHANGED` sized to `0xb4`, `220 <= MLEN 224` + `clamp_rssi()` + `kev_post_msg()` failure logging + `com.apple.wifi.manager` pre-declaration), `TAS2557` bit-bang I2C busy-spin (`native_delay` for `<= 50 us` + `check_us`/`check_y`/`check_err` summary fields), native `AppleOLYHAL` / `RedwoodWLAN` / dynamic CPU-DDR governor / `RedwoodGPU` flush coalescing, warm subsystem teardown + `mi8_rproc_stop()`, and 2026-11-18 stability fixes.
+- **2026-11-19**: Device-verified Adreno 630 GMEM (`MSM_PARAM_GMEM_BASE` `0x00100000`), `fb_native=2` WC zero-copy DPU scanout + TE-aware wait + non-copy eviction, `gpu_push_ms=100` flush reduction, and O(1) batched GPU SMMU mapping (`0.12–0.18 ms`/`IOSurface`, `0.20 ms` max `gGPULock`), plus native Wi-Fi status bar signal bars (`EVENT_LQM_CHANGED` sized to `0xb4`, `220 <= MLEN 224` + `clamp_rssi()` + `kev_post_msg()` failure logging + `com.apple.wifi.manager` pre-declaration), `TAS2557` bit-bang I2C busy-spin (`native_delay` for `<= 50 us` + `check_us`/`check_y`/`check_err` summary fields), native `AppleOLYHAL` / `RedwoodWLAN` / dynamic CPU-DDR governor / `RedwoodGPU` flush coalescing, warm subsystem teardown + `mi8_rproc_stop()`, and 2026-11-18 stability fixes.
 - **2026-11-18**: Stability & tooling fixes: settled `/apps` `MNT_UNION` sideload support (`bsd/vfs/vfs_attrlist.c`, `userland/build.sh` with `APPS=1`, `userland/src/init.c`), reported standard HID Telephony Ring Switch (`0x0b`/`0x2e`, unmuted) on `Redwood buttons` (`userland/src/inject.c`), added `dsb sy` DMA barriers + 512-byte recycled slot zeroing + bounded `rx_confused` recovery + active health lines + `mi8_wifi_stop()` teardown summary, fixed `build-payload.py --link-inputs`, and added read-only `tools/tests/device-log.py`.
 - **2026-11-11**: Cached permanent TLMM mappings statically in AFE diagnostics to avoid `ml_io_unmap` assertions ([AFE Cleanup](validation/VALIDATION.md#afe-pin-mapping-cleanup)).
 - **2026-11-05**: Fixed `patchtool.py` nested-component unowned reporting bug (33/33 host tests).
@@ -65,7 +65,7 @@ Patches include optional `thermgov`, frame/thread profiling, and rendering/stati
 
 ## `dipper` Boot-Arg Defaults
 
-34 fixed platform settings live in `pexpert/arm/pe_bootargs.c` for `dipper` (overridable via explicit args including `=0`) and are shared via `kern.bootargs`; host equivalence tests and `daily` home-screen boot verified ([Startup Guide](install/STARTUP.md#short-dipper-boot-arguments-and-defaults)).
+33 fixed platform settings live in `pexpert/arm/pe_bootargs.c` for `dipper` (including `fb_native=2` and GMEM enabled without default `caenv=FD_MESA_DEBUG=sysmem`; overridable via explicit args including `=0`) and are shared via `kern.bootargs`; host equivalence tests passed after updating defaults, while previous device validation ran `fb_native=2` explicitly ([Startup Guide](install/STARTUP.md#short-dipper-boot-arguments-and-defaults)).
 
 ## Audio Bring-Up and Session Evolution
 

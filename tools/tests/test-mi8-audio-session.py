@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Actual session feeder, ring/GLINK/APR and TAS controller against independent peers."""
 import argparse
 import hashlib

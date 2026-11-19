@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 # Host-only compilation. Requires tools/prepare/prepare.py --prepare first.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

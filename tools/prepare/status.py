@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Inspect workspace status, diff unexported work changes, check repo hygiene, and prune runs."""
 import argparse
 import datetime

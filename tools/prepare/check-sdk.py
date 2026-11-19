@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Compare an SDK directory with the pinned upstream Git tree, without modifying it."""
 import argparse
 import hashlib

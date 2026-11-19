@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Offline Mi 8 GPT restoration planner. Never connects to or writes a device."""
 import argparse
 import hashlib

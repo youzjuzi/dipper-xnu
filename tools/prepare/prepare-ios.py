@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Verify the supported IPSW and prepare local userland inputs; no device access."""
 import argparse
 import hashlib

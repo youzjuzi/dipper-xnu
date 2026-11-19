@@ -1,10 +1,12 @@
 diff --git a/tools/mk-ath10k.sh b/tools/mk-ath10k.sh
 new file mode 100755
-index 0000000000000000000000000000000000000000..8aecd35eb08a6b41182c9b400a83f2ae32651dba
+index 0000000000000000000000000000000000000000..2bf9655270e083eea9b395c719911b07a3a244e2
 --- /dev/null
 +++ b/tools/mk-ath10k.sh
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,190 @@
 +#!/bin/bash
++# SPDX-License-Identifier: MIT
++# Copyright (c) 2026 yanei
 +# Linux 7.0.14 ath10k/snoc on the existing lx layer; qmi.c is replaced by the WLFW bridge.
 +# ATH10K_ROOT may name an isolated staging tree containing the existing lx and XNU headers.
 +set -euo pipefail
@@ -396,10 +398,12 @@ index 0000000000000000000000000000000000000000..df984918ce41b7439eca8c09c2e096ed
 +static inline int qcom_unregister_ssr_notifier(void *cookie, struct notifier_block *nb) { return 0; }
 diff --git a/wifi/lx/include-ath10k/lx_ath10k_prelude.h b/wifi/lx/include-ath10k/lx_ath10k_prelude.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e267c58331377a2ff433f6b5db0c2f847fe5c791
+index 0000000000000000000000000000000000000000..16f96ca00bc30d5750807730d451e2caa27a545a
 --- /dev/null
 +++ b/wifi/lx/include-ath10k/lx_ath10k_prelude.h
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#include <lx_prelude.h>
 +#include <linux/delay.h>
 +DEFINE_LOCK_GUARD_1(spinlock_bh, spinlock_t,
@@ -408,10 +412,12 @@ index 0000000000000000000000000000000000000000..e267c58331377a2ff433f6b5db0c2f84
 +static inline void netif_threaded_enable(struct net_device *d) { }
 diff --git a/wifi/lx/include/lx_ath10k_cfg.h b/wifi/lx/include/lx_ath10k_cfg.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..786e79806890c9b4045df5d0c38cb3affd6623c7
+index 0000000000000000000000000000000000000000..0d91905b549e4e8d738b4cb94f6a14edec3aa019
 --- /dev/null
 +++ b/wifi/lx/include/lx_ath10k_cfg.h
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#ifndef _LX_ATH10K_CFG_H_
 +#define _LX_ATH10K_CFG_H_
 +#include <lx_wlfw.h>
@@ -427,10 +433,12 @@ index 0000000000000000000000000000000000000000..786e79806890c9b4045df5d0c38cb3af
 +#endif
 diff --git a/wifi/lx/include/lx_wlfw.h b/wifi/lx/include/lx_wlfw.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..cb48668ee1eca942b72bff755ba4e30a9041ebb6
+index 0000000000000000000000000000000000000000..ae50f1c3f772d9dc758dfcd333c8e8252b9d41f2
 --- /dev/null
 +++ b/wifi/lx/include/lx_wlfw.h
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#ifndef _LX_WLFW_H_
 +#define _LX_WLFW_H_
 +
@@ -460,10 +468,12 @@ index 0000000000000000000000000000000000000000..cb48668ee1eca942b72bff755ba4e30a
 +#endif
 diff --git a/wifi/lx/src-ath10k/lx_ath10k_bus.c b/wifi/lx/src-ath10k/lx_ath10k_bus.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b9719d505bef6023b624aabd82ff1040a5caf6c
+index 0000000000000000000000000000000000000000..d2b59893dc623f97f11f548b1e4c32ed2412bb3f
 --- /dev/null
 +++ b/wifi/lx/src-ath10k/lx_ath10k_bus.c
-@@ -0,0 +1,532 @@
+@@ -0,0 +1,534 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#include <linux/platform_device.h>
 +#include <linux/of.h>
 +#include <linux/of_reserved_mem.h>
@@ -1020,10 +1030,12 @@ index 0000000000000000000000000000000000000000..2da9594f1a76001ebdf867436bba6e10
 +}
 diff --git a/wifi/lx/src-ath10k/lx_ath10k_qmi.c b/wifi/lx/src-ath10k/lx_ath10k_qmi.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..eefefc0fb1ae86b8551d4adc096fabf202ef52d9
+index 0000000000000000000000000000000000000000..a4ca7884c570d20fef4deae30b4e056a706ce6fd
 --- /dev/null
 +++ b/wifi/lx/src-ath10k/lx_ath10k_qmi.c
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,207 @@
++/* SPDX-License-Identifier: MIT */
++/* Copyright (c) 2026 yanei */
 +#ifdef LX_WLFW_HOST_TEST
 +#include <errno.h>
 +#include <string.h>

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Real PCM/AFE/APR/GLINK paths and dual-address SMMU against synthetic peers."""
 import argparse
 import os

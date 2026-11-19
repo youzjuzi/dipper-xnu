@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Native short-lock bridges, ownership and dependency policy under real contention."""
 import argparse,os,runpy,subprocess,tempfile
 from pathlib import Path

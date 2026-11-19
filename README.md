@@ -12,11 +12,16 @@ This project is still under active development and is **not** ready for daily us
 
 ## Recent Updates · 2026-11-19
 
+- **Adreno 630 GMEM, `fb_native=2` zero-copy scanout, and batched GPU SMMU mapping (defaults enabled)**:
+  - Fixed `MSM_PARAM_GMEM_BASE` (`0x06`) in `bsd/dev/mi8_adreno.c` to return `0x00100000ull` (`1 MiB` A630 GMEM base) and removed the default `caenv=FD_MESA_DEBUG=sysmem` workaround, enabling tile rendering by default.
+  - Added `fb_native=2` (now default in `pexpert/arm/pe_bootargs.c`): a 4-slot Write-Combined `1125x2436` zero-copy DPU scanout pool (`2` splash + `2` contiguous `< 4 GB` RAM; Piece 0 `0x9d400000` kept for fallback and clean `MiniIOFlipQuiesce()`), skipping `dc civac` on WC scanout surfaces, releasing display read holds without WC CPU readback in `evictSurface()`, and sleeping to the next TE pulse (`MiniIOFlipWaitHintUs()`).
+  - Raised default periodic cache clean interval `gpu_push_ms` (`GPU_PUSH_AGAIN_MS`) from `4 ms` to `100 ms` (`seed` changes still flush immediately) and replaced per-4 KiB `kvtophys()` scans + barriers with O(1) L2/L3 table caches and batched `mi8_gpu_map_range()` / `mi8_gpu_unmap()`.
+  - Device-verified (`300 s` runs): cache flushing dropped from `~85 GiB / 5.56 s` (`zc-sysmem`) to `1.75–3.26 GiB / 0.14–0.29 s`, zero-copy flips hit `5698/5700` (`6.87 us` avg / `1.70 ms` max flip, `59 FPS` active), eviction wait spikes dropped from `173.5 ms` to `<= 14.56 ms`, `IOSurface` GPU mapping dropped from `6.96–8.54 ms` to `0.12–0.18 ms`, and `gGPULock` wait max fell from `9.44 ms` to `0.20 ms`.
 - **Native Wi-Fi & Bluetooth kernel integration (no UI shims)**: Replaced the userspace Bluetooth shim (`libredwood-bt.dylib`) with native IOKit `AppleOLYHAL` (`RedwoodBT.cpp`); removed the SpringBoard Wi-Fi status bar hook (`inject_sb.c`); exposed the `"wlan"` parent node (`RedwoodWLAN.cpp`) + early `en0`; fixed `EVENT_LQM_CHANGED` sizing (`0xc0` -> `0xb4`, `220 <= MLEN 224`) + RSSI clamping + `com.apple.wifi.manager` Mach pre-declaration so native SpringBoard Wi-Fi signal bars light up cleanly on join; added Wi-Fi DMA `dsb sy` barriers, recycled RX slot head zeroing, bounded `rx_confused` recovery, and multi-AP join fallback.
 - **Dynamic CPU/DDR governor & GPU flush coalescing**: Added touch- and GPU-activity-driven CPU/DDR frequency scaling (idling down to `825 MHz` / DDR `2/16` under the `66 °C` thermal ceiling) and `RedwoodGPU` 2 ms intra-frame `IOSurface` cache-flush coalescing.
 - **Speaker audio bit-bang timing fix**: Switched short `<= 50 us` bit-bang I2C delays in `mi8_tas2557.c` to busy-spin (avoiding scheduler sleeps on every `3 us` half-clock when `cpu_idle_latency == 0`), cutting post-mute Y-RAM verification from `~486–1000+ ms` down to `~207–208 ms` and warmup to `~31 ms`, and preventing spurious `latched=coefficient` lockouts under load.
 - **Volume HUD, sideload, teardown & live logging**: Fixed the muted Volume HUD via standard HID Telephony Ring Switch (`0x0b`/`0x2e`); settled `/apps` `MNT_UNION` sideload; added orderly warm teardown for resident `audio=5`, BT, Wi-Fi, and GPU plus read-only `tools/tests/device-log.py`.
-- **Remaining limits**: Cold reboot is still required between baseband runs (`halt port modem` does not idle); DPU zero-copy scanout, render-thread big-core affinity, Bluetooth audio, microphone, cellular data, and native Adreno 630 Metal remain unimplemented.
+- **Remaining limits**: Cold reboot is still required between baseband runs (`halt port modem` does not idle); render-thread big-core affinity, Bluetooth audio, microphone, cellular data, and native Adreno 630 Metal remain unimplemented; standalone default-arg smoke boot after flipping `fb_native=2` default remains to be run.
 - Hardware results above are from maintainer testing and device logs rather than an automated full regression; details in [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](docs/validation/VALIDATION.md).
 
 ## Hardware & Boot Chain
@@ -44,7 +49,7 @@ Most peripheral checks below were recorded on the pre-repartition test layout, w
 | Feature | Status | Notes |
 | --- | --- | --- |
 | System boot | Works | Reaches iOS 16.5 SpringBoard home screen |
-| Display & GPU | Partly | Mesa / freedreno drives A630 with dynamic CPU/DDR governor and flush coalescing; zero-copy scanout, render-thread affinity, and exit recovery need work |
+| Display & GPU | Partly | Mesa / freedreno drives A630 with GMEM tile rendering, `fb_native=2` WC zero-copy scanout (`59 FPS` active), dynamic CPU/DDR governor, and batched SMMU mapping; render-thread big-core affinity and exit recovery need work |
 | Touch | Works | FTS touch input working |
 | Brightness & Lock/Wake | Works | Settings / Control Center brightness and lock/wake verified |
 | Volume buttons | Works | Standard HID Telephony Ring Switch (`0x0b`/`0x2e`) fixes the muted HUD overlay; buttons and slider adjust volume |

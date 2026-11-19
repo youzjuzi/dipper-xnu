@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Read-only live log capture and orderly stop helper for a running xnuloader session."""
 import argparse
 import os

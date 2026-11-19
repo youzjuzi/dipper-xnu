@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
+# Copyright (c) 2026 yanei
 """Conservative ARM64 frame/call-graph budget for the native audio worker.
 
 Input: the bsd/DEVELOPMENT object directory from the linked kernel build.
