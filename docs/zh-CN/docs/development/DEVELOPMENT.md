@@ -128,12 +128,12 @@ tools/ 下固定使用 prepare（源码和输入）、build（编译与打包）
 
 接手顺序固定为：AGENTS → docs/README（文档导航）→ STATUS（功能与设备边界）→ 本文（开发流程和现场交接）。每项任务结束更新下面的现场交接，不另建多个 current/latest 状态文件。设备标识、原始日志和私人配置只引用本机位置，不复制到公共文档。
 
-### 当前开发现场交接（2026-11-18，接手时重新核对）
+### 当前开发现场交接（2026-11-19，接手时重新核对）
 
-- 主线与分支状态：`main` 已合入扬声器音频与缺省外设（`bt=7`、`audio=5` 常驻、`battery=1`、`torch=3`、`haptic=3`）、工具链入口（`status.py`、`build-kernel.sh`、`run-tests.py`）与双语文档架构。当前分支 `feat/route1-stability`（自 `2854c1e` 拉出）已收敛 `/apps` 联合挂载侧载，完成音量键标准 HID Telephony 振铃开关修复、Wi-Fi DMA `dsb sy` 屏障 + 回收槽头部清零 + `rx_confused` 有界诊断恢复与退出汇总、实时日志脚本 `tools/tests/device-log.py` 及 `build-payload.py --link-inputs` 修复。
-- `work/` 源码状态：`xnuloader/loader.c` 仅含本机配置差异（经占位归一化后与 `source-manifest.json` 一致）；**`work/` 现已实现 0 清单差异、0 清单外改动**（`bsd/vfs/vfs_attrlist.c` 的 `MNT_UNION` `getattrlistbulk` 目录穿透修复已纳入 `xnu-mi8` 跟踪）。实验性 `inject_sb.c` Metal 清除与 `init.c` `RedwoodMetal.bundle` 绑定已按干净基线剥离（快照留存于 `local/backups/20261118-sideload-work-01/`）。
-- 构建与验证现场：已重编 `ath10k.o`、XNU 内核、用户态镜像，并在 `work/runs/20261118-route1a-01/candidate/` 生成就绪候选载荷（`--wifi --seconds 1080 --link-inputs`）。干净重放（`--clean-replay`）、全套主机回归（`--suite all --sanitize`）与仓库检查通过；**`20261118-route1a-01` 候选包尚待小米 8 实机验证**（含音量 HUD 静音指示、Wi-Fi 在 `device-log.py watch`/`stop` 下的稳定性与 `Via.app` `/apps` 侧载）。
-- 下一步：在小米 8 上 RAM 启动 `work/runs/20261118-route1a-01/candidate/` 并配合 `device-log.py` 取回全量日志；实机确认后按规划推进常驻 `audio=5` 退出关停钩子、GPU SMMU / 基带跨轮退出恢复，以及底层零拷贝显示、麦克风 `SLIMbus/WCD9340`、移动数据（`QMI + IPA`）或真 Metal 适配 Adreno 630 等后续路线。
+- 主线与分支状态：`main` 已完整合入第一阶段原生替代、动态性能优化与稳定性更新：`/apps` `MNT_UNION` 联合挂载与 `vfs_attrlist.c` 修复、标准 HID Telephony 振铃开关（`0x0b`/`0x2e`）修复音量键静音 HUD、Wi-Fi DMA `dsb sy` 屏障与回收槽清零及 `rx_confused` 恢复 + `mi8_wifi_stop()`、只读抓日志工具 `tools/tests/device-log.py`、常驻音频/BT/WCN3990/GPU 有序热退出（`mi8_rproc_stop()`、`mi8_bt_stop()`、`mi8_gpu_quiesce()`）、内核原生 `AppleOLYHAL`（`RedwoodBT.cpp`）与 `"wlan"` 节点（`RedwoodWLAN.cpp`）替代 `libredwood-bt.dylib` 与 SpringBoard Wi-Fi hook、动态 CPU/DDR 调频（空闲 `825 MHz` / DDR `2/16`）与 `RedwoodGPU` 2 ms 刷新合并、`EVENT_LQM_CHANGED` `MLEN` 尺寸修复（`0xb4`，`220 <= 224`）+ `com.apple.wifi.manager` 预声明，以及 `TAS2557` bit-bang I2C 忙等自旋（`~207 ms` 系数校验、`~31 ms` 唤醒预热）。
+- `work/` 源码状态：`xnuloader/loader.c` 仅含本机配置差异（经占位归一化后与 `source-manifest.json` 一致）；**`work/` 保持 0 清单差异、0 清单外改动**，`license-inventory.json` 已与 105 项清单同步。
+- 构建与验证现场：XNU 内核（`mach.development.bcm2837`）、`root.apfs`、`flashboot.apfs`、干净重放及全量主机回归（`PYTHONDONTWRITEBYTECODE=1 python3 -B tools/tests/run-tests.py --suite all --clean-replay --sanitize`，`21/21`）与仓库卫生检查（`status.py check`）均已通过；小米 8 实机已验证原生 Wi-Fi 状态栏信号格（`218` 次 `linkQualityDidChange`、`0` 次 `kev_post_msg` 失败）与多轮 TAS2557 音频唤醒/静音恢复（`checks=2/2`、`check=208 ms`、`latched=no`、`cleanup=complete`）。因基带热停时 `halt port modem` 仍未归闲，含基带的轮次之间仍需冷重启设备。
+- 下一步：可推进路线 2 剩余项（显示侧 SMMU DPU 零拷贝翻页、渲染线程大核亲和调度、Safari NV12 绿屏排查/`inject.c` 内核化），或开启路线 3 新硬件特性（`QMI + IPA` 蜂窝数据、`SLIMbus + WCD9340` 机内麦克风或 Adreno 630 原生 Metal 适配）。
 
 以后每项任务更新：任务/分支/提交、work 源码对应状态与未导出修改、已验证产物及证据位置、下一步与阻塞。未完成的验证要明确写出，不靠目录名推断。
 
