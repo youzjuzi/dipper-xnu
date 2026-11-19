@@ -150,7 +150,7 @@
       },
       {
         "path": "bsd/dev/redwood_apple80211.c",
-        "sha256": "997b390c16a5b14c7f8e7b5bb73f97cb7122b52d0e0f851756f7640b5227a40b",
+        "sha256": "b7babce88d919792aa1118271ea5fef83e017ee8138862e0ded939aa8424e7ac",
         "mode": "0o664"
       },
       {
@@ -457,7 +457,7 @@
       },
       {
         "path": "userland/mkjobs.py",
-        "sha256": "5bdc28cac47021fa5af6ba759ab86a02ca125891e1f52b26943635a932307e02",
+        "sha256": "462a637136112ee84659ac1967e1a116b691fb3dbae91dd37885b09de30198da",
         "mode": "0o755"
       },
       {

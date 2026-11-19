@@ -25053,10 +25053,10 @@ index e84005324a92b88f242d2599471f4ddec04bf23f..10ae3173d4cbda24cafe79beca6af115
  
  	if (!gpu_kept || !gpu_recover) {
 diff --git a/bsd/dev/redwood_apple80211.c b/bsd/dev/redwood_apple80211.c
-index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e3e5e2290 100644
+index e2674ee51149d523c6e5054a5a6fd28a91947562..d792605b753b845ac0b97325f448943146f294c9 100644
 --- a/bsd/dev/redwood_apple80211.c
 +++ b/bsd/dev/redwood_apple80211.c
-@@ -33,6 +33,8 @@
+@@ -33,10 +33,14 @@
   */
  #include <kern/kalloc.h>
  #include <kern/locks.h>
@@ -25065,7 +25065,13 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
  #include <libkern/libkern.h>
  #include <sys/errno.h>
  #include <sys/kern_event.h>
-@@ -74,6 +76,7 @@ type_name(int32_t type)
+ #include <sys/kernel.h>
++#include <sys/param.h>
++#include <sys/mbuf.h>
+ #include <sys/proc.h>
+ #include <sys/redwood_input.h>
+ #include <sys/redwood_net.h>
+@@ -74,6 +78,7 @@ type_name(int32_t type)
  		{ 79, "STA_STATS" }, { 80, "ROAM_THRESH" }, { 85, "IE" }, { 86, "SCAN_REQ_MULTIPLE" }, { 87, "BTCOEX_MODE" },
  		{ 90, "SCANCACHE_CLEAR" }, { 94, "VIRTUAL_IF_CREATE" }, { 95, "VIRTUAL_IF_DELETE" }, { 103, "CURRENT_NETWORK" },
  		{ 106, "RSSI_BOUNDS" }, { 107, "ROAM" }, { 207, "CHANNELS_INFO" }, { 254, "HW_SUPPORTED_CHANNELS" },
@@ -25073,7 +25079,7 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
  	};
  
  	for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-@@ -193,7 +196,7 @@ _Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct
+@@ -193,7 +198,7 @@ _Static_assert(sizeof(struct apple80211_scan_result) == 1164 && offsetof(struct
  
  /* Apple80211's events (APPLE80211_M_...) */
  enum { EVENT_POWER_CHANGED = 1, EVENT_SSID_CHANGED = 2, EVENT_BSSID_CHANGED = 3, EVENT_LINK_CHANGED = 4, EVENT_ASSOC_DONE = 9,
@@ -25082,7 +25088,7 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
  
  static const char interface_name[16] = "en0";   /* (bsd/dev/redwood_net.c makes one interface, and that is its name) */
  
-@@ -201,6 +204,7 @@ static LCK_GRP_DECLARE(apple80211_lock_group, "redwood-apple80211");
+@@ -201,6 +206,7 @@ static LCK_GRP_DECLARE(apple80211_lock_group, "redwood-apple80211");
  static LCK_MTX_DECLARE(apple80211_lock, &apple80211_lock_group);
  static unsigned result_next;                    /* which of what the last scan heard a SCAN_RESULT request gets next */
  static uint32_t join_result;                    /* of the last join asked for: 0 while it runs, then Apple80211's number */
@@ -25090,7 +25096,39 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
  
  /* ---- channels ---------------------------------------------------------------------------------------- */
  
-@@ -298,6 +302,55 @@ get(struct apple80211req *request)
+@@ -240,6 +246,22 @@ give(const struct apple80211req *request, const void *data, size_t length)
+ 	       request->req_len);
+ }
+ 
++/* Normalize driver RSSI into valid dBm bounds, falling back to -45 dBm when unreported. */
++static int32_t
++clamp_rssi(int32_t rssi)
++{
++	if (rssi >= 0 || rssi < -110) {
++		return -45;
++	}
++	if (rssi < -95) {
++		return -95;
++	}
++	if (rssi > -25) {
++		return -25;
++	}
++	return rssi;
++}
++
+ /* An access point in the form a scan's result has; the caller has said how much room for elements there is. */
+ static int
+ give_network(const struct apple80211req *request, const struct redwood_sta_bss *bss)
+@@ -258,7 +280,7 @@ give_network(const struct apple80211req *request, const struct redwood_sta_bss *
+ 	bzero(result, sizeof(*result));
+ 	result->version = 1;
+ 	channel_fill(&result->channel, bss->frequency, 0);
+-	result->rssi = bss->rssi;
++	result->rssi = (int16_t)clamp_rssi(bss->rssi);
+ 	result->beacon_interval = bss->beacon_interval;
+ 	result->capability = bss->capability;
+ 	memcpy(result->bssid, bss->bssid, sizeof(result->bssid));
+@@ -298,6 +320,55 @@ get(struct apple80211req *request)
  
  		return give(request, name, sizeof(name));
  	}
@@ -25146,10 +25184,20 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
  	case 12: {
  		/*
  		 * What the card can do, a bit each (apple80211_var.h: APPLE80211_CAP_*): the 13 bytes are the
-@@ -433,6 +486,47 @@ get(struct apple80211req *request)
- 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+@@ -424,15 +495,57 @@ get(struct apple80211req *request)
  		break;
  	}
+ 	case 16: {                              /* how strongly it is heard: dBm, per radio and all together, twice over */
++		int32_t rssi = clamp_rssi(state->bss.rssi);
++		struct {
++			uint32_t version, radios, unit;
++			int32_t each[4], all, each_ext[4], all_ext;
++		} answer = { .version = 1, .radios = 1, .each = { rssi }, .all = rssi,
++			     .each_ext = { rssi }, .all_ext = rssi };
++
++		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
++		break;
++	}
 +	case 106: {                             /* the bounds the strength is scaled between, in dBm (16 bytes asked): EXP-0224, a guess at the layout: version, low, high, 0 */
 +		struct {
 +			uint32_t version;
@@ -25160,14 +25208,16 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
 +		break;
 +	}
 +	case 17: {                              /* the noise floor, in the shape of the strength's answer (EXP-0221: the status bar's bars [guess]) */
-+		struct {
-+			uint32_t version, radios, unit;
-+			int32_t each[4], all, each_ext[4], all_ext;
+ 		struct {
+ 			uint32_t version, radios, unit;
+ 			int32_t each[4], all, each_ext[4], all_ext;
+-		} answer = { .version = 1, .radios = 1, .each = { state->bss.rssi }, .all = state->bss.rssi,
+-			     .each_ext = { state->bss.rssi }, .all_ext = state->bss.rssi };
 +		} answer = { .version = 1, .radios = 1, .each = { -95 }, .all = -95, .each_ext = { -95 }, .all_ext = -95 };
-+
-+		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
-+		break;
-+	}
+ 
+ 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
+ 		break;
+ 	}
 +	case 14: {                              /* the PHY mode: what the radio can do and what it is doing (11a 0x2, 11b 0x4, 11g 0x8, 11na 0x40, 11ng 0x80, 11ac 0x100) */
 +		struct {
 +			uint32_t version, phy_mode, active;
@@ -25194,7 +25244,7 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
  	case 103:                               /* all of it, as a scan's result */
  		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give_network(request, &state->bss);
  		break;
-@@ -589,6 +683,33 @@ set(const struct apple80211req *request, char *said, size_t said_size)
+@@ -589,6 +702,33 @@ set(const struct apple80211req *request, char *said, size_t said_size)
  	}
  	case 10:
  		return set_scan(request, said, said_size);
@@ -25228,7 +25278,7 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
  	default:
  		return EOPNOTSUPP;
  	}
-@@ -596,6 +717,100 @@ set(const struct apple80211req *request, char *said, size_t said_size)
+@@ -596,12 +736,110 @@ set(const struct apple80211req *request, char *said, size_t said_size)
  
  /* ---- events -------------------------------------------------------------------------------------------- */
  
@@ -25252,19 +25302,21 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
 +	uint32_t tx_fail, tx_retrans, tx_frames, rx_retry, rx_frames;
 +	uint8_t unused_3[0x40 - 0x28];
 +	uint32_t tx_rate, tx_fallback_rate, rx_rate;
-+	uint8_t rest[0xc0 - 0x4c];
++	uint8_t rest[0xb4 - 0x4c];
 +};
 +
 +_Static_assert(offsetof(struct apple80211_lqm_event, snr) == 0xc && offsetof(struct apple80211_lqm_event, noise) == 0x10 &&
 +    offsetof(struct apple80211_lqm_event, cca) == 0x13 && offsetof(struct apple80211_lqm_event, tx_fail) == 0x14 &&
 +    offsetof(struct apple80211_lqm_event, rx_frames) == 0x24 && offsetof(struct apple80211_lqm_event, tx_rate) == 0x40 &&
-+    offsetof(struct apple80211_lqm_event, rx_rate) == 0x48 && sizeof(struct apple80211_lqm_event) == 0xc0,
++    offsetof(struct apple80211_lqm_event, rx_rate) == 0x48 && sizeof(struct apple80211_lqm_event) == 0xb4,
 +    "the link-quality event as iOS 16.5 reads it");
++_Static_assert(KEV_MSG_HEADER_SIZE + sizeof(interface_name) + sizeof(struct apple80211_lqm_event) <= MLEN,
++    "the link-quality kernel event must fit in one mbuf");
 +
-+static void post(uint32_t code, const void *data, uint32_t length);
++static int post(uint32_t code, const void *data, uint32_t length);
 +static volatile unsigned lqm_seq;
 +
-+static void
+ static void
 +post_lqm(void)
 +{
 +	struct apple80211_lqm_event lqm = { 0 };
@@ -25276,11 +25328,8 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
 +	redwood_sta_state(state);
 +	if (state->phase == REDWOOD_STA_JOINED) {
 +		unsigned seq = __atomic_add_fetch(&lqm_seq, 1, __ATOMIC_ACQ_REL);
-+		int32_t rssi = state->bss.rssi;
++		int32_t rssi = clamp_rssi(state->bss.rssi);
 +
-+		if (rssi == 0 || rssi < -95 || rssi > -25) {
-+			rssi = (rssi < -95 && rssi >= -110) ? -95 : -45;
-+		}
 +		if (seq <= 8) {
 +			rssi -= (int32_t)(seq & 1u);
 +		}
@@ -25298,7 +25347,10 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
 +		lqm.tx_frames = seq * 16;
 +		lqm.rx_frames = seq * 24;
 +		lqm.tx_rate = lqm.tx_fallback_rate = lqm.rx_rate = 72;
-+		post(EVENT_LQM_CHANGED, &lqm, sizeof(lqm));
++		if (post(EVENT_LQM_CHANGED, &lqm, sizeof(lqm)) == 0 && seq == 1) {
++			redwood_wifi_tell("apple80211: lqm sent: rssi %d, snr %d, %u bytes\n",
++			    rssi, (int)lqm.snr, (unsigned)sizeof(lqm));
++		}
 +	}
 +	kfree_data(state, sizeof(*state));
 +}
@@ -25326,10 +25378,39 @@ index e2674ee51149d523c6e5054a5a6fd28a91947562..18ddc4e18a05ac57ffc959eae5db9e1e
 +	}
 +}
 +
- static void
++static int
  post(uint32_t code, const void *data, uint32_t length)
  {
-@@ -653,6 +868,10 @@ redwood_apple80211_event(enum redwood_sta_event event, int status)
++	static unsigned post_err_said;
+ 	struct kev_msg message = { .vendor_code = KEV_VENDOR_APPLE, .kev_class = KEV_IEEE80211_CLASS, .kev_subclass = 1,
+ 		                   .event_code = code };
+ 	char name[16];
++	int error;
+ 
+ 	memcpy(name, interface_name, sizeof(name));
+ 	message.dv[0].data_length = sizeof(name);
+@@ -610,7 +848,12 @@ post(uint32_t code, const void *data, uint32_t length)
+ 		message.dv[1].data_length = length;
+ 		message.dv[1].data_ptr = __DECONST(void *, data);
+ 	}
+-	kev_post_msg(&message);
++	error = kev_post_msg(&message);
++	if (error != 0 && __atomic_load_n(&post_err_said, __ATOMIC_RELAXED) < 32 &&
++	    __atomic_fetch_add(&post_err_said, 1, __ATOMIC_RELAXED) < 32) {
++		redwood_wifi_tell("apple80211: kev_post_msg failed: event %u, %u bytes, error %d\n", code, length, error);
++	}
++	return error;
+ }
+ 
+ /* What the station side says has happened (bsd/dev/redwood_sta.c calls this, on its thread or the station's). */
+@@ -647,12 +890,16 @@ redwood_apple80211_event(enum redwood_sta_event event, int status)
+ 
+ 		if (state != NULL) {
+ 			redwood_sta_state(state);
+-			link.rssi = status == 1 ? state->bss.rssi : 0;
++			link.rssi = status == 1 ? clamp_rssi(state->bss.rssi) : 0;
+ 			kfree_data(state, sizeof(*state));
+ 		}
  		post(EVENT_SSID_CHANGED, NULL, 0);
  		post(EVENT_BSSID_CHANGED, NULL, 0);
  		post(EVENT_LINK_CHANGED, &link, sizeof(link));
