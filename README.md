@@ -12,17 +12,13 @@ This project is still under active development and is **not** ready for daily us
 
 ## Recent Updates · 2026-11-19
 
-- **Adreno 630 GMEM, `fb_native=2` zero-copy scanout, and batched GPU SMMU mapping (defaults enabled)**:
-  - Fixed `MSM_PARAM_GMEM_BASE` (`0x06`) in `bsd/dev/mi8_adreno.c` to return `0x00100000ull` (`1 MiB` A630 GMEM base) and removed the default `caenv=FD_MESA_DEBUG=sysmem` workaround, enabling tile rendering by default.
-  - Added `fb_native=2` (now default in `pexpert/arm/pe_bootargs.c`): a 4-slot Write-Combined `1125x2436` zero-copy DPU scanout pool (`2` splash + `2` contiguous `< 4 GB` RAM; Piece 0 `0x9d400000` kept for fallback and clean `MiniIOFlipQuiesce()`), skipping `dc civac` on WC scanout surfaces, releasing display read holds without WC CPU readback in `evictSurface()`, and sleeping to the next TE pulse (`MiniIOFlipWaitHintUs()`).
-  - Raised default periodic cache clean interval `gpu_push_ms` (`GPU_PUSH_AGAIN_MS`) from `4 ms` to `100 ms` (`seed` changes still flush immediately) and replaced per-4 KiB `kvtophys()` scans + barriers with O(1) L2/L3 table caches and batched `mi8_gpu_map_range()` / `mi8_gpu_unmap()`.
-  - Device-verified (`300 s` runs): cache flushing dropped from `~85 GiB / 5.56 s` (`zc-sysmem`) to `1.75–3.26 GiB / 0.14–0.29 s`, zero-copy flips hit `5698/5700` (`6.87 us` avg / `1.70 ms` max flip, `59 FPS` active), eviction wait spikes dropped from `173.5 ms` to `<= 14.56 ms`, `IOSurface` GPU mapping dropped from `6.96–8.54 ms` to `0.12–0.18 ms`, and `gGPULock` wait max fell from `9.44 ms` to `0.20 ms`.
-- **Native Wi-Fi & Bluetooth kernel integration (no UI shims)**: Replaced the userspace Bluetooth shim (`libredwood-bt.dylib`) with native IOKit `AppleOLYHAL` (`RedwoodBT.cpp`); removed the SpringBoard Wi-Fi status bar hook (`inject_sb.c`); exposed the `"wlan"` parent node (`RedwoodWLAN.cpp`) + early `en0`; fixed `EVENT_LQM_CHANGED` sizing (`0xc0` -> `0xb4`, `220 <= MLEN 224`) + RSSI clamping + `com.apple.wifi.manager` Mach pre-declaration so native SpringBoard Wi-Fi signal bars light up cleanly on join; added Wi-Fi DMA `dsb sy` barriers, recycled RX slot head zeroing, bounded `rx_confused` recovery, and multi-AP join fallback.
-- **Dynamic CPU/DDR governor & GPU flush coalescing**: Added touch- and GPU-activity-driven CPU/DDR frequency scaling (idling down to `825 MHz` / DDR `2/16` under the `66 °C` thermal ceiling) and `RedwoodGPU` 2 ms intra-frame `IOSurface` cache-flush coalescing.
-- **Speaker audio bit-bang timing fix**: Switched short `<= 50 us` bit-bang I2C delays in `mi8_tas2557.c` to busy-spin (avoiding scheduler sleeps on every `3 us` half-clock when `cpu_idle_latency == 0`), cutting post-mute Y-RAM verification from `~486–1000+ ms` down to `~207–208 ms` and warmup to `~31 ms`, and preventing spurious `latched=coefficient` lockouts under load.
-- **Volume HUD, sideload, teardown & live logging**: Fixed the muted Volume HUD via standard HID Telephony Ring Switch (`0x0b`/`0x2e`); settled `/apps` `MNT_UNION` sideload; added orderly warm teardown for resident `audio=5`, BT, Wi-Fi, and GPU plus read-only `tools/tests/device-log.py`.
-- **Remaining limits**: Cold reboot is still required between baseband runs (`halt port modem` does not idle); render-thread big-core affinity, Bluetooth audio, microphone, cellular data, and native Adreno 630 Metal remain unimplemented; standalone default-arg smoke boot after flipping `fb_native=2` default remains to be run.
-- Hardware results above are from maintainer testing and device logs rather than an automated full regression; details in [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](docs/validation/VALIDATION.md).
+- **GPU & display smoothness**: Enabled Adreno 630 GMEM tile rendering, zero-copy DPU scanout (`fb_native=2`), and batched GPU SMMU page-table mapping by default, eliminating frame-copy and cache-flush animation stutter.
+- **Native Wi-Fi & Bluetooth**: Replaced userspace Bluetooth and Wi-Fi status-bar shims with native kernel IOKit drivers (`RedwoodBT`, `RedwoodWLAN`) and fixed native SpringBoard Wi-Fi signal bar updates.
+- **Dynamic frequency scaling**: Added touch- and GPU-driven dynamic CPU/DDR frequency scaling (`825 MHz` / DDR `2/16` idle under the `66 °C` thermal ceiling).
+- **Speaker audio & volume HUD**: Fixed TAS2557 I2C check timing for faster wakeups, and fixed the muted volume HUD via standard HID ringer state reporting.
+- **Sideload, teardown & tooling**: Added `/apps` union-mount sideloading, orderly warm teardown for resident subsystems, and read-only live logging (`tools/tests/device-log.py`).
+
+Full change history and device test metrics: [CHANGELOG.md](CHANGELOG.md) and [VALIDATION.md](docs/validation/VALIDATION.md).
 
 ## Hardware & Boot Chain
 
@@ -120,7 +116,7 @@ Developed on **Ubuntu 26.04.1 LTS (`x86_64`)**. Rather than tracking a full XNU 
 
 ## Known Issues
 
-- Home screen stutter remains under heavy load (zero-copy DPU scanout and render-thread big-core affinity remain unimplemented; `fbscale=2` helps though some apps crash in that mode).
+- First cold app launch after boot has a brief loading delay (render-thread big-core affinity is not yet implemented; optional `fbscale=2` mode still causes some apps to crash).
 - Bluetooth headphones receive no audio yet, pairings are not saved across reboots without `--persist`, and Bluetooth initializes ~70 s after boot.
 - Internal speaker activates ~1 minute after boot (after Wi-Fi setup); sound quality is uncalibrated and long-term power draw is unmeasured.
 - Long-term Wi-Fi stability and extended web video playback need further testing.

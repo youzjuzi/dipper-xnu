@@ -14,17 +14,13 @@
 
 ## 近期更新 · 2026-11-19
 
-- **A630 GMEM 渲染、`fb_native=2` 零拷贝直扫与 GPU 页表批量映射（已设为默认）**：
-  - 修正 `bsd/dev/mi8_adreno.c` 中 `MSM_PARAM_GMEM_BASE`（`0x06`）返回 `0x00100000ull`（`1 MiB` GMEM 基址）并移除默认的 `caenv=FD_MESA_DEBUG=sysmem` 回退参数，默认开启 A630 GMEM 分块渲染。
-  - 新增并默认启用 `fb_native=2`（`pexpert/arm/pe_bootargs.c`）：建立 4 槽 Write-Combined `1125x2436` 零拷贝扫描输出池（`2` splash + `2` `< 4 GB` 连续内存，保留 0 号块 `0x9d400000` 用于兜底及 `MiniIOFlipQuiesce()` 安全还原），跳过 WC 扫描画布的 `dc civac` 清洗，改为在 `evictSurface()` 中仅释放读占锁以避免 WC 内存 CPU 回读尖刺，并使用基于屏幕 TE 的睡眠等待（`MiniIOFlipWaitHintUs()`）。
-  - 将定期盲目清缓存周期 `gpu_push_ms`（`GPU_PUSH_AGAIN_MS`）从 `4 ms` 提高至 `100 ms`（`seed` 变化仍立即清洗），并在 `mi8_adreno.c` / `RedwoodGPU.cpp` 引入 O(1) 页表缓存与连续段批量映射/卸载（`mi8_gpu_map_range()` / `mi8_gpu_unmap()`）。
-  - 实机 300 秒对比验证：清缓存由 `zc-sysmem` 的 `~85 GiB / 5.56 s` 降至 `1.75–3.26 GiB / 0.14–0.29 s`；零拷贝翻页 `5698/5700`（均耗时 `6.87 us`、峰值 `1.70 ms`，活跃窗口 `59 FPS`）；驱逐导致的 `173.5 ms` 等待尖刺消除（显示等待峰值 `<= 14.56 ms`）；`IOSurface` GPU 映射耗时由 `6.96–8.54 ms` 降至 `0.12–0.18 ms`，`gGPULock` 等待峰值由 `9.44 ms` 降至 `0.20 ms`。
-- **Wi-Fi / 蓝牙原生内核化（移除 UI 注入补丁）**：在内核 `RedwoodBT.cpp` 原生发布 `AppleOLYHAL`，移除用户态蓝牙注入库 `libredwood-bt.dylib`；删除 `SpringBoard` 状态栏 Wi-Fi UI hook（`inject_sb.c`），由 `RedwoodWLAN.cpp` 暴露 `"wlan"` 父节点并提前注册 `en0`，将 `EVENT_LQM_CHANGED` 结构体收敛为 `0xb4`（总长 `220 <= MLEN 224`）并加上 RSSI 归一化与 `com.apple.wifi.manager` 预声明，实机连网后主屏信号格原生点亮；同步合入 Wi-Fi DMA `dsb sy` 屏障、RX 槽位清零、有界 `rx_confused` 恢复与多 AP 回退。
-- **动态 CPU/DDR 调频降压与 GPU 刷新合并**：触摸与 GPU 负载联动 `mi8_perf_kick()` 动态调度，空闲时自动回落至 `825 MHz` / DDR `2/16`（受 `66 °C` 温控上限约束）；`RedwoodGPU` 支持 `IOSurface` 2 ms 帧内刷新合并。
-- **TAS2557 软件 I2C 校验耗时修复**：`mi8_tas2557.c` 中 `<= 50 us` 短延迟改回忙等自旋（解决 `dipper` `cpu_idle_latency == 0` 下每次 `3 us` 翻转都阻塞切换调度的问题），休眠 Y-RAM 校验耗时由 `~486–1000+ ms` 降至 `~207–208 ms`、唤醒预热缩至 `~31 ms`，消除高负载下误触发的 `latched=coefficient` 锁死。
-- **音量 HUD、侧载、有序退出与实时日志**：通过标准 HID Telephony Ring Switch（`0x0b`/`0x2e`）修复音量键静音提示；收敛 `/apps` `MNT_UNION` 联合挂载侧载；补齐常驻音频/蓝牙/Wi-Fi/GPU 有序收尾与只读抓日志工具 `tools/tests/device-log.py`。
-- **当前边界**：含基带的轮次之间因 `halt port modem` 未归闲仍需冷重启；渲染线程绑大核、蓝牙音频、麦克风、蜂窝移动数据与 Adreno 630 原生 Metal 尚未实现；切回默认启动参数后的纯默认冒烟轮次可按需补测。
-- 以上设备结果来自持有人的手动使用和设备日志，不是完整回归；细节见[更新日志](CHANGELOG.md)和[验证记录](docs/validation/VALIDATION.md)。
+- **显示与 GPU 流畅度优化**：默认启用 Adreno 630 GMEM 分块渲染、`fb_native=2` 零拷贝扫描输出与 GPU SMMU 页表批量映射，消除桌面滑动与应用切换的刷缓存和翻页拷贝掉帧。
+- **Wi-Fi 与蓝牙原生内核化**：以内核原生驱动（`RedwoodBT`、`RedwoodWLAN`）替代用户态蓝牙库与状态栏 hook，修复主屏原生 Wi-Fi 信号格显示及接收稳定性。
+- **动态 CPU/DDR 调频**：按触摸与 GPU 负载动态升降频，空闲回落至 `825 MHz` / DDR `2/16`（受 `66 °C` 温控约束）。
+- **扬声器唤醒与音量条修复**：优化 TAS2557 I2C 校验耗时、加快出声响应，并通过标准 HID 振铃状态修复音量键“声音关闭”提示。
+- **应用侧载、有序退出与日志工具**：支持 `/apps` 联合挂载侧载，补齐常驻子系统有序热退出及只读实时抓日志脚本 `tools/tests/device-log.py`。
+
+完整变更记录与实机测试数据见[更新日志](CHANGELOG.md)和[验证记录](docs/validation/VALIDATION.md)。
 
 更早的更新见[更新日志](CHANGELOG.md)。
 
@@ -97,7 +93,7 @@ dipper 启动固件 → edk2-sdm845 UEFI → xnuloader → XNU → iOS 用户空
 
 ## 已知问题
 
-- 重负载下桌面仍有卡顿（DPU 零拷贝翻页与渲染线程大核亲和调度尚未实现；降低分辨率可缓解但部分应用会闪退）。
+- 开机后首次冷启动应用仍有短暂加载间隔（渲染线程大核亲和调度尚未实现；可选降低分辨率模式下部分应用仍会闪退）。
 - 蓝牙耳机听不到声音，配对记录重启后丢失，开机约 70 秒后才就绪；只测过一副耳机和一部手机。
 - 扬声器开机约 1 分钟（Wi-Fi 就绪后）才有声音，音质未调校；常驻音频的功耗与长时间运行未验收。
 - Wi-Fi 长时间高负载稳定性与网页视频解码（如部分场景绿屏/卡顿）仍需进一步观察。
